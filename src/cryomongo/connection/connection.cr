@@ -16,6 +16,7 @@ struct Mongo::Connection
       split = @server_description.address.split(':')
       host = split[0]
       socket = TCPSocket.new(split[0], split[1]? || 27017)
+      socket.tcp_nodelay = true
     end
 
     if @options.ssl || @options.tls
