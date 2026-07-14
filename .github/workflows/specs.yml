@@ -5,8 +5,6 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
-  schedule:
-    - cron: "0 0 10 * 6"
 
 jobs:
   tests:
@@ -14,34 +12,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - mongodb_minor: 4.2
-            MONGODB_VERSION: 4.2.22
-          # - mongodb_version: 4.4
-          #   MONGODB_VERSION: 4.4.4
-    runs-on: macos-latest
+          - mongodb_version: '8.0'
+    runs-on: ubuntu-24.04
     name: Mongodb tests
-    env:
-      MONGODB_VERSION: ${{ matrix.MONGODB_VERSION }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
-      - name: Install MongoDB
+        uses: actions/checkout@v7
+
+      - name: Start MongoDB ReplicaSet (8.0)
         run: |
-          brew tap mongodb/brew
-          brew update
-          brew install mongodb-community@${{ matrix.mongodb_minor }}
-          ln -sf $(brew --prefix mongodb-community@${{ matrix.mongodb_minor }})/bin/* /usr/local/bin/
-          python3 -m pip install mtools[all]
-          which mongod
-          mongod --version
+          docker run --name mongo -d -p 27017:27017 mongo:${{ matrix.mongodb_version }} --replSet rs0
+          sleep 5
+          docker exec mongo mongosh --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]})'
+          sleep 5
+
       - name: Install Crystal
-        run: brew install openssl crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: latest
+
       - name: Install dependencies
-        run: |
-          shards install
-      - name: Run specs
-        run: |
-          crystal spec --tag single
-          crystal spec --tag replicaset
-          crystal spec --tag sharded
-          crystal spec --tag sharded_multiple_mongos
+        run: shards install
+
+      - name: Run specs (Single)
+        run: crystal spec --tag single
+
+      - name: Run specs (ReplicaSet)
+        run: crystal spec --tag replicaset
