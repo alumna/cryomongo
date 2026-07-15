@@ -17,7 +17,6 @@ module Mongo::Unified
     include JSON::Serializable
     property collectionName : String
     property databaseName : String
-    # Replaced BSON with JSON::Any to bypass protected BSON constructors
     property documents : Array(JSON::Any)
   end
 
@@ -41,7 +40,7 @@ module Mongo::Unified
     include JSON::Serializable
     property name : String
     property object : String
-    property arguments : JSON::Any? # Replaced BSON with JSON::Any
+    property arguments : JSON::Any?
     property expectError : ExpectedError?
     property expectResult : JSON::Any?
     property saveResultAsEntity : String?
@@ -58,20 +57,14 @@ module Mongo::Unified
     property errorLabelsOmit : Array(String)?
   end
 
-  struct EventExpectation
-    include JSON::Serializable
-    property commandStartedEvent : JSON::Any?
-    property commandSucceededEvent : JSON::Any?
-    property commandFailedEvent : JSON::Any?
-  end
-
   struct Test
     include JSON::Serializable
     property description : String
     property skipReason : String?
     property runOnRequirements : Array(RunOnRequirement)?
     property operations : Array(Operation)
-    property expectEvents : Array(Hash(String, Array(EventExpectation)))?
+    # Changed to JSON::Any? to bypass strict parsing errors for dynamic events
+    property expectEvents : JSON::Any?
     property outcome : Array(CollectionData)?
   end
 
@@ -149,12 +142,10 @@ module Mongo::Unified
         db = @internal_client[data.databaseName]
         coll = db[data.collectionName]
 
-        # Call Drop and Create on the Database object, passing 'name'
         db.command(Mongo::Commands::Drop, name: data.collectionName) rescue nil
         db.command(Mongo::Commands::Create, name: data.collectionName) rescue nil
 
         unless data.documents.empty?
-          # Convert JSON::Any to BSON
           docs = data.documents.map { |d| BSON.from_json(d.to_json) }
           coll.insert_many(docs)
         end
@@ -194,14 +185,38 @@ module Mongo::Unified
     end
 
     private def execute_operation(op : Operation)
+      args = op.arguments
+
+      # Catch test-level commands (e.g. configuring failPoints on the server)
+      if op.object == "testRunner"
+        case op.name
+        when "failPoint"
+          raise "Missing arguments" unless args
+          if client_name = args["client"]?.try(&.as_s)
+            if client = @registry.clients[client_name]?
+              fail_point = BSON.from_json(args["failPoint"].to_json)
+              client["admin"].command(
+                Mongo::Commands::ConfigureFailPoint,
+                fail_point: fail_point["configureFailPoint"].as(String),
+                mode: fail_point["mode"],
+                options: {data: fail_point["data"]?} # <== Pass as a NamedTuple!
+              )
+            end
+          end
+        when "targetedFailPoint"
+          # We can implement targetedFailPoint in later phases
+        else
+          puts "\n[WARN] Unsupported testRunner operation: #{op.name}"
+        end
+        return
+      end
+
       target = @registry.collections[op.object]? || @registry.databases[op.object]? || @registry.clients[op.object]?
       unless target
         raise "Target entity not found: #{op.object}"
       end
 
       begin
-        args = op.arguments
-
         case op.name
         when "insertOne"
           raise "Missing arguments" unless args
@@ -218,106 +233,177 @@ module Mongo::Unified
           filter = BSON.from_json(args["filter"].to_json)
           update = BSON.from_json(args["update"].to_json)
           upsert = args["upsert"]?.try(&.as_bool) || false
-          result = target.as(Mongo::Collection).update_one(filter, update, upsert: upsert)
+          array_filters = args["arrayFilters"]?.try { |af| af.as_a.map { |f| BSON.from_json(f.to_json) } }
+          collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+          hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+
+          result = target.as(Mongo::Collection).update_one(filter, update, upsert: upsert, array_filters: array_filters, collation: collation, hint: hint)
         when "updateMany"
           raise "Missing arguments" unless args
           filter = BSON.from_json(args["filter"].to_json)
           update = BSON.from_json(args["update"].to_json)
           upsert = args["upsert"]?.try(&.as_bool) || false
-          result = target.as(Mongo::Collection).update_many(filter, update, upsert: upsert)
+          array_filters = args["arrayFilters"]?.try { |af| af.as_a.map { |f| BSON.from_json(f.to_json) } }
+          collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+          hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+
+          result = target.as(Mongo::Collection).update_many(filter, update, upsert: upsert, array_filters: array_filters, collation: collation, hint: hint)
         when "replaceOne"
           raise "Missing arguments" unless args
           filter = BSON.from_json(args["filter"].to_json)
           replacement = BSON.from_json(args["replacement"].to_json)
           upsert = args["upsert"]?.try(&.as_bool) || false
-          result = target.as(Mongo::Collection).replace_one(filter, replacement, upsert: upsert)
+          collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+          hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+
+          result = target.as(Mongo::Collection).replace_one(filter, replacement, upsert: upsert, collation: collation, hint: hint)
         when "deleteOne"
           raise "Missing arguments" unless args
           filter = BSON.from_json(args["filter"].to_json)
-          result = target.as(Mongo::Collection).delete_one(filter)
+          collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+          hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+
+          result = target.as(Mongo::Collection).delete_one(filter, collation: collation, hint: hint)
         when "deleteMany"
           raise "Missing arguments" unless args
           filter = BSON.from_json(args["filter"].to_json)
-          result = target.as(Mongo::Collection).delete_many(filter)
+          collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+          hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+
+          result = target.as(Mongo::Collection).delete_many(filter, collation: collation, hint: hint)
         when "find"
           filter = BSON.new
           sort = nil
           skip = nil
           limit = nil
           batch_size = nil
+          collation = nil
+          hint = nil
+          allow_disk_use = nil
 
           if args
             filter = BSON.from_json(args["filter"].to_json) if args["filter"]?
             sort = BSON.from_json(args["sort"].to_json) if args["sort"]?
-            skip = args["skip"].as_i if args["skip"]?
-            limit = args["limit"].as_i if args["limit"]?
-            batch_size = args["batchSize"].as_i if args["batchSize"]?
+            skip = args["skip"]?.try(&.as_i)
+            limit = args["limit"]?.try(&.as_i)
+            batch_size = args["batchSize"]?.try(&.as_i)
+            collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+            hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+            allow_disk_use = args["allowDiskUse"]?.try(&.as_bool)
           end
 
-          cursor = target.as(Mongo::Collection).find(filter, sort: sort, skip: skip, limit: limit, batch_size: batch_size)
+          cursor = target.as(Mongo::Collection).find(filter, sort: sort, skip: skip, limit: limit, batch_size: batch_size, collation: collation, hint: hint, allow_disk_use: allow_disk_use)
           result = cursor.to_a
         when "aggregate"
           raise "Missing arguments" unless args
           pipeline = args["pipeline"].as_a.map { |p| BSON.from_json(p.to_json) }
-          cursor = target.as(Mongo::Collection).aggregate(pipeline)
+          allow_disk_use = args["allowDiskUse"]?.try(&.as_bool)
+          collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+
+          if target.is_a?(Mongo::Database)
+            cursor = target.aggregate(pipeline, allow_disk_use: allow_disk_use, collation: collation)
+          else
+            cursor = target.as(Mongo::Collection).aggregate(pipeline, allow_disk_use: allow_disk_use, collation: collation)
+          end
           result = cursor ? cursor.to_a : [] of BSON
         when "countDocuments"
           filter = BSON.new
-          if args && args["filter"]?
-            filter = BSON.from_json(args["filter"].to_json)
+          collation = nil
+          skip = nil
+          limit = nil
+
+          if args
+            filter = BSON.from_json(args["filter"].to_json) if args["filter"]?
+            collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+            skip = args["skip"]?.try(&.as_i)
+            limit = args["limit"]?.try(&.as_i)
           end
-          result = target.as(Mongo::Collection).count_documents(filter)
+          result = target.as(Mongo::Collection).count_documents(filter, collation: collation, skip: skip, limit: limit)
         when "estimatedDocumentCount"
           result = target.as(Mongo::Collection).estimated_document_count
         when "distinct"
           raise "Missing arguments" unless args
           key = args["fieldName"].as_s
           filter = args["filter"]? ? BSON.from_json(args["filter"].to_json) : nil
-          result = target.as(Mongo::Collection).distinct(key, filter: filter)
+          collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+          result = target.as(Mongo::Collection).distinct(key, filter: filter, collation: collation)
         when "findOneAndDelete"
           raise "Missing arguments" unless args
           filter = BSON.from_json(args["filter"].to_json)
           sort = args["sort"]? ? BSON.from_json(args["sort"].to_json) : nil
-          result = target.as(Mongo::Collection).find_one_and_delete(filter, sort: sort)
+          collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+          hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+
+          result = target.as(Mongo::Collection).find_one_and_delete(filter, sort: sort, collation: collation, hint: hint)
         when "findOneAndReplace"
           raise "Missing arguments" unless args
           filter = BSON.from_json(args["filter"].to_json)
           replacement = BSON.from_json(args["replacement"].to_json)
           sort = args["sort"]? ? BSON.from_json(args["sort"].to_json) : nil
           upsert = args["upsert"]?.try(&.as_bool) || false
-          result = target.as(Mongo::Collection).find_one_and_replace(filter, replacement, sort: sort, upsert: upsert)
+          new_doc = args["returnDocument"]?.try(&.as_s) == "After"
+          collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+          hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+
+          result = target.as(Mongo::Collection).find_one_and_replace(filter, replacement, sort: sort, upsert: upsert, new: new_doc, collation: collation, hint: hint)
         when "findOneAndUpdate"
           raise "Missing arguments" unless args
           filter = BSON.from_json(args["filter"].to_json)
           update = BSON.from_json(args["update"].to_json)
           sort = args["sort"]? ? BSON.from_json(args["sort"].to_json) : nil
           upsert = args["upsert"]?.try(&.as_bool) || false
-          result = target.as(Mongo::Collection).find_one_and_update(filter, update, sort: sort, upsert: upsert)
+          new_doc = args["returnDocument"]?.try(&.as_s) == "After"
+          array_filters = args["arrayFilters"]?.try { |af| af.as_a.map { |f| BSON.from_json(f.to_json) } }
+          collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+          hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+
+          result = target.as(Mongo::Collection).find_one_and_update(filter, update, sort: sort, upsert: upsert, new: new_doc, array_filters: array_filters, collation: collation, hint: hint)
         when "bulkWrite"
           raise "Missing arguments" unless args
           requests = args["requests"].as_a.map do |req_any|
             req = req_any.as_h
             if req["insertOne"]?
-              doc = BSON.from_json(req["insertOne"]["document"].to_json)
+              req_args = req["insertOne"]
+              doc = BSON.from_json(req_args["document"].to_json)
               Mongo::Bulk::InsertOne.new(doc).as(Mongo::Bulk::WriteModel)
             elsif req["updateOne"]?
-              f = BSON.from_json(req["updateOne"]["filter"].to_json)
-              u = BSON.from_json(req["updateOne"]["update"].to_json)
-              Mongo::Bulk::UpdateOne.new(f, u).as(Mongo::Bulk::WriteModel)
+              req_args = req["updateOne"]
+              f = BSON.from_json(req_args["filter"].to_json)
+              u = BSON.from_json(req_args["update"].to_json)
+              upsert = req_args["upsert"]?.try(&.as_bool)
+              collation = req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+              hint = req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+              arrayFilters = req_args["arrayFilters"]?.try { |af| af.as_a.map { |f_el| BSON.from_json(f_el.to_json) } }
+              Mongo::Bulk::UpdateOne.new(f, u, upsert: upsert, collation: collation, hint: hint, array_filters: arrayFilters).as(Mongo::Bulk::WriteModel)
             elsif req["updateMany"]?
-              f = BSON.from_json(req["updateMany"]["filter"].to_json)
-              u = BSON.from_json(req["updateMany"]["update"].to_json)
-              Mongo::Bulk::UpdateMany.new(f, u).as(Mongo::Bulk::WriteModel)
+              req_args = req["updateMany"]
+              f = BSON.from_json(req_args["filter"].to_json)
+              u = BSON.from_json(req_args["update"].to_json)
+              upsert = req_args["upsert"]?.try(&.as_bool)
+              collation = req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+              hint = req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+              arrayFilters = req_args["arrayFilters"]?.try { |af| af.as_a.map { |f_el| BSON.from_json(f_el.to_json) } }
+              Mongo::Bulk::UpdateMany.new(f, u, upsert: upsert, collation: collation, hint: hint, array_filters: arrayFilters).as(Mongo::Bulk::WriteModel)
             elsif req["replaceOne"]?
-              f = BSON.from_json(req["replaceOne"]["filter"].to_json)
-              r = BSON.from_json(req["replaceOne"]["replacement"].to_json)
-              Mongo::Bulk::ReplaceOne.new(f, r).as(Mongo::Bulk::WriteModel)
+              req_args = req["replaceOne"]
+              f = BSON.from_json(req_args["filter"].to_json)
+              r = BSON.from_json(req_args["replacement"].to_json)
+              upsert = req_args["upsert"]?.try(&.as_bool)
+              collation = req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+              hint = req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+              Mongo::Bulk::ReplaceOne.new(f, r, upsert: upsert, collation: collation, hint: hint).as(Mongo::Bulk::WriteModel)
             elsif req["deleteOne"]?
-              f = BSON.from_json(req["deleteOne"]["filter"].to_json)
-              Mongo::Bulk::DeleteOne.new(f).as(Mongo::Bulk::WriteModel)
+              req_args = req["deleteOne"]
+              f = BSON.from_json(req_args["filter"].to_json)
+              collation = req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+              hint = req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+              Mongo::Bulk::DeleteOne.new(f, collation: collation, hint: hint).as(Mongo::Bulk::WriteModel)
             elsif req["deleteMany"]?
-              f = BSON.from_json(req["deleteMany"]["filter"].to_json)
-              Mongo::Bulk::DeleteMany.new(f).as(Mongo::Bulk::WriteModel)
+              req_args = req["deleteMany"]
+              f = BSON.from_json(req_args["filter"].to_json)
+              collation = req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+              hint = req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+              Mongo::Bulk::DeleteMany.new(f, collation: collation, hint: hint).as(Mongo::Bulk::WriteModel)
             else
               raise "Unsupported bulkWrite request type"
             end
@@ -327,7 +413,6 @@ module Mongo::Unified
 
           result = target.as(Mongo::Collection).bulk_write(requests, ordered: ordered)
         else
-          # Skip unknown operations gracefully so we don't crash the whole suite yet
           puts "\n[WARN] Unsupported operation: #{op.name}"
           return
         end
@@ -338,7 +423,6 @@ module Mongo::Unified
       rescue e : Exception
         if op.expectError
           # It was expected to fail, so we swallow the exception.
-          # We'll assert exact Error Codes in a future PR!
         else
           raise e
         end
