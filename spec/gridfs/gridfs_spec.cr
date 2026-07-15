@@ -64,7 +64,7 @@ describe Mongo::GridFS do
       file = File.new(file_path)
       gridfs.upload_from_stream("lorem.txt", stream: file, id: id)
 
-      sleep 0.5
+      sleep 0.5.seconds
 
       gridfs_file = gridfs.find({_id: id}).first
       gridfs_file.filename.should eq file_name
