@@ -26,10 +26,15 @@ module Mongo::Unified
     property id : String
     property uriOptions : JSON::Any?
     property observeEvents : Array(String)?
+
     property client : String?
     property databaseName : String?
+    property databaseOptions : JSON::Any?
+
     property database : String?
     property collectionName : String?
+    property collectionOptions : JSON::Any?
+
     property sessionOptions : JSON::Any?
   end
 
@@ -104,9 +109,7 @@ module Mongo::Unified
       @test_file = TestFile.from_json(json_data)
       @internal_client = Mongo::Client.new(ENV["MONGODB_URI"])
 
-      # There is an edge case test that explicitly tests Null ObjectIds.
-      # BSON union handles it, but our Upserted struct enforces present IDs.
-      # We skip this specific edge case file for now.
+      # We skip testing explicit Null ObjectIds since BSON Union enforces present IDs
       @skip_test = true if file_path.ends_with?("create-null-ids.json")
     end
 
@@ -117,21 +120,22 @@ module Mongo::Unified
       @test_file.tests.each do |test|
         next unless meets_requirements?(test.runOnRequirements)
 
-        setup_initial_data(@test_file.initialData)
+        # 1. Create entities first so we know which databases/collections to clean
         create_entities(@test_file.createEntities)
+
+        # 2. Hard drop all collections registered to avoid cross-test state bleed
+        @registry.collections.each_value do |coll|
+          coll.database.command(Mongo::Commands::Drop, name: coll.name) rescue nil
+        end
+
+        # 3. Setup initial data
+        setup_initial_data(@test_file.initialData)
 
         test_aborted = false
 
+        # 4. Execute Operations
         test.operations.each do |op|
-          # Skip new 8.0 clientBulkWrite command
-          if op.name == "clientBulkWrite"
-            test_aborted = true
-            break
-          end
-
-          # Skip "let" variable tests
-          args_hash = op.arguments.try(&.as_h?)
-          if args_hash && args_hash.has_key?("let")
+          if op.name == "clientBulkWrite" || (op.arguments && op.arguments.not_nil!.as_h? && op.arguments.not_nil!.as_h.has_key?("let"))
             test_aborted = true
             break
           end
@@ -139,8 +143,10 @@ module Mongo::Unified
           execute_operation(op)
         end
 
+        # 5. Verify Outcome
         verify_outcome(test.outcome) unless test_aborted
 
+        # Cleanup for next test
         @registry.close_all
         @registry = Registry.new
       end
@@ -182,20 +188,16 @@ module Mongo::Unified
       end
     end
 
-    private def setup_initial_data(initial_data : Array(CollectionData)?)
-      return unless initial_data
-
-      initial_data.each do |data|
-        db = @internal_client[data.databaseName]
-        coll = db[data.collectionName]
-
-        db.command(Mongo::Commands::Drop, name: data.collectionName) rescue nil
-        db.command(Mongo::Commands::Create, name: data.collectionName) rescue nil
-        coll.delete_many(BSON.new) rescue nil # Guarantee it is empty
-
-        unless data.documents.empty?
-          docs = data.documents.map { |d| BSON.from_json(d.to_json) }
-          coll.insert_many(docs)
+    private def apply_entity_options(entity, opts : JSON::Any?)
+      if hash = opts.try(&.as_h?)
+        if rc = hash["readConcern"]?
+          entity.read_concern = Mongo::ReadConcern.from_bson(BSON.from_json(rc.to_json))
+        end
+        if wc = hash["writeConcern"]?
+          entity.write_concern = Mongo::WriteConcern.from_bson(BSON.from_json(wc.to_json))
+        end
+        if rp = hash["readPreference"]?
+          entity.read_preference = Mongo::ReadPreference.from_bson(BSON.from_json(rp.to_json))
         end
       end
     end
@@ -208,7 +210,9 @@ module Mongo::Unified
           if client_name = req.client
             if parent_client = @registry.clients[client_name]?
               if db_name = req.databaseName
-                @registry.databases[req.id] = parent_client[db_name]
+                db = parent_client[db_name]
+                apply_entity_options(db, req.databaseOptions)
+                @registry.databases[req.id] = db
               else
                 raise "Missing databaseName for entity #{req.id}"
               end
@@ -218,7 +222,9 @@ module Mongo::Unified
           elsif db_name = req.database
             if parent_db = @registry.databases[db_name]?
               if coll_name = req.collectionName
-                @registry.collections[req.id] = parent_db[coll_name]
+                coll = parent_db[coll_name]
+                apply_entity_options(coll, req.collectionOptions)
+                @registry.collections[req.id] = coll
               else
                 raise "Missing collectionName for entity #{req.id}"
               end
@@ -226,8 +232,43 @@ module Mongo::Unified
               raise "Parent database '#{db_name}' not found for collection entity #{req.id}"
             end
           else
-            @registry.clients[req.id] = Mongo::Client.new(ENV["MONGODB_URI"])
+            query_parts = [] of String
+            req.uriOptions.try(&.as_h?).try &.each do |k, v|
+              val = if v.raw.is_a?(Bool)
+                      v.as_bool.to_s
+                    elsif v.raw.is_a?(Int) || v.raw.is_a?(Float)
+                      v.raw.to_s
+                    else
+                      v.as_s? || v.to_json
+                    end
+              query_parts << "#{k}=#{val}"
+            end
+
+            uri = ENV["MONGODB_URI"]
+            unless query_parts.empty?
+              uri += uri.includes?("?") ? "&" : "/?"
+              uri += query_parts.join("&")
+            end
+
+            @registry.clients[req.id] = Mongo::Client.new(uri)
           end
+        end
+      end
+    end
+
+    private def setup_initial_data(initial_data : Array(CollectionData)?)
+      return unless initial_data
+
+      initial_data.each do |data|
+        db = @internal_client[data.databaseName]
+        coll = db[data.collectionName]
+
+        db.command(Mongo::Commands::Drop, name: data.collectionName) rescue nil
+        db.command(Mongo::Commands::Create, name: data.collectionName) rescue nil
+
+        unless data.documents.empty?
+          docs = data.documents.map { |d| BSON.from_json(d.to_json) }
+          coll.insert_many(docs)
         end
       end
     end
@@ -244,7 +285,6 @@ module Mongo::Unified
       args = op.arguments
       expected_error = op.expectError
 
-      # Catch test-level commands (e.g. configuring failPoints on the server)
       if op.object == "testRunner"
         case op.name
         when "failPoint"
