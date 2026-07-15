@@ -8,23 +8,34 @@ on:
 
 jobs:
   tests:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - mongodb_version: '8.0'
+    # strategy:
+    #   fail-fast: false
+    #   matrix:
+    #     mongodb_version: ['8.0']
     runs-on: ubuntu-24.04
     name: Mongodb tests
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Start MongoDB ReplicaSet (8.0)
+      - name: Install MongoDB 8.0 & mtools
         run: |
-          docker run --name mongo -d -p 27017:27017 mongo:${{ matrix.mongodb_version }} --replSet rs0
-          sleep 5
-          docker exec mongo mongosh --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]})'
-          sleep 5
+          # Import the MongoDB public GPG Key
+          curl -fsSL https://www.mongodb.org/static/pgp/server-8.0.asc | \
+             sudo gpg -o /usr/share/keyrings/mongodb-server-8.0.gpg --dearmor
+          # Create list file for Ubuntu 24.04 (Noble)
+          echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg ] https://repo.mongodb.org/apt/ubuntu noble/mongodb-org/8.0 multiverse" | \
+             sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list
+          sudo apt-get update
+          sudo apt-get install -y mongodb-org
+
+          # Install mtools for mlaunch
+          python3 -m pip install mtools[all] --break-system-packages
+
+          # Verify installations
+          which mongod
+          mongod --version
+          mlaunch --version
 
       - name: Install Crystal
         uses: crystal-lang/install-crystal@v1

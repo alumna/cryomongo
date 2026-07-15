@@ -44,7 +44,7 @@ describe Mongo::GridFS do
         }
       }
 
-      sleep 0.5
+      sleep 0.5.seconds # or sleep 500.milliseconds
 
       gridfs_file = gridfs.find({_id: id}).first
       gridfs_file.filename.should eq file_name
@@ -114,7 +114,7 @@ describe Mongo::GridFS do
 
       files.each_with_index { |f, idx|
         f.filename.should eq "file_#{idx + 5}"
-        f._id.should eq (idx + 5)
+        f._id.should eq(idx + 5)
       }
     end
 
