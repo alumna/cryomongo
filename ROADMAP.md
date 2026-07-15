@@ -3,11 +3,11 @@
 This roadmap defines the implementation checklist against the official MongoDB driver specifications, ensuring 100% compliance.
 
 ## Core (Connection & Discovery)
-- [ ] connection-string
-- [ ] uri-options
-- [ ] server-discovery-and-monitoring (SDAM)
-- [ ] server-selection
-- [ ] connection-monitoring-and-pooling (CMAP)
+- [x] connection-string
+- [x] uri-options
+- [x] server-discovery-and-monitoring (SDAM)
+- [x] server-selection
+- [x] connection-monitoring-and-pooling (CMAP)
 - [ ] handshake (hello)
 - [ ] max-staleness
 - [ ] load-balancers

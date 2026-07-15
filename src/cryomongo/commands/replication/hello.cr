@@ -1,21 +1,23 @@
 require "bson"
 require "../commands"
 
-# *isMaster* returns a document that describes the role of the mongod instance.
+# *hello* returns a document that describes the role of the mongod instance.
 #
-# NOTE: [for more details, please check the official MongoDB documentation](https://docs.mongodb.com/manual/reference/command/isMaster/).
-module Mongo::Commands::IsMaster
+# NOTE: [for more details, please check the official MongoDB documentation](https://www.mongodb.com/docs/manual/reference/command/hello/).
+module Mongo::Commands::Hello
   extend Command
   extend self
 
   OS_TYPE = {% if host_flag?(:linux) %} "Linux" {% elsif host_flag?(:darwin) %} "Darwin" {% elsif host_flag?(:win32) %} "Windows" {% else %} "Unknown" {% end %}
 
   # Returns a pair of OP_MSG body and sequences associated with the command and arguments.
-  def command(appname : String? = nil)
+  def command(appname : String? = nil, legacy : Bool = false)
+    cmd_name = legacy ? "isMaster" : "hello"
     {BSON.new({
-      isMaster: 1,
-      "$db":    "admin",
-      client:   {
+      cmd_name  => 1,
+      "$db"     => "admin",
+      "helloOk" => true,
+      "client"  => {
         application: {
           name: appname || "cryomongo",
         },
@@ -25,17 +27,14 @@ module Mongo::Commands::IsMaster
         },
         os: {
           type: OS_TYPE,
-          # name: "unknown",
-          # architecture: "unknown",
-          # version: "unknown"
         },
-        # platform: "<string>"
       },
     }), nil}
   end
 
   Common.result(Result) {
     property ismaster : Bool = false
+    property isWritablePrimary : Bool = false
     property max_bson_object_size : Int32 = 16 * 1024 * 1024
     property max_message_size_bytes : Int32 = 48_000_000
     property max_write_batch_size : Int32 = 100_000
