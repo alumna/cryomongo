@@ -1,4 +1,5 @@
 require "json"
+require "semantic_version"
 require "../src/cryomongo"
 
 module Mongo::Unified
@@ -122,9 +123,15 @@ module Mongo::Unified
         test_aborted = false
 
         test.operations.each do |op|
-          # We gracefully skip tests that use the "let" binding feature for now,
-          # as it requires structural driver updates.
-          if op.arguments && op.arguments.not_nil!.as_h? && op.arguments.not_nil!.as_h.has_key?("let")
+          # Skip new 8.0 clientBulkWrite command
+          if op.name == "clientBulkWrite"
+            test_aborted = true
+            break
+          end
+
+          # Skip "let" variable tests
+          args_hash = op.arguments.try(&.as_h?)
+          if args_hash && args_hash.has_key?("let")
             test_aborted = true
             break
           end
@@ -144,16 +151,34 @@ module Mongo::Unified
     private def meets_requirements?(requirements : Array(RunOnRequirement)?) : Bool
       return true if requirements.nil? || requirements.empty?
 
+      mongo_version = SemanticVersion.new(8, 0, 0)
+
       requirements.any? do |req|
-        # If the test specifies a maxServerVersion older than 8.0, skip it
-        if max = req.maxServerVersion
-          return false if max.matches?(/^[0-7]\./)
+        ok = true
+
+        if min_str = req.minServerVersion
+          parts = min_str.split(".")
+          while parts.size < 3
+            parts << "0"
+          end
+          min_v = SemanticVersion.parse(parts.join("."))
+          ok = false if mongo_version < min_v
         end
-        # If the test specifically requires a different topology than our RS, skip it
+
+        if max_str = req.maxServerVersion
+          parts = max_str.split(".")
+          while parts.size < 3
+            parts << "0"
+          end
+          max_v = SemanticVersion.parse(parts.join("."))
+          ok = false if mongo_version > max_v
+        end
+
         if tops = req.topologies
-          return false unless tops.includes?("replicaset")
+          ok = false unless tops.includes?("replicaset")
         end
-        true
+
+        ok
       end
     end
 
@@ -166,6 +191,7 @@ module Mongo::Unified
 
         db.command(Mongo::Commands::Drop, name: data.collectionName) rescue nil
         db.command(Mongo::Commands::Create, name: data.collectionName) rescue nil
+        coll.delete_many(BSON.new) rescue nil # Guarantee it is empty
 
         unless data.documents.empty?
           docs = data.documents.map { |d| BSON.from_json(d.to_json) }
@@ -206,7 +232,6 @@ module Mongo::Unified
       end
     end
 
-    # Parses `update` safely whether it is a BSON Document or an Array (Aggregation Pipeline)
     private def parse_update_arg(update_json : JSON::Any)
       if update_json.as_a?
         update_json.as_a.map { |u| BSON.from_json(u.to_json) }
@@ -426,26 +451,22 @@ module Mongo::Unified
             end
           end
           ordered = args["ordered"]?.try(&.as_bool)
-          ordered = true if ordered.nil? # default is ordered
+          ordered = true if ordered.nil?
 
           target.as(Mongo::Collection).bulk_write(requests, ordered: ordered)
         else
           return
         end
 
-        # If it reached here, the operation SUCCEEDED.
-        # But if the test expected it to FAIL, we must raise a distinct error!
         if expected_error
           raise "TEST_FAILED: Expected operation to fail, but it succeeded."
         end
       rescue e : Exception
-        # If it's our own test failure signal, re-raise it immediately
         if e.message && e.message.not_nil!.starts_with?("TEST_FAILED")
           raise e
         elsif expected_error
-          # The operation successfully failed as requested by the test! We swallow the error.
+          # Expected error caught successfully!
         else
-          # The operation failed unexpectedly
           raise e
         end
       end
