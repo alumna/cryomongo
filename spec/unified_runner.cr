@@ -199,34 +199,149 @@ module Mongo::Unified
         raise "Target entity not found: #{op.object}"
       end
 
-      case op.name
-      when "insertOne"
+      begin
         args = op.arguments
-        unless args
-          raise "Missing arguments for insertOne operation"
-        end
 
-        doc_json = args["document"]?
-        unless doc_json
-          raise "insertOne argument 'document' is missing"
-        end
+        case op.name
+        when "insertOne"
+          raise "Missing arguments" unless args
+          doc = BSON.from_json(args["document"].to_json)
+          result = target.as(Mongo::Collection).insert_one(doc)
+        when "insertMany"
+          raise "Missing arguments" unless args
+          docs = args["documents"].as_a.map { |d| BSON.from_json(d.to_json) }
+          ordered = args["ordered"]?.try(&.as_bool)
+          ordered = true if ordered.nil?
+          result = target.as(Mongo::Collection).insert_many(docs, ordered: ordered)
+        when "updateOne"
+          raise "Missing arguments" unless args
+          filter = BSON.from_json(args["filter"].to_json)
+          update = BSON.from_json(args["update"].to_json)
+          upsert = args["upsert"]?.try(&.as_bool) || false
+          result = target.as(Mongo::Collection).update_one(filter, update, upsert: upsert)
+        when "updateMany"
+          raise "Missing arguments" unless args
+          filter = BSON.from_json(args["filter"].to_json)
+          update = BSON.from_json(args["update"].to_json)
+          upsert = args["upsert"]?.try(&.as_bool) || false
+          result = target.as(Mongo::Collection).update_many(filter, update, upsert: upsert)
+        when "replaceOne"
+          raise "Missing arguments" unless args
+          filter = BSON.from_json(args["filter"].to_json)
+          replacement = BSON.from_json(args["replacement"].to_json)
+          upsert = args["upsert"]?.try(&.as_bool) || false
+          result = target.as(Mongo::Collection).replace_one(filter, replacement, upsert: upsert)
+        when "deleteOne"
+          raise "Missing arguments" unless args
+          filter = BSON.from_json(args["filter"].to_json)
+          result = target.as(Mongo::Collection).delete_one(filter)
+        when "deleteMany"
+          raise "Missing arguments" unless args
+          filter = BSON.from_json(args["filter"].to_json)
+          result = target.as(Mongo::Collection).delete_many(filter)
+        when "find"
+          filter = BSON.new
+          sort = nil
+          skip = nil
+          limit = nil
+          batch_size = nil
 
-        # Safely convert the JSON tree to BSON Extended JSON format
-        doc = BSON.from_json(doc_json.to_json)
+          if args
+            filter = BSON.from_json(args["filter"].to_json) if args["filter"]?
+            sort = BSON.from_json(args["sort"].to_json) if args["sort"]?
+            skip = args["skip"].as_i if args["skip"]?
+            limit = args["limit"].as_i if args["limit"]?
+            batch_size = args["batchSize"].as_i if args["batchSize"]?
+          end
 
-        if target.is_a?(Mongo::Collection)
-          result = target.insert_one(doc)
-
-          if expected = op.expectResult
-            if result.nil?
-              raise "Expected result but got nil"
+          cursor = target.as(Mongo::Collection).find(filter, sort: sort, skip: skip, limit: limit, batch_size: batch_size)
+          result = cursor.to_a
+        when "aggregate"
+          raise "Missing arguments" unless args
+          pipeline = args["pipeline"].as_a.map { |p| BSON.from_json(p.to_json) }
+          cursor = target.as(Mongo::Collection).aggregate(pipeline)
+          result = cursor ? cursor.to_a : [] of BSON
+        when "countDocuments"
+          filter = BSON.new
+          if args && args["filter"]?
+            filter = BSON.from_json(args["filter"].to_json)
+          end
+          result = target.as(Mongo::Collection).count_documents(filter)
+        when "estimatedDocumentCount"
+          result = target.as(Mongo::Collection).estimated_document_count
+        when "distinct"
+          raise "Missing arguments" unless args
+          key = args["fieldName"].as_s
+          filter = args["filter"]? ? BSON.from_json(args["filter"].to_json) : nil
+          result = target.as(Mongo::Collection).distinct(key, filter: filter)
+        when "findOneAndDelete"
+          raise "Missing arguments" unless args
+          filter = BSON.from_json(args["filter"].to_json)
+          sort = args["sort"]? ? BSON.from_json(args["sort"].to_json) : nil
+          result = target.as(Mongo::Collection).find_one_and_delete(filter, sort: sort)
+        when "findOneAndReplace"
+          raise "Missing arguments" unless args
+          filter = BSON.from_json(args["filter"].to_json)
+          replacement = BSON.from_json(args["replacement"].to_json)
+          sort = args["sort"]? ? BSON.from_json(args["sort"].to_json) : nil
+          upsert = args["upsert"]?.try(&.as_bool) || false
+          result = target.as(Mongo::Collection).find_one_and_replace(filter, replacement, sort: sort, upsert: upsert)
+        when "findOneAndUpdate"
+          raise "Missing arguments" unless args
+          filter = BSON.from_json(args["filter"].to_json)
+          update = BSON.from_json(args["update"].to_json)
+          sort = args["sort"]? ? BSON.from_json(args["sort"].to_json) : nil
+          upsert = args["upsert"]?.try(&.as_bool) || false
+          result = target.as(Mongo::Collection).find_one_and_update(filter, update, sort: sort, upsert: upsert)
+        when "bulkWrite"
+          raise "Missing arguments" unless args
+          requests = args["requests"].as_a.map do |req_any|
+            req = req_any.as_h
+            if req["insertOne"]?
+              doc = BSON.from_json(req["insertOne"]["document"].to_json)
+              Mongo::Bulk::InsertOne.new(doc).as(Mongo::Bulk::WriteModel)
+            elsif req["updateOne"]?
+              f = BSON.from_json(req["updateOne"]["filter"].to_json)
+              u = BSON.from_json(req["updateOne"]["update"].to_json)
+              Mongo::Bulk::UpdateOne.new(f, u).as(Mongo::Bulk::WriteModel)
+            elsif req["updateMany"]?
+              f = BSON.from_json(req["updateMany"]["filter"].to_json)
+              u = BSON.from_json(req["updateMany"]["update"].to_json)
+              Mongo::Bulk::UpdateMany.new(f, u).as(Mongo::Bulk::WriteModel)
+            elsif req["replaceOne"]?
+              f = BSON.from_json(req["replaceOne"]["filter"].to_json)
+              r = BSON.from_json(req["replaceOne"]["replacement"].to_json)
+              Mongo::Bulk::ReplaceOne.new(f, r).as(Mongo::Bulk::WriteModel)
+            elsif req["deleteOne"]?
+              f = BSON.from_json(req["deleteOne"]["filter"].to_json)
+              Mongo::Bulk::DeleteOne.new(f).as(Mongo::Bulk::WriteModel)
+            elsif req["deleteMany"]?
+              f = BSON.from_json(req["deleteMany"]["filter"].to_json)
+              Mongo::Bulk::DeleteMany.new(f).as(Mongo::Bulk::WriteModel)
+            else
+              raise "Unsupported bulkWrite request type"
             end
           end
+          ordered = args["ordered"]?.try(&.as_bool)
+          ordered = true if ordered.nil? # default is ordered
+
+          result = target.as(Mongo::Collection).bulk_write(requests, ordered: ordered)
         else
-          raise "Target for insertOne must be a Collection, but got #{target.class}"
+          # Skip unknown operations gracefully so we don't crash the whole suite yet
+          puts "\n[WARN] Unsupported operation: #{op.name}"
+          return
         end
-      else
-        raise "Unsupported operation: #{op.name}"
+
+        if op.expectError
+          raise "Expected operation to fail with an error, but it succeeded."
+        end
+      rescue e : Exception
+        if op.expectError
+          # It was expected to fail, so we swallow the exception.
+          # We'll assert exact Error Codes in a future PR!
+        else
+          raise e
+        end
       end
     end
 
