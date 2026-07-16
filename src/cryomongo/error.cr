@@ -19,9 +19,9 @@ module Mongo
 
     def retryable_read?
       self.is_a?(Error::Network) || (
-        self.is_a?(Error::Command) && self.retryable_code?
+        self.is_a?(Error::Command) && self.retryable_read_code?
       ) || (
-        self.is_a?(Error::CommandWrite) && self.errors.any?(&.retryable_code?)
+        self.is_a?(Error::CommandWrite) && self.errors.any?(&.retryable_read_code?)
       )
     end
 
@@ -108,6 +108,8 @@ module Mongo
     SHUTDOWN_CODES      = {11600, 91}
     # See: https://github.com/mongodb/specifications/blob/master/source/retryable-writes/retryable-writes.rst#determining-retryable-errors
     RETRYABLE_CODES = {6, 7, 89, 91, 189, 262, 9001, 10107, 11600, 11602, 13435, 13436}
+    # See: https://github.com/mongodb/specifications/blob/master/source/retryable-reads/retryable-reads.rst#retryable-error
+    RETRYABLE_READ_CODES = RETRYABLE_CODES + {133, 134}
     # See: https://github.com/mongodb/specifications/blob/f1fcb6aa9751e5ed7eb8e64c0f08f1edf10a859a/source/change-streams/change-streams.rst#resumable-error
     RESUMABLE_CODES = {63, 133, 150, 234, 13388, 133} + RETRYABLE_CODES
 
@@ -143,6 +145,10 @@ module Mongo
       @code.in?(RETRYABLE_CODES)
     end
 
+    def retryable_read_code?
+      @code.in?(RETRYABLE_READ_CODES)
+    end
+
     def resumable?
       @code.in? RESUMABLE_CODES
     end
@@ -156,15 +162,14 @@ module Mongo
   class Error::CommandWrite < Error::Server
     getter errors = [] of Error::Command
 
-    def initialize(errors : BSON)
+    def initialize(errors : BSON, *, @error_labels = Set(String).new)
       errors.each { |_, error|
         error = error.as(BSON)
         err_code = error["code"]?
         err_code_name = error["codeName"]?.try &.as(String)
         err_msg = error["errmsg"]?.try &.as(String)
-        err_labels = error["errorLabels"]?.try { |labels| Array(String).from_bson(labels) } || [] of String
         details = error["errInfo"]?.try &.as(BSON)
-        @errors << Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: Set(String).new(err_labels))
+        @errors << Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: @error_labels)
       }
     end
 
@@ -177,7 +182,7 @@ module Mongo
   class Error::WriteConcern < Error::Command
     getter details : BSON?
 
-    def initialize(error : BSON)
+    def initialize(error : BSON, *, @error_labels = Set(String).new)
       @code = error["code"]?.try(&.as(Int).to_i32) || 0
       @message = error["errmsg"]?.try(&.as(String)) || ""
       @details = error["errInfo"]?.try &.as(BSON)
