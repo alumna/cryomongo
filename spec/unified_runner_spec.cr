@@ -17,7 +17,7 @@ describe "Unified Test Runner" do
 
   # Recursively generate a test for every JSON file
   Dir.glob("spec/tests/unified/**/*.json").sort.each do |file|
-    it "executes #{file} successfully" do
+    it "executes: #{file}" do
       runner = Mongo::Unified::Runner.new(file)
       runner.run
     end
