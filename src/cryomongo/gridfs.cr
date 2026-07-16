@@ -1,5 +1,6 @@
 require "./database"
 require "./error"
+require "pipe"
 
 # GridFS is a specification for storing and retrieving files that exceed the BSON-document size limit of 16 MB.
 module Mongo::GridFS
@@ -50,7 +51,7 @@ module Mongo::GridFS
       @chunk_size_bytes : Int32 = 255 * 1024,
       @write_concern : WriteConcern? = nil,
       @read_concern : ReadConcern? = nil,
-      @read_preference : ReadPreference? = nil
+      @read_preference : ReadPreference? = nil,
     )
     end
 
@@ -83,18 +84,16 @@ module Mongo::GridFS
       *,
       id = nil,
       chunk_size_bytes : Int32? = nil,
-      metadata = nil
+      metadata = nil,
     ) : IO
       id ||= BSON::ObjectId.new
       chunk_size : Int32 = chunk_size_bytes || @chunk_size_bytes
 
       check_indexes(bucket, chunks)
 
-      reader, writer = IO.pipe
-      reader.buffer_size = chunk_size
-      writer.buffer_size = chunk_size
+      reader, writer = Pipe.create(capacity: chunk_size)
 
-      spawn same_thread: true do
+      spawn do
         index = 0
         length = 0_i64
         buffer = Bytes.new(chunk_size)
@@ -182,7 +181,7 @@ module Mongo::GridFS
       *,
       id : FileID = nil,
       chunk_size_bytes : Int32? = nil,
-      metadata = nil
+      metadata = nil,
     ) forall FileID
       id ||= BSON::ObjectId.new
       chunk_size_bytes ||= @chunk_size_bytes
@@ -232,11 +231,9 @@ module Mongo::GridFS
       count = chunk_count(file)
       remaining = file.length
 
-      reader, writer = IO.pipe
-      reader.buffer_size = file.chunk_size.to_i32
-      writer.buffer_size = file.chunk_size.to_i32
+      reader, writer = Pipe.create(capacity: file.chunk_size.to_i32!)
 
-      spawn same_thread: true do
+      spawn do
         count.times { |n|
           chunk = get_chunk(id, n)
           integrity_check!(file, chunk, remaining)
@@ -304,11 +301,10 @@ module Mongo::GridFS
     def open_download_stream_by_name(filename : String, revision : Int32 = -1) : IO
       file = get_file_by_name(filename, revision)
       count = chunk_count(file)
-      reader, writer = IO.pipe
-      reader.buffer_size = file.chunk_size.to_i32
-      writer.buffer_size = file.chunk_size.to_i32
 
-      spawn same_thread: true do
+      reader, writer = Pipe.create(capacity: file.chunk_size.to_i32!)
+
+      spawn do
         remaining = file.length
         count.times { |n|
           chunk = get_chunk(file._id, n)
@@ -376,7 +372,7 @@ module Mongo::GridFS
       max_time_ms : Int64? = nil,
       no_cursor_timeout : Bool? = nil,
       skip : Int32? = nil,
-      sort = nil
+      sort = nil,
     ) : Cursor::Wrapper(File(BSON::Value))
       cursor = bucket.find(
         filter,

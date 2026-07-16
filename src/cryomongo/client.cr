@@ -22,7 +22,7 @@ class Mongo::Client
   # The mininum wire protocol version supported by this driver.
   MIN_WIRE_VERSION = 6
   # The maximum wire protocol version supported by this driver.
-  MAX_WIRE_VERSION = 8
+  MAX_WIRE_VERSION = 25
 
   # :nodoc:
   getter! topology : SDAM::TopologyDescription
@@ -205,7 +205,7 @@ class Mongo::Client
     server_description : SDAM::ServerDescription? = nil,
     session : Session::ClientSession? = nil,
     operation_id : Int64? = nil,
-    **args
+    **args,
   )
     self.command(cmd, write_concern, read_concern, read_preference, server_description, session, operation_id, **args) { |result|
       result
@@ -220,7 +220,7 @@ class Mongo::Client
     server_description : SDAM::ServerDescription? = nil,
     session : Session::ClientSession? = nil,
     operation_id : Int64? = nil,
-    **args
+    **args,
   )
     # Mix collection/database/client/options read and write concerns considering the precedence rules.
     # args = args.merge({
@@ -297,7 +297,7 @@ class Mongo::Client
     filter = nil,
     name_only : Bool? = nil,
     authorized_databases : Bool? = nil,
-    session : Session::ClientSession? = nil
+    session : Session::ClientSession? = nil,
   ) : Commands::ListDatabases::Result
     self.command(Commands::ListDatabases, session: session, options: {
       filter:               filter,
@@ -343,7 +343,7 @@ class Mongo::Client
     start_after : BSON? = nil,
     read_concern : ReadConcern? = nil,
     read_preference : ReadPreference? = nil,
-    session : Session::ClientSession? = nil
+    session : Session::ClientSession? = nil,
   ) : Mongo::ChangeStream::Cursor
     ChangeStream::Cursor.new(
       client: self,
@@ -440,7 +440,7 @@ class Mongo::Client
     server_description : SDAM::ServerDescription,
     connection : Mongo::Connection,
     operation_id : Int64? = nil,
-    **args
+    **args,
   )
     execute_command(command, session, read_preference, server_description, connection, operation_id, **args) { }
   end
@@ -452,7 +452,8 @@ class Mongo::Client
     server_description : SDAM::ServerDescription,
     connection : Mongo::Connection,
     operation_id : Int64? = nil,
-    **args
+    **args,
+    &
   )
     # Reject for this special case.
     if command == Mongo::Commands::FindAndModify && args["options"]?.try(&.["hint"]?) && server_description.max_wire_version < 8
@@ -467,6 +468,28 @@ class Mongo::Client
 
     # Extract the actual BSON depending on the target command.
     body, sequences = command.command(**args)
+
+    if unacknowledged
+      has_hint = body.has_key?("hint")
+      if !has_hint && sequences
+        has_hint = true if sequences.values.any? { |docs|
+                             docs.is_a?(Array) && docs.any? { |doc| doc.is_a?(BSON) && doc.has_key?("hint") }
+                           }
+      end
+
+      if has_hint
+        if command == Commands::Update || command == Commands::FindAndModify
+          if server_description.max_wire_version < 8
+            raise Mongo::Error.new("Option hint is prohibited when performing an unacknowledged write on servers < 4.2.")
+          end
+        elsif command == Commands::Delete
+          if server_description.max_wire_version < 9
+            raise Mongo::Error.new("Option hint is prohibited when performing an unacknowledged write on servers < 4.4.")
+          end
+        end
+      end
+    end
+
     flag_bits = unacknowledged ? Messages::OpMsg::Flags::MoreToCome : Messages::OpMsg::Flags::None
 
     # Apply session rules.
@@ -501,7 +524,7 @@ class Mongo::Client
     }
 
     # Command monitoring related variables.
-    duration_start = Time.monotonic
+    duration_start = Time.instant
     request_id = uninitialized Int64
     command_name = command.name
     address = connection.server_description.address
@@ -530,7 +553,7 @@ class Mongo::Client
         request_id: request_id,
         operation_id: operation_id,
         address: address,
-        duration: Time.monotonic - duration_start,
+        duration: duration_start.elapsed,
         reply: BSON.new({ok: 1})
       ))
 
@@ -540,7 +563,7 @@ class Mongo::Client
     # Receive the server sent OP_MSG.
     op_msg = connection.receive do |message|
       op_msg = message.contents.as(Messages::OpMsg)
-      duration = Time.monotonic - duration_start
+      duration = duration_start.elapsed
 
       # Monitor.
       if @commands_observable.has_subscribers?
@@ -694,7 +717,7 @@ class Mongo::Client
     read_preference : ReadPreference,
     server_description : SDAM::ServerDescription? = nil,
     operation_id : Int64? = nil,
-    **args
+    **args,
   )
     server_description ||= server_selection(command, args, read_preference)
     connection = get_connection(server_description)
@@ -784,7 +807,7 @@ class Mongo::Client
     read_preference : ReadPreference,
     server_description : SDAM::ServerDescription? = nil,
     operation_id : Int64? = nil,
-    **args
+    **args,
   )
     server_description ||= server_selection(command, args, read_preference)
     connection = get_connection(server_description)
@@ -1025,21 +1048,6 @@ class Mongo::Client
       if session.is_transaction?
         raise Error::Transaction.new("Transactions do not support unacknowledged write concerns.")
       end
-
-      prohibited_option = nil
-      UNACKNOWLEDGED_WRITE_PROHIBITED_OPTIONS.each { |option|
-        if args["options"]?.try { |item| item.has_key?(option) && !item[option]?.nil? }
-          prohibited_option = option
-          break
-        elsif args["updates"]?.try(&.any? { |item| item.has_key?(option) && !item[option]?.nil? })
-          prohibited_option = option
-          break
-        elsif args["deletes"]?.try(&.any? { |item| item.has_key?(option) && !item[option]?.nil? })
-          prohibited_option = option
-          break
-        end
-      }
-      raise Mongo::Error.new("Option #{prohibited_option} is prohibited when performing an unacknowledged write.") if prohibited_option
     end
 
     !unacknowledged

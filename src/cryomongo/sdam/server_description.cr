@@ -1,4 +1,4 @@
-require "../commands/replication/is_master"
+require "../commands/replication/hello"
 
 class Mongo::SDAM::ServerDescription
   enum ServerType
@@ -63,7 +63,7 @@ class Mongo::SDAM::ServerDescription
     {% end %}
   end
 
-  def initialize(address : String, is_master_result : Commands::IsMaster::Result, @round_trip_time : Time::Span)
+  def initialize(address : String, hello_result : Commands::Hello::Result, @round_trip_time : Time::Span)
     @address = address.downcase
     from_is_master(%w(
       min_wire_version
@@ -78,25 +78,25 @@ class Mongo::SDAM::ServerDescription
       me
       election_id
       tags
-    ), is_master_result)
+    ), hello_result)
 
     @last_update_time = Time.utc
-    @last_write_date = is_master_result.last_write.try &.["lastWriteDate"]?.try &.as(Time)
-    @op_time = is_master_result.last_write.try &.["opTime"]?.try &.as(BSON)
+    @last_write_date = hello_result.last_write.try &.["lastWriteDate"]?.try &.as(Time)
+    @op_time = hello_result.last_write.try &.["opTime"]?.try &.as(BSON)
 
-    if is_master_result.msg === "isdbgrid"
+    if hello_result.msg === "isdbgrid"
       @type = :mongos
-    elsif is_master_result.isreplicaset
+    elsif hello_result.isreplicaset
       @type = :rs_ghost
-    elsif is_master_result.set_name.nil?
+    elsif hello_result.set_name.nil?
       @type = :standalone
-    elsif is_master_result.ismaster
+    elsif hello_result.ismaster || hello_result.isWritablePrimary # <== Check both legacy and modern keys
       @type = :rs_primary
-    elsif is_master_result.hidden
+    elsif hello_result.hidden
       @type = :rs_other
-    elsif is_master_result.secondary
+    elsif hello_result.secondary
       @type = :rs_secondary
-    elsif is_master_result.arbiter_only
+    elsif hello_result.arbiter_only
       @type = :rs_arbiter
     else
       @type = :rs_other

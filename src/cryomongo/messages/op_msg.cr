@@ -111,7 +111,7 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
     sections.find(&.is_a? SectionBody).not_nil!.as(SectionBody).payload
   end
 
-  def each_sequence
+  def each_sequence(&)
     sections.each { |section|
       if section.is_a? SectionDocumentSequence
         yield section.payload.sequence_identifier, section.payload.contents
@@ -151,7 +151,7 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
 
   def safe_payload(command)
     # see: https://github.com/mongodb/specifications/blob/master/source/command-monitoring/command-monitoring.rst#security
-    if command.is_a?(Commands::IsMaster) && self.body["speculativeAuthenticate"]?
+    if command.is_a?(Commands::Hello) && self.body["speculativeAuthenticate"]?
       BSON.new
     else
       payload = BSON.new(self.body)

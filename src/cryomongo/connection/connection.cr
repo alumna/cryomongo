@@ -44,11 +44,12 @@ struct Mongo::Connection
     @socket = socket
   end
 
-  def handshake(*, send_metadata = false, appname = nil)
+  def handshake(*, send_metadata = false, appname = nil, legacy = false)
     if send_metadata
-      body, _ = Commands::IsMaster.command(appname: appname)
+      body, _ = Commands::Hello.command(appname: appname, legacy: legacy)
     else
-      body = BSON.new({isMaster: 1, "$db": "admin"})
+      cmd_name = legacy ? "isMaster" : "hello"
+      body = BSON.new({cmd_name => 1, "$db" => "admin", "helloOk" => true})
     end
 
     if @credentials.username && !@credentials.mechanism
@@ -61,15 +62,19 @@ struct Mongo::Connection
 
     response = uninitialized Mongo::Messages::OpMsg
     round_trip_time = Time.measure {
-      send(request, Commands::IsMaster, log: false)
+      send(request, Commands::Hello, log: false)
       response = receive(log: false)
     }
 
     if error = response.error?
+      # Fallback to legacy isMaster if 'hello' command is not found (Mongo < 4.4)
+      if !legacy && error.is_a?(Mongo::Error::Command) && error.code == 59
+        return handshake(send_metadata: send_metadata, appname: appname, legacy: true)
+      end
       raise error
     end
 
-    result = Commands::IsMaster.result(response.body)
+    result = Commands::Hello.result(response.body)
 
     if result.sasl_supported_mechs
       @sasl_supported_mechs = result.sasl_supported_mechs
