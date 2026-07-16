@@ -468,6 +468,28 @@ class Mongo::Client
 
     # Extract the actual BSON depending on the target command.
     body, sequences = command.command(**args)
+
+    if unacknowledged
+      has_hint = body.has_key?("hint")
+      if !has_hint && sequences
+        has_hint = true if sequences.values.any? { |docs|
+                             docs.is_a?(Array) && docs.any? { |doc| doc.is_a?(BSON) && doc.has_key?("hint") }
+                           }
+      end
+
+      if has_hint
+        if command == Commands::Update || command == Commands::FindAndModify
+          if server_description.max_wire_version < 8
+            raise Mongo::Error.new("Option hint is prohibited when performing an unacknowledged write on servers < 4.2.")
+          end
+        elsif command == Commands::Delete
+          if server_description.max_wire_version < 9
+            raise Mongo::Error.new("Option hint is prohibited when performing an unacknowledged write on servers < 4.4.")
+          end
+        end
+      end
+    end
+
     flag_bits = unacknowledged ? Messages::OpMsg::Flags::MoreToCome : Messages::OpMsg::Flags::None
 
     # Apply session rules.
@@ -1026,25 +1048,6 @@ class Mongo::Client
       if session.is_transaction?
         raise Error::Transaction.new("Transactions do not support unacknowledged write concerns.")
       end
-
-      # NOTE: Spec historically required drivers to omit these or raise. Tests currently expect the driver
-      # to not raise a client error, so we omit the raise to satisfy the UTF framework expectation.
-
-      # prohibited_option = nil
-      # UNACKNOWLEDGED_WRITE_PROHIBITED_OPTIONS.each { |option|
-      #   if args["options"]?.try { |item| item.has_key?(option) && !item[option]?.nil? }
-      #     prohibited_option = option
-      #     break
-      #   elsif args["updates"]?.try(&.any? { |item| item.has_key?(option) && !item[option]?.nil? })
-      #     prohibited_option = option
-      #     break
-      #   elsif args["deletes"]?.try(&.any? { |item| item.has_key?(option) && !item[option]?.nil? })
-      #     prohibited_option = option
-      #     break
-      #   end
-      # }
-
-      # raise Mongo::Error.new("Option #{prohibited_option} is prohibited when performing an unacknowledged write.") if prohibited_option
     end
 
     !unacknowledged

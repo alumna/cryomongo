@@ -297,6 +297,7 @@ class Mongo::Bulk
       ordered: @ordered,
     })
 
+    result = nil
     if type == InsertOne
       result = @collection.command(Commands::Insert, documents: group, options: options, session: @session, operation_id: operation_id)
     elsif type == DeleteOne
@@ -313,7 +314,9 @@ class Mongo::Bulk
       raise Mongo::Bulk::Error.new "Invalid Operation"
     end
 
-    merge_results(results, result.not_nil!, index_offset)
+    if result
+      merge_results(results, result, index_offset)
+    end
 
     index_offset += group.size
     group.clear

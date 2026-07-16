@@ -113,6 +113,10 @@ module Mongo::Unified
       @skip_test = true if file_path.ends_with?("create-null-ids.json")
     end
 
+    private def json_to_bson_value(json : JSON::Any)
+      BSON.from_json(%({"v": #{json.to_json}}))["v"]
+    end
+
     def run
       return if @skip_test
       return unless meets_requirements?(@test_file.runOnRequirements)
@@ -316,6 +320,34 @@ module Mongo::Unified
 
       begin
         case op.name
+        when "createIndex"
+          raise "Missing arguments" unless args
+          keys = BSON.from_json(args["keys"].to_json)
+          opts_bson = BSON.new
+          args.as_h.each do |k, v|
+            next if k == "keys"
+            opts_bson[k] = json_to_bson_value(v)
+          end
+          model = BSON.new({"keys" => keys, "options" => opts_bson})
+          target.as(Mongo::Collection).create_indexes([model])
+        when "modifyCollection"
+          raise "Missing arguments" unless args
+          coll_name = args["collection"].as_s
+
+          # Build a NamedTuple for the options so the compiler is happy
+          validator = args["validator"]? ? json_to_bson_value(args["validator"]) : nil
+          validation_level = args["validationLevel"]? ? args["validationLevel"].as_s : nil
+          validation_action = args["validationAction"]? ? args["validationAction"].as_s : nil
+
+          target.as(Mongo::Database).command(
+            Mongo::Commands::CollMod,
+            collection: coll_name,
+            options: {
+              validator:         validator,
+              validation_level:  validation_level,
+              validation_action: validation_action,
+            }
+          )
         when "insertOne"
           raise "Missing arguments" unless args
           doc = BSON.from_json(args["document"].to_json)
