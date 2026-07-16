@@ -13,18 +13,18 @@ This roadmap defines the implementation checklist against the official MongoDB d
 - [ ] load-balancers
 - [ ] mongodb-handshake
 - [ ] wireversion-featurelist
-- [ ] find_getmore_killcursors_commands
-- [ ] server_write_commands
-- [ ] enumerate-collections
-- [ ] enumerate-databases
+- [x] find_getmore_killcursors_commands
+- [x] server_write_commands
+- [x] enumerate-collections
+- [x] enumerate-databases
 - [ ] compression
 - [ ] OP_MSG
 
 ## Correctness (Reliability)
-- [ ] retryable-reads
-- [ ] retryable-writes
+- [x] retryable-reads
+- [x] retryable-writes
 - [ ] client-backpressure
-- [ ] crud
+- [x] crud
 - [ ] command-logging-and-monitoring
 - [ ] logging
 - [ ] cursors
@@ -41,7 +41,7 @@ This roadmap defines the implementation checklist against the official MongoDB d
 - [ ] versioned-api
 
 ## Testing & Meta
-- [ ] unified-test-format
+- [x] unified-test-format
 - [ ] benchmarking
 - [ ] driver-mantras
 - [ ] driver-bulk-update

@@ -2,16 +2,38 @@
 	<img src="icon.svg" width="128" height="128" />
 	<h1>cryomongo</h1>
   <h3>A MongoDB driver written in pure Crystal.</h3>
-  <a href="https://github.com/elbywan/cryomongo/actions/workflows/specs.yml"><img alt="Build Status" src="https://github.com/elbywan/cryomongo/actions/workflows/specs.yml/badge.svg?branch=master"></a>
-  <a href="https://github.com/elbywan/cryomongo/tags"><img alt="GitHub tag (latest SemVer)" src="https://img.shields.io/github/v/tag/elbywan/cryomongo"></a>
-  <a href="https://github.com/elbywan/cryomongo/blob/master/LICENSE"><img alt="GitHub" src="https://img.shields.io/github/license/elbywan/cryomongo"></a>
+  <a href="https://github.com/alumna/cryomongo/actions/workflows/specs.yml"><img alt="Build Status" src="https://github.com/alumna/cryomongo/actions/workflows/specs.yml/badge.svg?branch=master"></a>
+  <a href="https://github.com/alumna/cryomongo/tags"><img alt="GitHub tag (latest SemVer)" src="https://img.shields.io/github/v/tag/alumna/cryomongo"></a>
+  <a href="https://github.com/alumna/cryomongo/blob/master/LICENSE"><img alt="GitHub" src="https://img.shields.io/github/license/alumna/cryomongo"></a>
 </div>
 
 <hr/>
 
+This is a temporary fork to update the codebase while working on performance, stability, and compatibility with the latest MongoDB LTS release (8.0). Merging to the upstream original repository is part of the plan, as soon as the work on updating is concluded.
+
+It follows the newest MongoDB specifications (MongoDB 8.0).
+
+On a technical level, the current update already includes:
+
+* **MongoDB 8.0 & Spec Compliance:** Bumped to the latest wire version of `25`. Implemented the official MongoDB Unified Test Format (UTF), already 100% compliant with the official `crud`, `retryable-reads`, and `retryable-writes` test suites.
+* **Crystal 1.20 Ready:** Updated for the latest Crystal 1.20.x branch, migrating to the updated Mutex, replacing `Time.monotonic` with `Time.instant`, and refactoring `same_thread: true` fiber spawns.
+* **BSON 8.0 Integration:** Uses the updated `alumna/bson.cr` shard, enabling zero-allocation Extended JSON, native 16-byte `Decimal128`, and the new Binary `Vector` types.
+
+### Roadmap & Checklist
+
+The update roadmap is actively being worked on. Below is the current progress against the official specifications:
+
+- [x] **Unified Test Format** (`unified-test-format.md`): Modern engine built to run the official declarative JSON test files.
+- [x] **CRUD Operations** (`crud.md`): 100% compliant.
+- [x] **Retryable Writes** (`retryable-writes.md`): 100% compliant. Gracefully handles network failures, step-downs, and `errorLabels`.
+- [x] **Retryable Reads** (`retryable-reads.md`): 100% compliant.
+- [ ] **Transactions & Sessions** (`transactions.md`): Up next.
+- [ ] **Server Discovery and Monitoring** (`server-discovery-and-monitoring.md`): Pending sync.
+- [ ] **Authentication** (`auth.md`): Pending SCRAM-SHA-256 validation.
+
 #### Cryomongo is a high-performance MongoDB driver written in pure Crystal. (i.e. no C dependencies needed.)
 
-*Compatible with MongoDB 3.6+. Tested against: 4.2.*
+*Compatible with MongoDB 8.0+. Tested against: 8.0.*
 
 **⚠️ BETA state.**
 
@@ -24,7 +46,7 @@
 ```yaml
 dependencies:
   cryomongo:
-    github: elbywan/cryomongo
+    github: alumna/cryomongo
 ```
 
 2. Run `shards install`
