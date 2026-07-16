@@ -19,9 +19,9 @@ module Mongo
 
     def retryable_read?
       self.is_a?(Error::Network) || (
-        self.is_a?(Error::Command) && self.retryable_code?
+        self.is_a?(Error::Command) && self.retryable_read_code?
       ) || (
-        self.is_a?(Error::CommandWrite) && self.errors.any?(&.retryable_code?)
+        self.is_a?(Error::CommandWrite) && self.errors.any?(&.retryable_read_code?)
       )
     end
 
@@ -108,6 +108,8 @@ module Mongo
     SHUTDOWN_CODES      = {11600, 91}
     # See: https://github.com/mongodb/specifications/blob/master/source/retryable-writes/retryable-writes.rst#determining-retryable-errors
     RETRYABLE_CODES = {6, 7, 89, 91, 189, 262, 9001, 10107, 11600, 11602, 13435, 13436}
+    # See: https://github.com/mongodb/specifications/blob/master/source/retryable-reads/retryable-reads.rst#retryable-error
+    RETRYABLE_READ_CODES = RETRYABLE_CODES + {133, 134}
     # See: https://github.com/mongodb/specifications/blob/f1fcb6aa9751e5ed7eb8e64c0f08f1edf10a859a/source/change-streams/change-streams.rst#resumable-error
     RESUMABLE_CODES = {63, 133, 150, 234, 13388, 133} + RETRYABLE_CODES
 
@@ -141,6 +143,10 @@ module Mongo
 
     def retryable_code?
       @code.in?(RETRYABLE_CODES)
+    end
+
+    def retryable_read_code?
+      @code.in?(RETRYABLE_READ_CODES)
     end
 
     def resumable?

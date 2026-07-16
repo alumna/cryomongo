@@ -35,6 +35,8 @@ module Mongo::Unified
     property collectionName : String?
     property collectionOptions : JSON::Any?
 
+    property bucketOptions : JSON::Any?
+
     property sessionOptions : JSON::Any?
   end
 
@@ -87,6 +89,7 @@ module Mongo::Unified
     property clients = Hash(String, Mongo::Client).new
     property databases = Hash(String, Mongo::Database).new
     property collections = Hash(String, Mongo::Collection).new
+    property buckets = Hash(String, Mongo::GridFS::Bucket).new
     property sessions = Hash(String, Mongo::Session::ClientSession).new
 
     def close_all
@@ -253,31 +256,8 @@ module Mongo::Unified
 
       entities.each do |entity_map|
         entity_map.each do |key, req|
-          if client_name = req.client
-            if parent_client = @registry.clients[client_name]?
-              if db_name = req.databaseName
-                db = parent_client[db_name]
-                apply_entity_options(db, req.databaseOptions)
-                @registry.databases[req.id] = db
-              else
-                raise "Missing databaseName for entity #{req.id}"
-              end
-            else
-              raise "Parent client '#{client_name}' not found for database entity #{req.id}"
-            end
-          elsif db_name = req.database
-            if parent_db = @registry.databases[db_name]?
-              if coll_name = req.collectionName
-                coll = parent_db[coll_name]
-                apply_entity_options(coll, req.collectionOptions)
-                @registry.collections[req.id] = coll
-              else
-                raise "Missing collectionName for entity #{req.id}"
-              end
-            else
-              raise "Parent database '#{db_name}' not found for collection entity #{req.id}"
-            end
-          else
+          case key
+          when "client"
             query_parts = [] of String
             req.uriOptions.try(&.as_h?).try &.each do |k, v|
               val = if v.raw.is_a?(Bool)
@@ -297,6 +277,43 @@ module Mongo::Unified
             end
 
             @registry.clients[req.id] = Mongo::Client.new(uri)
+          when "database"
+            if client_name = req.client
+              if parent_client = @registry.clients[client_name]?
+                if db_name = req.databaseName
+                  db = parent_client[db_name]
+                  apply_entity_options(db, req.databaseOptions)
+                  @registry.databases[req.id] = db
+                else
+                  raise "Missing databaseName for entity #{req.id}"
+                end
+              else
+                raise "Parent client '#{client_name}' not found for database entity #{req.id}"
+              end
+            end
+          when "collection"
+            if db_name = req.database
+              if parent_db = @registry.databases[db_name]?
+                if coll_name = req.collectionName
+                  coll = parent_db[coll_name]
+                  apply_entity_options(coll, req.collectionOptions)
+                  @registry.collections[req.id] = coll
+                else
+                  raise "Missing collectionName for entity #{req.id}"
+                end
+              else
+                raise "Parent database '#{db_name}' not found for collection entity #{req.id}"
+              end
+            end
+          when "bucket"
+            if db_name = req.database
+              if parent_db = @registry.databases[db_name]?
+                bucket = parent_db.grid_fs
+                @registry.buckets[req.id] = bucket
+              else
+                raise "Parent database '#{db_name}' not found for bucket entity #{req.id}"
+              end
+            end
           end
         end
       end
@@ -332,7 +349,13 @@ module Mongo::Unified
       args = op.arguments
       expected_error = op.expectError
 
-      if op.object == "testRunner"
+      target = nil
+      unless op.object == "testRunner"
+        target = @registry.collections[op.object]? || @registry.databases[op.object]? || @registry.clients[op.object]? || @registry.buckets[op.object]?
+        raise "Target entity not found: #{op.object}" unless target
+      end
+
+      begin
         case op.name
         when "failPoint"
           raise "Missing arguments" unless args
@@ -347,15 +370,32 @@ module Mongo::Unified
               )
             end
           end
-        end
-        return
-      end
-
-      target = @registry.collections[op.object]? || @registry.databases[op.object]? || @registry.clients[op.object]?
-      raise "Target entity not found: #{op.object}" unless target
-
-      begin
-        case op.name
+        when "createEntities"
+          raise "Missing arguments" unless args
+          entities = Array(Hash(String, EntityRequest)).from_json(args["entities"].to_json)
+          create_entities(entities)
+        when "assertSessionPinned"
+          raise "Missing arguments" unless args
+          session_id = args["session"].as_s
+          if session = @registry.sessions[session_id]?
+            raise "TEST_FAILED: Expected session #{session_id} to be pinned" unless session.server_description
+          end
+        when "assertSessionUnpinned"
+          raise "Missing arguments" unless args
+          session_id = args["session"].as_s
+          if session = @registry.sessions[session_id]?
+            raise "TEST_FAILED: Expected session #{session_id} to be unpinned" if session.server_description
+          end
+        when "download"
+          raise "Missing arguments" unless args
+          id = json_to_bson_value(args["id"])
+          stream = IO::Memory.new
+          target.as(Mongo::GridFS::Bucket).download_to_stream(id, stream)
+        when "downloadByName"
+          raise "Missing arguments" unless args
+          filename = args["filename"].as_s
+          stream = IO::Memory.new
+          target.as(Mongo::GridFS::Bucket).download_to_stream_by_name(filename, stream)
         when "createIndex"
           raise "Missing arguments" unless args
           keys = BSON.from_json(args["keys"].to_json)
@@ -370,7 +410,6 @@ module Mongo::Unified
           raise "Missing arguments" unless args
           coll_name = args["collection"].as_s
 
-          # Build a NamedTuple for the options so the compiler is happy
           validator = args["validator"]? ? json_to_bson_value(args["validator"]) : nil
           validation_level = args["validationLevel"]? ? args["validationLevel"].as_s : nil
           validation_action = args["validationAction"]? ? args["validationAction"].as_s : nil
@@ -484,10 +523,6 @@ module Mongo::Unified
           command_name = args["commandName"].as_s
           command_bson = BSON.from_json(args["command"].to_json)
           target.as(Mongo::Database).command(RawCommand.new(command_name), command_bson: command_bson)
-        when "createEntities"
-          raise "Missing arguments" unless args
-          entities = Array(Hash(String, EntityRequest)).from_json(args["entities"].to_json)
-          create_entities(entities)
         when "createChangeStream"
           pipeline = args && args["pipeline"]? ? args["pipeline"].as_a.map { |p| BSON.from_json(p.to_json) } : [] of BSON
           if target.is_a?(Mongo::Collection)
@@ -496,18 +531,6 @@ module Mongo::Unified
             target.watch(pipeline)
           elsif target.is_a?(Mongo::Client)
             target.watch(pipeline)
-          end
-        when "assertSessionPinned"
-          raise "Missing arguments" unless args
-          session_id = args["session"].as_s
-          if session = @registry.sessions[session_id]?
-            raise "TEST_FAILED: Expected session #{session_id} to be pinned" unless session.server_description
-          end
-        when "assertSessionUnpinned"
-          raise "Missing arguments" unless args
-          session_id = args["session"].as_s
-          if session = @registry.sessions[session_id]?
-            raise "TEST_FAILED: Expected session #{session_id} to be unpinned" if session.server_description
           end
         when "aggregate"
           raise "Missing arguments" unless args
