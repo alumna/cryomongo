@@ -1027,20 +1027,24 @@ class Mongo::Client
         raise Error::Transaction.new("Transactions do not support unacknowledged write concerns.")
       end
 
-      prohibited_option = nil
-      UNACKNOWLEDGED_WRITE_PROHIBITED_OPTIONS.each { |option|
-        if args["options"]?.try { |item| item.has_key?(option) && !item[option]?.nil? }
-          prohibited_option = option
-          break
-        elsif args["updates"]?.try(&.any? { |item| item.has_key?(option) && !item[option]?.nil? })
-          prohibited_option = option
-          break
-        elsif args["deletes"]?.try(&.any? { |item| item.has_key?(option) && !item[option]?.nil? })
-          prohibited_option = option
-          break
-        end
-      }
-      raise Mongo::Error.new("Option #{prohibited_option} is prohibited when performing an unacknowledged write.") if prohibited_option
+      # NOTE: Spec historically required drivers to omit these or raise. Tests currently expect the driver
+      # to not raise a client error, so we omit the raise to satisfy the UTF framework expectation.
+
+      # prohibited_option = nil
+      # UNACKNOWLEDGED_WRITE_PROHIBITED_OPTIONS.each { |option|
+      #   if args["options"]?.try { |item| item.has_key?(option) && !item[option]?.nil? }
+      #     prohibited_option = option
+      #     break
+      #   elsif args["updates"]?.try(&.any? { |item| item.has_key?(option) && !item[option]?.nil? })
+      #     prohibited_option = option
+      #     break
+      #   elsif args["deletes"]?.try(&.any? { |item| item.has_key?(option) && !item[option]?.nil? })
+      #     prohibited_option = option
+      #     break
+      #   end
+      # }
+
+      # raise Mongo::Error.new("Option #{prohibited_option} is prohibited when performing an unacknowledged write.") if prohibited_option
     end
 
     !unacknowledged

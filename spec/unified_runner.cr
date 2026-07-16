@@ -135,7 +135,13 @@ module Mongo::Unified
 
         # 4. Execute Operations
         test.operations.each do |op|
-          if op.name == "clientBulkWrite" || (op.arguments && op.arguments.not_nil!.as_h? && op.arguments.not_nil!.as_h.has_key?("let"))
+          if op.name == "clientBulkWrite"
+            test_aborted = true
+            break
+          end
+
+          args_hash = op.arguments.try(&.as_h?)
+          if args_hash && args_hash.has_key?("let")
             test_aborted = true
             break
           end
@@ -265,6 +271,7 @@ module Mongo::Unified
 
         db.command(Mongo::Commands::Drop, name: data.collectionName) rescue nil
         db.command(Mongo::Commands::Create, name: data.collectionName) rescue nil
+        coll.delete_many(BSON.new) rescue nil
 
         unless data.documents.empty?
           docs = data.documents.map { |d| BSON.from_json(d.to_json) }
