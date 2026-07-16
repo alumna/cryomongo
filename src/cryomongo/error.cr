@@ -156,15 +156,14 @@ module Mongo
   class Error::CommandWrite < Error::Server
     getter errors = [] of Error::Command
 
-    def initialize(errors : BSON)
+    def initialize(errors : BSON, *, @error_labels = Set(String).new)
       errors.each { |_, error|
         error = error.as(BSON)
         err_code = error["code"]?
         err_code_name = error["codeName"]?.try &.as(String)
         err_msg = error["errmsg"]?.try &.as(String)
-        err_labels = error["errorLabels"]?.try { |labels| Array(String).from_bson(labels) } || [] of String
         details = error["errInfo"]?.try &.as(BSON)
-        @errors << Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: Set(String).new(err_labels))
+        @errors << Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: @error_labels)
       }
     end
 
@@ -177,7 +176,7 @@ module Mongo
   class Error::WriteConcern < Error::Command
     getter details : BSON?
 
-    def initialize(error : BSON)
+    def initialize(error : BSON, *, @error_labels = Set(String).new)
       @code = error["code"]?.try(&.as(Int).to_i32) || 0
       @message = error["errmsg"]?.try(&.as(String)) || ""
       @details = error["errInfo"]?.try &.as(BSON)
