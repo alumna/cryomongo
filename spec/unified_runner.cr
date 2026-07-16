@@ -655,7 +655,7 @@ module Mongo::Unified
           raise "TEST_FAILED: Expected operation to fail, but it succeeded."
         end
       rescue e : Exception
-        if e.message && e.message.not_nil!.starts_with?("TEST_FAILED")
+        if e.message.try &.starts_with?("TEST_FAILED")
           raise e
         elsif expected_error
           # Expected error caught successfully!
