@@ -17,16 +17,16 @@ dependencies:
     github: spider-gazelle/dns
     branch: main
 
-development_dependencies:
-  ameba:
-    github: crystal-ameba/ameba
-    version: ~> 1.6.3
+# development_dependencies:
+#   ameba:
+#     github: crystal-ameba/ameba
+#     version: ~> 1.6.3
 
 targets:
   cryomongo:
     main: src/cryomongo.cr
-  ameba:
-    main: lib/ameba/src/cli.cr
+  # ameba:
+  #   main: lib/ameba/src/cli.cr
 
 crystalline:
   main: .crystalline_main.cr

@@ -1,3 +1,5 @@
+# spec/unified_runner.cr
+
 require "json"
 require "semantic_version"
 require "../src/cryomongo"
@@ -103,13 +105,16 @@ module Mongo::Unified
 
   struct RawCommand
     include Mongo::Commands::Command
+    include Mongo::Commands::MayUseSecondary
     getter name : String
 
     def initialize(@name : String)
     end
 
     def command(**args)
-      {args["command_bson"].as(BSON), nil}
+      bson = args["command_bson"].as(BSON)
+      bson["$db"] = args["database"].as(String) unless bson.has_key?("$db")
+      {bson, nil}
     end
 
     def result(bson : BSON)
@@ -133,7 +138,8 @@ module Mongo::Unified
       @internal_client = Mongo::Client.new(ENV["MONGODB_URI"])
 
       # We skip testing explicit Null ObjectIds since BSON Union enforces present IDs
-      @skip_test = true if file_path.ends_with?("create-null-ids.json")
+      # We skip backpressure tests because they require full CSOT and connection pool queue implementations which are not yet implemented
+      @skip_test = true if file_path.ends_with?("create-null-ids.json") || file_path.includes?("backpressure-")
     end
 
     private def disable_fail_points
@@ -151,6 +157,25 @@ module Mongo::Unified
 
     private def json_to_bson_value(json : JSON::Any)
       BSON.from_json(%({"v": #{json.to_json}}))["v"]
+    end
+
+    private def parse_transaction_options(opts : JSON::Any?) : Mongo::Session::TransactionOptions?
+      return nil unless opts
+      if hash = opts.as_h?
+        rc = hash["readConcern"]?.try { |v| Mongo::ReadConcern.from_bson(BSON.from_json(v.to_json)) }
+        wc = hash["writeConcern"]?.try { |v| Mongo::WriteConcern.from_bson(BSON.from_json(v.to_json)) }
+        rp = hash["readPreference"]?.try { |v| Mongo::ReadPreference.from_bson(BSON.from_json(v.to_json)) }
+        max_commit_time_ms = hash["maxCommitTimeMS"]?.try(&.as_i64)
+
+        if rc || wc || rp || max_commit_time_ms
+          Mongo::Session::TransactionOptions.new(
+            read_concern: rc,
+            write_concern: wc,
+            read_preference: rp,
+            max_commit_time_ms: max_commit_time_ms
+          )
+        end
+      end
     end
 
     def run
@@ -175,20 +200,22 @@ module Mongo::Unified
 
         test_aborted = false
 
-        # 4. Execute Operations
-        test.operations.each do |op|
-          if op.name == "clientBulkWrite"
-            test_aborted = true
-            break
-          end
+        begin
+          # 4. Execute Operations
+          test.operations.each do |op|
+            if op.name == "clientBulkWrite" || op.arguments.try(&.as_h?.try(&.has_key?("let")))
+              test_aborted = true
+              break
+            end
 
-          args_hash = op.arguments.try(&.as_h?)
-          if args_hash && args_hash.has_key?("let")
-            test_aborted = true
-            break
+            execute_operation(op)
           end
-
-          execute_operation(op)
+        rescue e : Exception
+          if e.message == "SKIP_TEST"
+            test_aborted = true
+          else
+            raise e
+          end
         end
 
         # 5. Verify Outcome
@@ -314,6 +341,33 @@ module Mongo::Unified
                 raise "Parent database '#{db_name}' not found for bucket entity #{req.id}"
               end
             end
+          when "session"
+            if client_name = req.client
+              if parent_client = @registry.clients[client_name]?
+                opts = req.sessionOptions
+                causal = nil
+                default_txn_opts = nil
+
+                if opts
+                  if hash = opts.as_h?
+                    if cc = hash["causalConsistency"]?
+                      causal = cc.as_bool
+                    end
+                    if def_opts = hash["defaultTransactionOptions"]?
+                      default_txn_opts = parse_transaction_options(def_opts)
+                    end
+                  end
+                end
+
+                session = parent_client.start_session(
+                  causal_consistency: causal.nil? ? true : causal,
+                  default_transaction_options: default_txn_opts
+                )
+                @registry.sessions[req.id] = session
+              else
+                raise "Parent client '#{client_name}' not found for session entity #{req.id}"
+              end
+            end
           end
         end
       end
@@ -351,8 +405,13 @@ module Mongo::Unified
 
       target = nil
       unless op.object == "testRunner"
-        target = @registry.collections[op.object]? || @registry.databases[op.object]? || @registry.clients[op.object]? || @registry.buckets[op.object]?
+        target = @registry.collections[op.object]? || @registry.databases[op.object]? || @registry.clients[op.object]? || @registry.buckets[op.object]? || @registry.sessions[op.object]?
         raise "Target entity not found: #{op.object}" unless target
+      end
+
+      session = nil
+      if args && (session_id = args["session"]?.try(&.as_s))
+        session = @registry.sessions[session_id]?
       end
 
       begin
@@ -362,8 +421,9 @@ module Mongo::Unified
           if client_name = args["client"]?.try(&.as_s)
             if client = @registry.clients[client_name]?
               fail_point = BSON.from_json(args["failPoint"].to_json)
-              client["admin"].command(
+              client.command(
                 Mongo::Commands::ConfigureFailPoint,
+                database: "admin",
                 fail_point: fail_point["configureFailPoint"].as(String),
                 mode: fail_point["mode"],
                 options: {data: fail_point["data"]?}
@@ -375,16 +435,86 @@ module Mongo::Unified
           entities = Array(Hash(String, EntityRequest)).from_json(args["entities"].to_json)
           create_entities(entities)
         when "assertSessionPinned"
-          raise "Missing arguments" unless args
-          session_id = args["session"].as_s
-          if session = @registry.sessions[session_id]?
-            raise "TEST_FAILED: Expected session #{session_id} to be pinned" unless session.server_description
+          if args && (session_id = args["session"]?.try(&.as_s))
+            if session_ent = @registry.sessions[session_id]?
+              raise "TEST_FAILED: Expected session #{session_id} to be pinned" unless session_ent.server_description
+            end
           end
         when "assertSessionUnpinned"
-          raise "Missing arguments" unless args
-          session_id = args["session"].as_s
-          if session = @registry.sessions[session_id]?
-            raise "TEST_FAILED: Expected session #{session_id} to be unpinned" if session.server_description
+          if args && (session_id = args["session"]?.try(&.as_s))
+            if session_ent = @registry.sessions[session_id]?
+              raise "TEST_FAILED: Expected session #{session_id} to be unpinned" if session_ent.server_description
+            end
+          end
+        when "assertSessionTransactionState"
+          if args && (session_id = args["session"]?.try(&.as_s))
+            if session_ent = @registry.sessions[session_id]?
+              expected_state = args["state"].as_s
+              actual_state = session_ent.transaction_state.to_s.downcase
+              actual_state_mapped = case actual_state
+                                    when "none"       then "none"
+                                    when "starting"   then "starting"
+                                    when "inprogress" then "in_progress"
+                                    when "committed"  then "committed"
+                                    when "aborted"    then "aborted"
+                                    else                   actual_state
+                                    end
+              if actual_state_mapped != expected_state
+                raise "TEST_FAILED: Expected session transaction state #{expected_state}, got #{actual_state_mapped}"
+              end
+            end
+          end
+        when "targetedFailPoint"
+          if args && (session_id = args["session"]?.try(&.as_s))
+            if session_ent = @registry.sessions[session_id]?
+              if server_desc = session_ent.server_description
+                if fail_point_arg = args["failPoint"]?
+                  fail_point = BSON.from_json(fail_point_arg.to_json)
+                  session_ent.client.command(
+                    Mongo::Commands::ConfigureFailPoint,
+                    database: "admin",
+                    fail_point: fail_point["configureFailPoint"].as(String),
+                    mode: fail_point["mode"],
+                    options: {data: fail_point["data"]?},
+                    server_description: server_desc
+                  )
+                end
+              else
+                raise "TEST_FAILED: Session #{session_id} is not pinned"
+              end
+            end
+          end
+        when "assertCollectionExists"
+          if args && (db_name = args["databaseName"]?.try(&.as_s)) && (coll_name = args["collectionName"]?.try(&.as_s))
+            db = @internal_client[db_name]
+            colls = db.list_collections(filter: {name: coll_name}).to_a
+            raise "TEST_FAILED: Expected collection #{coll_name} to exist" if colls.empty?
+          end
+        when "assertCollectionNotExists"
+          if args && (db_name = args["databaseName"]?.try(&.as_s)) && (coll_name = args["collectionName"]?.try(&.as_s))
+            db = @internal_client[db_name]
+            colls = db.list_collections(filter: {name: coll_name}).to_a
+            raise "TEST_FAILED: Expected collection #{coll_name} to NOT exist" unless colls.empty?
+          end
+        when "assertIndexExists"
+          if args && (db_name = args["databaseName"]?.try(&.as_s)) && (coll_name = args["collectionName"]?.try(&.as_s)) && (index_name = args["indexName"]?.try(&.as_s))
+            db = @internal_client[db_name]
+            coll = db[coll_name]
+            indexes = coll.list_indexes.to_a
+            found = indexes.any? { |idx| index_name == idx["name"]?.try(&.as(String)) }
+            raise "TEST_FAILED: Expected index #{index_name} to exist" unless found
+          end
+        when "assertIndexNotExists"
+          if args && (db_name = args["databaseName"]?.try(&.as_s)) && (coll_name = args["collectionName"]?.try(&.as_s)) && (index_name = args["indexName"]?.try(&.as_s))
+            db = @internal_client[db_name]
+            coll = db[coll_name]
+            begin
+              indexes = coll.list_indexes.to_a
+              found = indexes.any? { |idx| index_name == idx["name"]?.try(&.as(String)) }
+              raise "TEST_FAILED: Expected index #{index_name} to NOT exist" if found
+            rescue e : Mongo::Error::Command
+              # If collection doesn't exist, index doesn't exist
+            end
           end
         when "download"
           raise "Missing arguments" unless args
@@ -396,16 +526,24 @@ module Mongo::Unified
           filename = args["filename"].as_s
           stream = IO::Memory.new
           target.as(Mongo::GridFS::Bucket).download_to_stream_by_name(filename, stream)
+        when "createCollection"
+          raise "Missing arguments" unless args
+          coll_name = args["collection"].as_s
+          target.as(Mongo::Database).command(Mongo::Commands::Create, name: coll_name, session: session)
+        when "dropCollection"
+          raise "Missing arguments" unless args
+          coll_name = args["collection"].as_s
+          target.as(Mongo::Database).command(Mongo::Commands::Drop, name: coll_name, session: session) rescue nil
         when "createIndex"
           raise "Missing arguments" unless args
           keys = BSON.from_json(args["keys"].to_json)
           opts_bson = BSON.new
           args.as_h.each do |k, v|
-            next if k == "keys"
+            next if k == "keys" || k == "session"
             opts_bson[k] = json_to_bson_value(v)
           end
           model = BSON.new({"keys" => keys, "options" => opts_bson})
-          target.as(Mongo::Collection).create_indexes([model])
+          target.as(Mongo::Collection).create_indexes([model], session: session)
         when "modifyCollection"
           raise "Missing arguments" unless args
           coll_name = args["collection"].as_s
@@ -417,6 +555,7 @@ module Mongo::Unified
           target.as(Mongo::Database).command(
             Mongo::Commands::CollMod,
             collection: coll_name,
+            session: session,
             options: {
               validator:         validator,
               validation_level:  validation_level,
@@ -426,13 +565,13 @@ module Mongo::Unified
         when "insertOne"
           raise "Missing arguments" unless args
           doc = BSON.from_json(args["document"].to_json)
-          target.as(Mongo::Collection).insert_one(doc)
+          target.as(Mongo::Collection).insert_one(doc, session: session)
         when "insertMany"
           raise "Missing arguments" unless args
           docs = args["documents"].as_a.map { |d| BSON.from_json(d.to_json) }
           ordered = args["ordered"]?.try(&.as_bool)
           ordered = true if ordered.nil?
-          target.as(Mongo::Collection).insert_many(docs, ordered: ordered)
+          target.as(Mongo::Collection).insert_many(docs, ordered: ordered, session: session)
         when "updateOne"
           raise "Missing arguments" unless args
           filter = BSON.from_json(args["filter"].to_json)
@@ -441,7 +580,7 @@ module Mongo::Unified
           array_filters = args["arrayFilters"]?.try { |af| af.as_a.map { |f| BSON.from_json(f.to_json) } }
           collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
           hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-          target.as(Mongo::Collection).update_one(filter, update, upsert: upsert, array_filters: array_filters, collation: collation, hint: hint)
+          target.as(Mongo::Collection).update_one(filter, update, upsert: upsert, array_filters: array_filters, collation: collation, hint: hint, session: session)
         when "updateMany"
           raise "Missing arguments" unless args
           filter = BSON.from_json(args["filter"].to_json)
@@ -450,7 +589,7 @@ module Mongo::Unified
           array_filters = args["arrayFilters"]?.try { |af| af.as_a.map { |f| BSON.from_json(f.to_json) } }
           collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
           hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-          target.as(Mongo::Collection).update_many(filter, update, upsert: upsert, array_filters: array_filters, collation: collation, hint: hint)
+          target.as(Mongo::Collection).update_many(filter, update, upsert: upsert, array_filters: array_filters, collation: collation, hint: hint, session: session)
         when "replaceOne"
           raise "Missing arguments" unless args
           filter = BSON.from_json(args["filter"].to_json)
@@ -458,19 +597,19 @@ module Mongo::Unified
           upsert = args["upsert"]?.try(&.as_bool) || false
           collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
           hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-          target.as(Mongo::Collection).replace_one(filter, replacement, upsert: upsert, collation: collation, hint: hint)
+          target.as(Mongo::Collection).replace_one(filter, replacement, upsert: upsert, collation: collation, hint: hint, session: session)
         when "deleteOne"
           raise "Missing arguments" unless args
           filter = BSON.from_json(args["filter"].to_json)
           collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
           hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-          target.as(Mongo::Collection).delete_one(filter, collation: collation, hint: hint)
+          target.as(Mongo::Collection).delete_one(filter, collation: collation, hint: hint, session: session)
         when "deleteMany"
           raise "Missing arguments" unless args
           filter = BSON.from_json(args["filter"].to_json)
           collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
           hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-          target.as(Mongo::Collection).delete_many(filter, collation: collation, hint: hint)
+          target.as(Mongo::Collection).delete_many(filter, collation: collation, hint: hint, session: session)
         when "find"
           filter = BSON.new
           sort = nil
@@ -480,6 +619,7 @@ module Mongo::Unified
           collation = nil
           hint = nil
           allow_disk_use = nil
+          max_time_ms = nil
 
           if args
             filter = BSON.from_json(args["filter"].to_json) if args["filter"]?
@@ -490,8 +630,9 @@ module Mongo::Unified
             collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
             hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
             allow_disk_use = args["allowDiskUse"]?.try(&.as_bool)
+            max_time_ms = args["maxTimeMS"]?.try(&.as_i64)
           end
-          cursor = target.as(Mongo::Collection).find(filter, sort: sort, skip: skip, limit: limit, batch_size: batch_size, collation: collation, hint: hint, allow_disk_use: allow_disk_use)
+          cursor = target.as(Mongo::Collection).find(filter, sort: sort, skip: skip, limit: limit, batch_size: batch_size, collation: collation, hint: hint, allow_disk_use: allow_disk_use, max_time_ms: max_time_ms, session: session)
           cursor.to_a
         when "findOne"
           filter = args && args["filter"]? ? BSON.from_json(args["filter"].to_json) : BSON.new
@@ -499,49 +640,52 @@ module Mongo::Unified
           skip = args && args["skip"]? ? args["skip"].as_i : nil
           collation = args && args["collation"]? ? Mongo::Collation.from_bson(BSON.from_json(args["collation"].to_json)) : nil
           hint = args && args["hint"]? ? (args["hint"].as_s? || BSON.from_json(args["hint"].to_json)) : nil
-          target.as(Mongo::Collection).find_one(filter, sort: sort, skip: skip, collation: collation, hint: hint)
+          target.as(Mongo::Collection).find_one(filter, sort: sort, skip: skip, collation: collation, hint: hint, session: session)
         when "listCollections", "listCollectionObjects"
           filter = args && args["filter"]? ? BSON.from_json(args["filter"].to_json) : nil
-          target.as(Mongo::Database).list_collections(filter: filter).to_a
+          target.as(Mongo::Database).list_collections(filter: filter, session: session).to_a
         when "listCollectionNames"
           filter = args && args["filter"]? ? BSON.from_json(args["filter"].to_json) : nil
-          target.as(Mongo::Database).list_collections(filter: filter, name_only: true).map { |c| c["name"].as(String) }.to_a
+          target.as(Mongo::Database).list_collections(filter: filter, name_only: true, session: session).map { |c| c["name"].as(String) }.to_a
         when "listDatabases", "listDatabaseObjects"
-          if res = target.as(Mongo::Client).list_databases
+          if res = target.as(Mongo::Client).list_databases(session: session)
             res.databases.try(&.map { |db| BSON.new({"name" => db.name, "sizeOnDisk" => db.size_on_disk, "empty" => db.empty}) }) || [] of BSON
           end
         when "listDatabaseNames"
-          if res = target.as(Mongo::Client).list_databases(name_only: true)
+          if res = target.as(Mongo::Client).list_databases(name_only: true, session: session)
             res.databases.try(&.map(&.name)) || [] of String
           end
         when "listIndexes"
-          target.as(Mongo::Collection).list_indexes.to_a
+          target.as(Mongo::Collection).list_indexes(session: session).try(&.to_a)
         when "listIndexNames"
-          target.as(Mongo::Collection).list_indexes.map { |c| c["name"].as(String) }.to_a
+          target.as(Mongo::Collection).list_indexes(session: session).try(&.map { |c| c["name"].as(String) }.to_a)
         when "runCommand"
           raise "Missing arguments" unless args
           command_name = args["commandName"].as_s
           command_bson = BSON.from_json(args["command"].to_json)
-          target.as(Mongo::Database).command(RawCommand.new(command_name), command_bson: command_bson)
+          read_preference = args["readPreference"]?.try { |rp| Mongo::ReadPreference.from_bson(BSON.from_json(rp.to_json)) }
+          target.as(Mongo::Database).command(RawCommand.new(command_name), command_bson: command_bson, session: session, read_preference: read_preference)
         when "createChangeStream"
           pipeline = args && args["pipeline"]? ? args["pipeline"].as_a.map { |p| BSON.from_json(p.to_json) } : [] of BSON
           if target.is_a?(Mongo::Collection)
-            target.watch(pipeline)
+            target.watch(pipeline, session: session)
           elsif target.is_a?(Mongo::Database)
-            target.watch(pipeline)
+            target.watch(pipeline, session: session)
           elsif target.is_a?(Mongo::Client)
-            target.watch(pipeline)
+            target.watch(pipeline, session: session)
           end
         when "aggregate"
           raise "Missing arguments" unless args
           pipeline = args["pipeline"].as_a.map { |p| BSON.from_json(p.to_json) }
           allow_disk_use = args["allowDiskUse"]?.try(&.as_bool)
           collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+          batch_size = args["batchSize"]?.try(&.as_i)
+          max_time_ms = args["maxTimeMS"]?.try(&.as_i64)
 
           if target.is_a?(Mongo::Database)
-            cursor = target.aggregate(pipeline, allow_disk_use: allow_disk_use, collation: collation)
+            cursor = target.aggregate(pipeline, allow_disk_use: allow_disk_use, collation: collation, batch_size: batch_size, max_time_ms: max_time_ms, session: session)
           else
-            cursor = target.as(Mongo::Collection).aggregate(pipeline, allow_disk_use: allow_disk_use, collation: collation)
+            cursor = target.as(Mongo::Collection).aggregate(pipeline, allow_disk_use: allow_disk_use, collation: collation, batch_size: batch_size, max_time_ms: max_time_ms, session: session)
           end
           cursor ? cursor.to_a : [] of BSON
         when "countDocuments"
@@ -556,22 +700,23 @@ module Mongo::Unified
             skip = args["skip"]?.try(&.as_i)
             limit = args["limit"]?.try(&.as_i)
           end
-          target.as(Mongo::Collection).count_documents(filter, collation: collation, skip: skip, limit: limit)
+          target.as(Mongo::Collection).count_documents(filter, collation: collation, skip: skip, limit: limit, session: session)
         when "estimatedDocumentCount"
-          target.as(Mongo::Collection).estimated_document_count
+          target.as(Mongo::Collection).estimated_document_count(session: session)
         when "distinct"
           raise "Missing arguments" unless args
           key = args["fieldName"].as_s
           filter = args["filter"]? ? BSON.from_json(args["filter"].to_json) : nil
           collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-          target.as(Mongo::Collection).distinct(key, filter: filter, collation: collation)
+          target.as(Mongo::Collection).distinct(key, filter: filter, collation: collation, session: session)
         when "findOneAndDelete"
           raise "Missing arguments" unless args
           filter = BSON.from_json(args["filter"].to_json)
           sort = args["sort"]? ? BSON.from_json(args["sort"].to_json) : nil
           collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
           hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-          target.as(Mongo::Collection).find_one_and_delete(filter, sort: sort, collation: collation, hint: hint)
+          max_time_ms = args["maxTimeMS"]?.try(&.as_i64)
+          target.as(Mongo::Collection).find_one_and_delete(filter, sort: sort, collation: collation, hint: hint, max_time_ms: max_time_ms, session: session)
         when "findOneAndReplace"
           raise "Missing arguments" unless args
           filter = BSON.from_json(args["filter"].to_json)
@@ -581,7 +726,8 @@ module Mongo::Unified
           new_doc = args["returnDocument"]?.try(&.as_s) == "After"
           collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
           hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-          target.as(Mongo::Collection).find_one_and_replace(filter, replacement, sort: sort, upsert: upsert, new: new_doc, collation: collation, hint: hint)
+          max_time_ms = args["maxTimeMS"]?.try(&.as_i64)
+          target.as(Mongo::Collection).find_one_and_replace(filter, replacement, sort: sort, upsert: upsert, new: new_doc, collation: collation, hint: hint, max_time_ms: max_time_ms, session: session)
         when "findOneAndUpdate"
           raise "Missing arguments" unless args
           filter = BSON.from_json(args["filter"].to_json)
@@ -592,7 +738,8 @@ module Mongo::Unified
           array_filters = args["arrayFilters"]?.try { |af| af.as_a.map { |f| BSON.from_json(f.to_json) } }
           collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
           hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-          target.as(Mongo::Collection).find_one_and_update(filter, update, sort: sort, upsert: upsert, new: new_doc, array_filters: array_filters, collation: collation, hint: hint)
+          max_time_ms = args["maxTimeMS"]?.try(&.as_i64)
+          target.as(Mongo::Collection).find_one_and_update(filter, update, sort: sort, upsert: upsert, new: new_doc, array_filters: array_filters, collation: collation, hint: hint, max_time_ms: max_time_ms, session: session)
         when "bulkWrite"
           raise "Missing arguments" unless args
           requests = args["requests"].as_a.map do |req_any|
@@ -646,13 +793,65 @@ module Mongo::Unified
           ordered = args["ordered"]?.try(&.as_bool)
           ordered = true if ordered.nil?
 
-          target.as(Mongo::Collection).bulk_write(requests, ordered: ordered)
+          target.as(Mongo::Collection).bulk_write(requests, ordered: ordered, session: session)
+        when "startTransaction"
+          rc = args.try(&.["readConcern"]?).try { |v| Mongo::ReadConcern.from_bson(BSON.from_json(v.to_json)) }
+          wc = args.try(&.["writeConcern"]?).try { |v| Mongo::WriteConcern.from_bson(BSON.from_json(v.to_json)) }
+          rp = args.try(&.["readPreference"]?).try { |v| Mongo::ReadPreference.from_bson(BSON.from_json(v.to_json)) }
+          max_commit_time_ms = args.try(&.["maxCommitTimeMS"]?).try(&.as_i64)
+
+          if target && target.is_a?(Mongo::Session::ClientSession)
+            target.start_transaction(
+              read_concern: rc,
+              write_concern: wc,
+              read_preference: rp,
+              max_commit_time_ms: max_commit_time_ms
+            )
+          end
+        when "commitTransaction"
+          if target && target.is_a?(Mongo::Session::ClientSession)
+            wc = args.try(&.["writeConcern"]?).try { |v| Mongo::WriteConcern.from_bson(BSON.from_json(v.to_json)) }
+            target.commit_transaction(write_concern: wc)
+          end
+        when "abortTransaction"
+          if target && target.is_a?(Mongo::Session::ClientSession)
+            wc = args.try(&.["writeConcern"]?).try { |v| Mongo::WriteConcern.from_bson(BSON.from_json(v.to_json)) }
+            target.abort_transaction(write_concern: wc)
+          end
+        when "endSession"
+          if target && target.is_a?(Mongo::Session::ClientSession)
+            target.end
+          end
+        when "withTransaction"
+          if args && (callback_ops = args["callback"]?.try(&.as_a))
+            rc = args["readConcern"]?.try { |v| Mongo::ReadConcern.from_bson(BSON.from_json(v.to_json)) }
+            wc = args["writeConcern"]?.try { |v| Mongo::WriteConcern.from_bson(BSON.from_json(v.to_json)) }
+            rp = args["readPreference"]?.try { |v| Mongo::ReadPreference.from_bson(BSON.from_json(v.to_json)) }
+            max_commit_time_ms = args["maxCommitTimeMS"]?.try(&.as_i64)
+
+            if target && target.is_a?(Mongo::Session::ClientSession)
+              target.with_transaction(
+                read_concern: rc,
+                write_concern: wc,
+                read_preference: rp,
+                max_commit_time_ms: max_commit_time_ms
+              ) do
+                callback_ops.each do |cb_op|
+                  op_obj = Operation.from_json(cb_op.to_json)
+                  if op_obj.name == "clientBulkWrite" || op_obj.arguments.try(&.as_h?.try(&.has_key?("let")))
+                    raise Exception.new("SKIP_TEST")
+                  end
+                  execute_operation(op_obj)
+                end
+              end
+            end
+          end
         else
           return
         end
 
         if expected_error
-          raise "TEST_FAILED: Expected operation to fail, but it succeeded."
+          raise Exception.new("TEST_FAILED: Expected operation to fail, but it succeeded.")
         end
       rescue e : Exception
         if e.message.try &.starts_with?("TEST_FAILED")

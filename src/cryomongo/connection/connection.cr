@@ -9,15 +9,19 @@ struct Mongo::Connection
   getter socket : IO
   @sasl_supported_mechs : Array(String)? = nil
 
-  def initialize(@server_description : SDAM::ServerDescription, @credentials : Mongo::Credentials, @options : Mongo::Options)
+  def initialize(@server_description : SDAM::ServerDescription, @credentials : Mongo::Credentials, @options : Mongo::Options, is_monitor : Bool = false)
     if @server_description.address.ends_with? ".sock"
       socket = UNIXSocket.new(@server_description.address)
     else
       split = @server_description.address.split(':')
       host = split[0]
-      socket = TCPSocket.new(split[0], split[1]? || 27017)
+      socket = TCPSocket.new(split[0], split[1]? || 27017, dns_timeout: @options.connect_timeout, connect_timeout: @options.connect_timeout)
       socket.tcp_nodelay = true
     end
+
+    timeout = is_monitor ? @options.connect_timeout : @options.socket_timeout
+    socket.read_timeout = timeout
+    socket.write_timeout = timeout
 
     if @options.ssl || @options.tls
       context = OpenSSL::SSL::Context::Client.new

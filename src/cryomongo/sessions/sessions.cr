@@ -44,7 +44,7 @@ module Mongo::Session
 
   # A client session used to logically bind operations together.
   class ClientSession
-    @client : Mongo::Client
+    getter client : Mongo::Client
     @server_session : ServerSession
     @released = false
     @lock = Mutex.new
