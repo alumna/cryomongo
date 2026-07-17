@@ -99,12 +99,91 @@ module Mongo::Session
     # }
     # ```
     def with_transaction(**options, &block)
-      start_transaction(**options)
-      yield
-      commit_transaction
-    rescue e
-      abort_transaction
-      raise e
+      start_time = Time.instant
+      timeout = 120.seconds
+      transaction_attempt = 0
+      last_error : Exception? = nil
+      backoff_initial = 5.0
+      backoff_max = 500.0
+
+      loop do # retryTransaction
+        if transaction_attempt > 0
+          exp = 1.5 ** transaction_attempt
+          backoff_target = {backoff_initial * exp, backoff_max}.min
+          backoff = Random.rand * backoff_target
+
+          if (Time.instant + backoff.milliseconds - start_time) >= timeout
+            raise last_error if last_error
+            raise Error::Transaction.new("Transaction exceeded timeout of #{timeout}")
+          end
+          sleep backoff.milliseconds
+        end
+
+        start_transaction(**options)
+        transaction_attempt += 1
+
+        begin
+          yield self
+        rescue error : Exception
+          last_error = error
+          if transaction_state.starting? || transaction_state.in_progress?
+            begin
+              abort_transaction
+            rescue
+              # Drivers MUST ignore any errors raised by abortTransaction
+            end
+          end
+
+          if error.is_a?(Mongo::Error) && error.has_error_label?("TransientTransactionError")
+            if (Time.instant - start_time) < timeout
+              next # retryTransaction
+            else
+              raise error
+            end
+          end
+
+          raise error
+        end
+
+        if transaction_state.none? || transaction_state.committed? || transaction_state.aborted?
+          return
+        end
+
+        # retryCommit
+        commit_successful = false
+        transient_error = false
+
+        loop do
+          begin
+            commit_transaction
+            commit_successful = true
+          rescue error : Exception
+            last_error = error
+            is_max_time = error.is_a?(Mongo::Error::Command) && error.max_time_ms_expired?
+            if error.is_a?(Mongo::Error::WriteConcern) && error.max_time_ms_expired?
+              is_max_time = true
+            end
+
+            if error.is_a?(Mongo::Error) && !is_max_time && error.has_error_label?("UnknownTransactionCommitResult")
+              if (Time.instant - start_time) >= timeout
+                raise error
+              end
+              next # continue retryCommit
+            end
+
+            if error.is_a?(Mongo::Error) && error.has_error_label?("TransientTransactionError")
+              transient_error = true
+              break # break retryCommit, go to retryTransaction
+            end
+
+            raise error
+          end
+          break # Commit was successful
+        end
+
+        break if commit_successful
+        next if transient_error
+      end
     end
 
     # Commits the currently active transaction in this session.
@@ -177,7 +256,7 @@ module Mongo::Session
       previous_def
     end
 
-    protected def insert_transaction
+    protected def insert_transaction(&)
       state_transition(:insert) {
         yield
       }
@@ -235,8 +314,12 @@ module Mongo::Session
       raise e
     rescue e
       if rollback_status_on_error
-        # Restore previous state
-        @transactions_lock.synchronize { @transaction_state = @transitions_from.not_nil! }
+        # Restore previous state safely
+        @transactions_lock.synchronize do
+          if prev_state = @transitions_from
+            @transaction_state = prev_state
+          end
+        end
       end
       raise e
     ensure

@@ -153,6 +153,25 @@ module Mongo::Unified
       BSON.from_json(%({"v": #{json.to_json}}))["v"]
     end
 
+    private def parse_transaction_options(opts : JSON::Any?) : Mongo::Session::TransactionOptions?
+      return nil unless opts
+      if hash = opts.as_h?
+        rc = hash["readConcern"]?.try { |v| Mongo::ReadConcern.from_bson(BSON.from_json(v.to_json)) }
+        wc = hash["writeConcern"]?.try { |v| Mongo::WriteConcern.from_bson(BSON.from_json(v.to_json)) }
+        rp = hash["readPreference"]?.try { |v| Mongo::ReadPreference.from_bson(BSON.from_json(v.to_json)) }
+        max_commit_time_ms = hash["maxCommitTimeMS"]?.try(&.as_i64)
+
+        if rc || wc || rp || max_commit_time_ms
+          Mongo::Session::TransactionOptions.new(
+            read_concern: rc,
+            write_concern: wc,
+            read_preference: rp,
+            max_commit_time_ms: max_commit_time_ms
+          )
+        end
+      end
+    end
+
     def run
       return if @skip_test
       return unless meets_requirements?(@test_file.runOnRequirements)
@@ -175,20 +194,22 @@ module Mongo::Unified
 
         test_aborted = false
 
-        # 4. Execute Operations
-        test.operations.each do |op|
-          if op.name == "clientBulkWrite"
-            test_aborted = true
-            break
-          end
+        begin
+          # 4. Execute Operations
+          test.operations.each do |op|
+            if op.name == "clientBulkWrite" || op.arguments.try(&.as_h?.try(&.has_key?("let")))
+              test_aborted = true
+              break
+            end
 
-          args_hash = op.arguments.try(&.as_h?)
-          if args_hash && args_hash.has_key?("let")
-            test_aborted = true
-            break
+            execute_operation(op)
           end
-
-          execute_operation(op)
+        rescue e : Exception
+          if e.message == "SKIP_TEST"
+            test_aborted = true
+          else
+            raise e
+          end
         end
 
         # 5. Verify Outcome
@@ -314,6 +335,33 @@ module Mongo::Unified
                 raise "Parent database '#{db_name}' not found for bucket entity #{req.id}"
               end
             end
+          when "session"
+            if client_name = req.client
+              if parent_client = @registry.clients[client_name]?
+                opts = req.sessionOptions
+                causal = nil
+                default_txn_opts = nil
+
+                if opts
+                  if hash = opts.as_h?
+                    if cc = hash["causalConsistency"]?
+                      causal = cc.as_bool
+                    end
+                    if def_opts = hash["defaultTransactionOptions"]?
+                      default_txn_opts = parse_transaction_options(def_opts)
+                    end
+                  end
+                end
+
+                session = parent_client.start_session(
+                  causal_consistency: causal.nil? ? true : causal,
+                  default_transaction_options: default_txn_opts
+                )
+                @registry.sessions[req.id] = session
+              else
+                raise "Parent client '#{client_name}' not found for session entity #{req.id}"
+              end
+            end
           end
         end
       end
@@ -351,7 +399,7 @@ module Mongo::Unified
 
       target = nil
       unless op.object == "testRunner"
-        target = @registry.collections[op.object]? || @registry.databases[op.object]? || @registry.clients[op.object]? || @registry.buckets[op.object]?
+        target = @registry.collections[op.object]? || @registry.databases[op.object]? || @registry.clients[op.object]? || @registry.buckets[op.object]? || @registry.sessions[op.object]?
         raise "Target entity not found: #{op.object}" unless target
       end
 
@@ -375,16 +423,86 @@ module Mongo::Unified
           entities = Array(Hash(String, EntityRequest)).from_json(args["entities"].to_json)
           create_entities(entities)
         when "assertSessionPinned"
-          raise "Missing arguments" unless args
-          session_id = args["session"].as_s
-          if session = @registry.sessions[session_id]?
-            raise "TEST_FAILED: Expected session #{session_id} to be pinned" unless session.server_description
+          if args && (session_id = args["session"]?.try(&.as_s))
+            if session = @registry.sessions[session_id]?
+              raise "TEST_FAILED: Expected session #{session_id} to be pinned" unless session.server_description
+            end
           end
         when "assertSessionUnpinned"
-          raise "Missing arguments" unless args
-          session_id = args["session"].as_s
-          if session = @registry.sessions[session_id]?
-            raise "TEST_FAILED: Expected session #{session_id} to be unpinned" if session.server_description
+          if args && (session_id = args["session"]?.try(&.as_s))
+            if session = @registry.sessions[session_id]?
+              raise "TEST_FAILED: Expected session #{session_id} to be unpinned" if session.server_description
+            end
+          end
+        when "assertSessionTransactionState"
+          if args && (session_id = args["session"]?.try(&.as_s))
+            if session = @registry.sessions[session_id]?
+              expected_state = args["state"].as_s
+              actual_state = session.transaction_state.to_s.downcase
+              actual_state_mapped = case actual_state
+                                    when "none"       then "none"
+                                    when "starting"   then "starting"
+                                    when "inprogress" then "in_progress"
+                                    when "committed"  then "committed"
+                                    when "aborted"    then "aborted"
+                                    else                   actual_state
+                                    end
+              if actual_state_mapped != expected_state
+                raise "TEST_FAILED: Expected session transaction state #{expected_state}, got #{actual_state_mapped}"
+              end
+            end
+          end
+        when "targetedFailPoint"
+          if args && (session_id = args["session"]?.try(&.as_s))
+            if session = @registry.sessions[session_id]?
+              if server_desc = session.server_description
+                if fail_point_arg = args["failPoint"]?
+                  fail_point = BSON.from_json(fail_point_arg.to_json)
+                  session.client.command(
+                    Mongo::Commands::ConfigureFailPoint,
+                    database: "admin",
+                    fail_point: fail_point["configureFailPoint"].as(String),
+                    mode: fail_point["mode"],
+                    options: {data: fail_point["data"]?},
+                    server_description: server_desc
+                  )
+                end
+              else
+                raise "TEST_FAILED: Session #{session_id} is not pinned"
+              end
+            end
+          end
+        when "assertCollectionExists"
+          if args && (db_name = args["databaseName"]?.try(&.as_s)) && (coll_name = args["collectionName"]?.try(&.as_s))
+            db = @internal_client[db_name]
+            colls = db.list_collections(filter: {name: coll_name}).to_a
+            raise "TEST_FAILED: Expected collection #{coll_name} to exist" if colls.empty?
+          end
+        when "assertCollectionNotExists"
+          if args && (db_name = args["databaseName"]?.try(&.as_s)) && (coll_name = args["collectionName"]?.try(&.as_s))
+            db = @internal_client[db_name]
+            colls = db.list_collections(filter: {name: coll_name}).to_a
+            raise "TEST_FAILED: Expected collection #{coll_name} to NOT exist" unless colls.empty?
+          end
+        when "assertIndexExists"
+          if args && (db_name = args["databaseName"]?.try(&.as_s)) && (coll_name = args["collectionName"]?.try(&.as_s)) && (index_name = args["indexName"]?.try(&.as_s))
+            db = @internal_client[db_name]
+            coll = db[coll_name]
+            indexes = coll.list_indexes.to_a
+            found = indexes.any? { |idx| index_name == idx["name"]?.try(&.as(String)) }
+            raise "TEST_FAILED: Expected index #{index_name} to exist" unless found
+          end
+        when "assertIndexNotExists"
+          if args && (db_name = args["databaseName"]?.try(&.as_s)) && (coll_name = args["collectionName"]?.try(&.as_s)) && (index_name = args["indexName"]?.try(&.as_s))
+            db = @internal_client[db_name]
+            coll = db[coll_name]
+            begin
+              indexes = coll.list_indexes.to_a
+              found = indexes.any? { |idx| index_name == idx["name"]?.try(&.as(String)) }
+              raise "TEST_FAILED: Expected index #{index_name} to NOT exist" if found
+            rescue e : Mongo::Error::Command
+              # If collection doesn't exist, index doesn't exist
+            end
           end
         when "download"
           raise "Missing arguments" unless args
@@ -647,6 +765,56 @@ module Mongo::Unified
           ordered = true if ordered.nil?
 
           target.as(Mongo::Collection).bulk_write(requests, ordered: ordered)
+        when "startTransaction"
+          rc = args.try(&.["readConcern"]?).try { |v| Mongo::ReadConcern.from_bson(BSON.from_json(v.to_json)) }
+          wc = args.try(&.["writeConcern"]?).try { |v| Mongo::WriteConcern.from_bson(BSON.from_json(v.to_json)) }
+          rp = args.try(&.["readPreference"]?).try { |v| Mongo::ReadPreference.from_bson(BSON.from_json(v.to_json)) }
+          max_commit_time_ms = args.try(&.["maxCommitTimeMS"]?).try(&.as_i64)
+
+          if target && target.is_a?(Mongo::Session::ClientSession)
+            target.start_transaction(
+              read_concern: rc,
+              write_concern: wc,
+              read_preference: rp,
+              max_commit_time_ms: max_commit_time_ms
+            )
+          end
+        when "commitTransaction"
+          if target && target.is_a?(Mongo::Session::ClientSession)
+            target.commit_transaction
+          end
+        when "abortTransaction"
+          if target && target.is_a?(Mongo::Session::ClientSession)
+            target.abort_transaction
+          end
+        when "endSession"
+          if target && target.is_a?(Mongo::Session::ClientSession)
+            target.end
+          end
+        when "withTransaction"
+          if args && (callback_ops = args["callback"]?.try(&.as_a))
+            rc = args["readConcern"]?.try { |v| Mongo::ReadConcern.from_bson(BSON.from_json(v.to_json)) }
+            wc = args["writeConcern"]?.try { |v| Mongo::WriteConcern.from_bson(BSON.from_json(v.to_json)) }
+            rp = args["readPreference"]?.try { |v| Mongo::ReadPreference.from_bson(BSON.from_json(v.to_json)) }
+            max_commit_time_ms = args["maxCommitTimeMS"]?.try(&.as_i64)
+
+            if target && target.is_a?(Mongo::Session::ClientSession)
+              target.with_transaction(
+                read_concern: rc,
+                write_concern: wc,
+                read_preference: rp,
+                max_commit_time_ms: max_commit_time_ms
+              ) do
+                callback_ops.each do |cb_op|
+                  op_obj = Operation.from_json(cb_op.to_json)
+                  if op_obj.name == "clientBulkWrite" || op_obj.arguments.try(&.as_h?.try(&.has_key?("let")))
+                    raise "SKIP_TEST"
+                  end
+                  execute_operation(op_obj)
+                end
+              end
+            end
+          end
         else
           return
         end

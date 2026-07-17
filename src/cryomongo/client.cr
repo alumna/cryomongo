@@ -766,11 +766,13 @@ class Mongo::Client
       connection = get_connection(server_description)
       session.pin(server_description)
     rescue
-      raise original_error.not_nil!
+      raise original_error if original_error
+      raise Mongo::Error.new("Unknown error during retryable write")
     end
 
     if !topology.supports_sessions? || !server_description.supports_retryable_writes?
-      raise original_error.not_nil!
+      raise original_error if original_error
+      raise Mongo::Error.new("Sessions or retryable writes not supported")
     end
 
     begin
@@ -837,11 +839,13 @@ class Mongo::Client
       connection = get_connection(server_description)
       session.pin(server_description)
     rescue
-      raise original_error.not_nil!
+      raise original_error if original_error
+      raise Mongo::Error.new("Unknown error during retryable read")
     end
 
     if !topology.supports_sessions? || !server_description.supports_retryable_reads?
-      raise original_error.not_nil!
+      raise original_error if original_error
+      raise Mongo::Error.new("Sessions or retryable reads not supported")
     end
 
     begin
