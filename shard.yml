@@ -1,5 +1,5 @@
 name: cryomongo
-version: 0.5.0
+version: 0.6.0
 
 authors:
   - elbywan <elbywan@hotmail.com>
@@ -17,16 +17,9 @@ dependencies:
     github: spider-gazelle/dns
     branch: main
 
-# development_dependencies:
-#   ameba:
-#     github: crystal-ameba/ameba
-#     version: ~> 1.6.3
-
 targets:
   cryomongo:
     main: src/cryomongo.cr
-  # ameba:
-  #   main: lib/ameba/src/cli.cr
 
 crystalline:
   main: .crystalline_main.cr

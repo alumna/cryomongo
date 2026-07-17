@@ -27,7 +27,8 @@ The update roadmap is actively being worked on. Below is the current progress ag
 - [x] **CRUD Operations** (`crud.md`): 100% compliant.
 - [x] **Retryable Writes** (`retryable-writes.md`): 100% compliant. Gracefully handles network failures, step-downs, and `errorLabels`.
 - [x] **Retryable Reads** (`retryable-reads.md`): 100% compliant.
-- [ ] **Transactions & Sessions** (`transactions.md`): Up next.
+- [x] **Transactions** (`transactions.md` & `transactions-convenient-api.md`): 100% compliant. Implements robust exponential backoffs and strict timeouts.
+- [ ] **Sessions & Causal Consistency** (`causal-consistency.md`): Up next.
 - [ ] **Server Discovery and Monitoring** (`server-discovery-and-monitoring.md`): Pending sync.
 - [ ] **Authentication** (`auth.md`): Pending SCRAM-SHA-256 validation.
 

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0 - 2026-07-17
+
+### Added
+* **transactions:** Fully implemented the MongoDB 4.0+ Core Transactions and the MongoDB 4.2+ Convenient API for Transactions (`with_transaction`).
+* **transactions:** Implemented strict 120-second fallback timeouts, exponential backoff with jitter, and robust error-label-based retry logic (`TransientTransactionError`, `UnknownTransactionCommitResult`).
+* **spec:** Fully integrated the official `transactions` and `transactions-convenient-api` Unified Test Format (UTF) suites (324/324 tests passing).
+* **commands:** Added `Mongo::Commands::MayUseSecondary` to `RawCommand`, allowing raw commands to properly respect secondary read preferences within transactions.
+
+### Fixed
+* **connection:** Properly propagated `@options.socket_timeout` and `@options.connect_timeout` to the underlying `TCPSocket` and `UNIXSocket` instances, ensuring accurate network timeout enforcement.
+* **sdam:** Ensured `Mongo::Connection` instances spawned by the SDAM Monitor explicitly use the connection timeout parameter, complying with the server monitoring spec.
+* **spec:** Fixed test runner `Session` entity parsing and explicit database targeting for `ConfigureFailPoint` operations.
+
+### Removed
+* **deps:** Removed the unused `crystal-ameba/ameba` development dependency, ensuring compatibility with the latest Crystal 1.21+ releases.
+
 ## 0.5.0 - 2026-07-16
 
 ### Added

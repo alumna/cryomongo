@@ -31,7 +31,7 @@ This roadmap defines the implementation checklist against the official MongoDB d
 
 ## Features (Progressive Enhancements)
 - [ ] auth (SCRAM-SHA-1/256, mongodb-aws, mongodb-oidc, x509)
-- [ ] transactions
+- [x] transactions (Core & Convenient API)
 - [ ] causal-consistency
 - [ ] change-streams
 - [ ] index-management
