@@ -44,7 +44,9 @@ module Mongo::URI
       if resolver = options.dns_resolver
         DNS.default_resolver = resolver
       end
-      srv = Mongo::SRV.new(parsed_uri.host.not_nil!)
+      host = parsed_uri.host
+      raise Mongo::Error.new("Missing host in connection URI") unless host
+      srv = Mongo::SRV.new(host)
       srv_records, txt_record = srv.resolve
       seeds = srv_records.map { |srv_record|
         "#{srv_record.target}:#{srv_record.port}"

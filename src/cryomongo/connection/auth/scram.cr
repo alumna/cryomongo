@@ -118,7 +118,13 @@ class Mongo::Auth::Scram
 
   def first_bare
     raise Mongo::Error.new "Username is missing" unless username = @credentials.username
-    encoded_name = username.gsub('=', "=3D").gsub(',', "=2C")
+    encoded_name = username.gsub do |char|
+      case char
+      when '=' then "=3D"
+      when ',' then "=2C"
+      else          char
+      end
+    end
     @first_bare ||= "n=#{encoded_name},r=#{@client_nonce}"
   end
 

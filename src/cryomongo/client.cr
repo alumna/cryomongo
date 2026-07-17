@@ -35,8 +35,8 @@ class Mongo::Client
   # :nodoc:
   protected getter min_heartbeat_frequency : Time::Span = 500.milliseconds
 
-  @@topology_lock = Mutex.new(:reentrant)
-  @@connection_pool_lock = Mutex.new
+  @@topology_lock = Sync::Mutex.new(:reentrant)
+  @@connection_pool_lock = Sync::Mutex.new
   @pools : Hash(String, Mongo::Connection::Pool(Mongo::Connection)) = Hash(String, Mongo::Connection::Pool(Mongo::Connection)).new
   @monitors : Array(SDAM::Monitor) = Array(SDAM::Monitor).new
   @socket_check_interval : Time::Span = 5.seconds
@@ -76,11 +76,12 @@ class Mongo::Client
       @read_preference = ReadPreference.new(
         mode: read_pref,
         max_staleness_seconds: @options.max_staleness_seconds,
-        tags: @options.read_preference_tags.map { |tags|
+        tags: @options.read_preference_tags.map { |tags_str|
           bson = BSON.new
-          tags.split(',').each { |tag|
-            key, value = tag.split(':')
-            bson[key] = value
+          tags_str.split(',') { |tag|
+            if byte_idx = tag.byte_index(':')
+              bson[tag.byte_slice(0, byte_idx)] = tag.byte_slice(byte_idx + 1)
+            end
           }
           bson
         }
@@ -299,11 +300,13 @@ class Mongo::Client
     authorized_databases : Bool? = nil,
     session : Session::ClientSession? = nil,
   ) : Commands::ListDatabases::Result
-    self.command(Commands::ListDatabases, session: session, options: {
+    result = self.command(Commands::ListDatabases, session: session, options: {
       filter:               filter,
       name_only:            name_only,
       authorized_databases: authorized_databases,
-    }).not_nil!
+    })
+    raise Mongo::Error.new("Command failed to return a result") unless result
+    result
   end
 
   # Returns a document that provides an overview of the database’s state.
@@ -968,17 +971,19 @@ class Mongo::Client
   end
 
   private def filter_by_staleness(server_descriptions, read_preference) : Array(SDAM::ServerDescription)?
-    # see: https://github.com/mongodb/specifications/blob/master/source/server-selection/server-selection.rst#maxstalenessseconds
     max_staleness = (read_preference.max_staleness_seconds || -1).seconds
     return server_descriptions unless max_staleness >= 0.seconds
     server_descriptions.select { |server|
       next true unless server.type.rs_secondary?
       if self.topology.type.replica_set_with_primary?
         primary = select_primary[0]
-        staleness = (server.last_update_time - server.last_write_date.not_nil!) - (primary.last_update_time - primary.last_write_date.not_nil!) + @options.heartbeat_frequency
+        server_write = server.last_write_date || raise Mongo::Error.new("Secondary missing last_write_date")
+        primary_write = primary.last_write_date || raise Mongo::Error.new("Primary missing last_write_date")
+        staleness = (server.last_update_time - server_write) - (primary.last_update_time - primary_write) + @options.heartbeat_frequency
       else
-        max_write_date = select_secondaries.max_of &.last_write_date.not_nil!
-        staleness = max_write_date - server.last_write_date.not_nil! + @options.heartbeat_frequency
+        max_write_date = select_secondaries.max_of { |s| s.last_write_date || raise Mongo::Error.new("Secondary missing last_write_date") }
+        server_write = server.last_write_date || raise Mongo::Error.new("Secondary missing last_write_date")
+        staleness = max_write_date - server_write + @options.heartbeat_frequency
       end
       staleness <= max_staleness
     }

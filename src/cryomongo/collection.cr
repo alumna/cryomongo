@@ -152,7 +152,8 @@ class Mongo::Collection
     result = self.command(Commands::Count, session: session, options: {
       max_time_ms:     max_time_ms,
       read_preference: read_preference,
-    }).not_nil!
+    })
+    raise Mongo::Error.new("Command failed to return a result") unless result
     result["n"].as(Int32)
   end
 
@@ -176,7 +177,8 @@ class Mongo::Collection
       read_concern:    read_concern,
       collation:       collation,
       read_preference: read_preference,
-    }).not_nil!
+    })
+    raise Mongo::Error.new("Command failed to return a result") unless result
     result.values.each.map(&.[1]).to_a
   end
 
@@ -211,7 +213,7 @@ class Mongo::Collection
     read_preference : ReadPreference? = nil,
     session : Session::ClientSession? = nil,
   ) : Mongo::Cursor forall H
-    self.command(Commands::Find, filter: filter, session: session, options: {
+    result = self.command(Commands::Find, filter: filter, session: session, options: {
       sort:                  sort.try { BSON.new(sort) },
       projection:            projection.try { BSON.new(projection) },
       hint:                  hint.is_a?(String) ? hint : BSON.new(hint),
@@ -244,7 +246,9 @@ class Mongo::Collection
         limit: limit,
         session: session
       )
-    }.not_nil!
+    }
+    raise Mongo::Error.new("Command failed to return a result") unless result
+    result
   end
 
   # Finds the document matching the model.
@@ -686,20 +690,18 @@ class Mongo::Collection
       if item.is_a? BSON
         keys = item["keys"].as(BSON)
         options = item["options"]?.try(&.as(BSON)) || BSON.new
-        if options.["name"]?
-          BSON.new({key: keys}).append(options)
-        else
-          index_name = keys.reduce([] of String) { |acc, (k, v)|
-            acc << "#{k}_#{v}"
-          }.join("_")
+        unless options.["name"]?
+          index_name = String.build do |io|
+            keys.join(io, "_") { |(k, v), io| io << k << '_' << v }
+          end
           options.append(name: index_name)
-          BSON.new({key: keys}).append(options)
         end
+        BSON.new({key: keys}).append(options)
       else
         index_model = Index::Model.new(item["keys"], Index::Options.new(**item["options"]))
-        index_model.options.name = index_model.keys.reduce([] of String) { |acc, (k, v)|
-          acc << "#{k}_#{v}"
-        }.join("_") unless index_model.options.name
+        index_model.options.name ||= String.build do |io|
+          index_model.keys.join(io, "_") { |(k, v), io| io << k << '_' << v }
+        end
         BSON.new({key: index_model.keys}).append(index_model.options.to_bson)
       end
     }
@@ -735,9 +737,11 @@ class Mongo::Collection
   #
   # NOTE: [for more details, please check the official documentation](https://docs.mongodb.com/manual/reference/command/listIndexes/).
   def list_indexes(session : Session::ClientSession? = nil) : Mongo::Cursor?
-    self.command(Commands::ListIndexes, session: session) { |result|
+    result = self.command(Commands::ListIndexes, session: session) { |result|
       Cursor.new(@database.client, result, session: session)
-    }.not_nil!
+    }
+    raise Mongo::Error.new("Command failed to return a result") unless result
+    result
   end
 
   # Returns a `ChangeStream::Cursor` watching a specific collection.

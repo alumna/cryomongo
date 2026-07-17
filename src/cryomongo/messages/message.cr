@@ -3,7 +3,7 @@ require "./message_part"
 
 struct Mongo::Messages::Message
   @@id : Int32 = 0
-  @@mutex = Mutex.new
+  @@mutex = Sync::Mutex.new
 
   getter header : Header
   getter contents : Part

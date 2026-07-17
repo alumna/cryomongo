@@ -23,7 +23,7 @@ module Mongo::Monitoring
 
   # Provides an observable interface for the `Mongo::Client`.
   class Observable(T)
-    @observable_lock = Mutex.new
+    @observable_lock = Sync::Mutex.new
     @subscribers : Set(T -> Nil) = Set(T -> Nil).new
 
     def broadcast(event : T)
