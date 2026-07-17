@@ -863,7 +863,7 @@ class Mongo::Client
         max_idle_pool_size: @options.max_pool_size,
         checkout_timeout: @options.wait_queue_timeout.try(&.seconds.to_f64) || 5.0
       ) do
-        connection = Mongo::Connection.new(server_description, @credentials, @options)
+        connection = Mongo::Connection.new(server_description, @credentials, @options, is_monitor: false)
         result, round_trip_time = connection.handshake(send_metadata: true, appname: @options.appname)
         connection.authenticate
         new_rtt = Connection.average_round_trip_time(round_trip_time, server_description.round_trip_time)

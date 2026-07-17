@@ -105,6 +105,7 @@ module Mongo::Unified
 
   struct RawCommand
     include Mongo::Commands::Command
+    include Mongo::Commands::MayUseSecondary
     getter name : String
 
     def initialize(@name : String)

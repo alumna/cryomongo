@@ -16,17 +16,19 @@ module Mongo::SDAM
       @client : Mongo::Client,
       @server_description : ServerDescription,
       @credentials : Mongo::Credentials,
-      @heartbeat_frequency : Time::Span = 10.seconds
+      @heartbeat_frequency : Time::Span = 10.seconds,
     )
       @topology = @client.topology
     end
 
     def get_connection(server_description : ServerDescription) : Mongo::Connection
-      if !@connection || @connection.try &.socket.closed?
-        @connection = Mongo::Connection.new(@server_description, @credentials, @client.options)
-        @connection.try &.handshake(send_metadata: true, appname: @client.options.appname)
+      conn = @connection
+      if !conn || conn.socket.closed?
+        conn = Mongo::Connection.new(@server_description, @credentials, @client.options, is_monitor: true)
+        conn.handshake(send_metadata: true, appname: @client.options.appname)
+        @connection = conn
       end
-      @connection.not_nil!
+      conn
     end
 
     def close_connection(server_description : ServerDescription)
