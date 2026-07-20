@@ -71,7 +71,7 @@ module Mongo::Session
           {{ k.id }}: options[{{ k.symbolize }}],
         {% end %}
       )
-      @server_session = @client.session_pool.acquire(logical_timeout).not_nil!
+      @server_session = @client.session_pool.acquire(logical_timeout)
       {% end %}
     end
 

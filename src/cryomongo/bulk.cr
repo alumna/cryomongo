@@ -287,7 +287,7 @@ class Mongo::Bulk
       }
     else
       raise Mongo::Bulk::Error.new "Invalid Operation"
-    end.not_nil!
+    end.as(BSON)
   end
 
   private def process_group(type, group : Array(BSON), results, index_offset, options, operation_id) : Int32

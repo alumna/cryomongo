@@ -94,7 +94,8 @@ module Mongo::ChangeStream
       @database = options["database"]
       @collection = options["collection"]
 
-      result = init(**@options).not_nil!
+      result = init(**@options)
+      raise Mongo::Error.new("Change stream initialization failed") unless result
 
       @cursor_id = result.cursor.id
       @batch = result.cursor.first_batch
@@ -121,17 +122,16 @@ module Mongo::ChangeStream
       if e.resumable?
         self.close
 
-        if resume_token
-          result = init(
-            **@options.merge({
-              resume_after:            resume_token,
-              start_after:             nil,
-              start_at_operation_time: nil,
-            })
-          ).not_nil!
-        else
-          result = init(**@options).not_nil!
-        end
+        result = if resume_token
+                   init(**@options.merge({
+                     resume_after:            resume_token,
+                     start_after:             nil,
+                     start_at_operation_time: nil,
+                   }))
+                 else
+                   init(**@options)
+                 end
+        raise Mongo::Error.new("Change stream resumption failed") unless result
 
         @cursor_id = result.cursor.id
         @batch = result.cursor.first_batch
@@ -162,7 +162,7 @@ module Mongo::ChangeStream
       read_concern : ReadConcern? = nil,
       read_preference : ReadPreference? = nil,
       collection : Collection::CollectionKey = nil,
-      database : String = nil
+      database : String = nil,
     )
       full_pipeline = self.make_pipeline(
         pipeline: pipeline,

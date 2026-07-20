@@ -108,7 +108,10 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
   end
 
   def body : BSON
-    sections.find(&.is_a? SectionBody).not_nil!.as(SectionBody).payload
+    sections.each do |section|
+      return section.payload if section.is_a?(SectionBody)
+    end
+    raise Mongo::Error.new("Invalid OP_MSG: Missing body section")
   end
 
   def each_sequence(&)
@@ -133,32 +136,35 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
   end
 
   def error? : Exception?
-    err_labels = self.body["errorLabels"]?.try { |labels| Array(String).from_bson(labels) } || [] of String
+    cached_body = self.body
 
-    if self.valid?
-      if errors = self.body["writeErrors"]?
-        Mongo::Error::CommandWrite.new(errors.as(BSON), error_labels: Set(String).new(err_labels))
-      elsif write_error = self.body["writeConcernError"]?
-        Mongo::Error::WriteConcern.new(write_error.as(BSON), error_labels: Set(String).new(err_labels))
+    err_label_set = cached_body["errorLabels"]?.try { |labels|
+      Set(String).new(Array(String).from_bson(labels))
+    } || Set(String).new
+
+    if cached_body["ok"] == 1
+      if errors = cached_body["writeErrors"]?
+        Mongo::Error::CommandWrite.new(errors.as(BSON), error_labels: err_label_set)
+      elsif write_error = cached_body["writeConcernError"]?
+        Mongo::Error::WriteConcern.new(write_error.as(BSON), error_labels: err_label_set)
       end
     else
-      err_msg = self.body["errmsg"]?.try &.as(String)
-      err_code_name = self.body["codeName"]?.try &.as(String)
-      err_code = self.body["code"]?
-      details = self.body["errInfo"]?.try &.as(BSON)
-      Mongo::Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: Set(String).new(err_labels))
+      err_msg = cached_body["errmsg"]?.try &.as(String)
+      err_code_name = cached_body["codeName"]?.try &.as(String)
+      err_code = cached_body["code"]?
+      details = cached_body["errInfo"]?.try &.as(BSON)
+      Mongo::Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: err_label_set)
     end
   end
 
   def safe_payload(command)
     # see: https://github.com/mongodb/specifications/blob/master/source/command-monitoring/command-monitoring.rst#security
-    if command.is_a?(Commands::Hello) && self.body["speculativeAuthenticate"]?
+    cached_body = self.body
+    if command.is_a?(Commands::Hello) && cached_body["speculativeAuthenticate"]?
       BSON.new
     else
-      payload = BSON.new(self.body)
-      self.each_sequence { |key, contents|
-        payload[key] = contents
-      }
+      payload = BSON.new(cached_body)
+      self.each_sequence { |key, contents| payload[key] = contents }
       payload
     end
   end

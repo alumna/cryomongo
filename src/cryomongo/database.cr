@@ -57,7 +57,7 @@ class Mongo::Database
     read_concern : ReadConcern? = nil,
     read_preference : ReadPreference? = nil,
     session : Session::ClientSession? = nil,
-    **args
+    **args,
   )
     self.command(
       operation,
@@ -97,7 +97,7 @@ class Mongo::Database
     hint : (String | H)? = nil,
     comment : String? = nil,
     write_concern : WriteConcern? = nil,
-    session : Session::ClientSession? = nil
+    session : Session::ClientSession? = nil,
   ) : Mongo::Cursor? forall H
     self.command(Commands::Aggregate, collection: 1, pipeline: pipeline, session: session, options: {
       allow_disk_use:             allow_disk_use,
@@ -124,15 +124,17 @@ class Mongo::Database
     filter = nil,
     name_only : Bool? = nil,
     authorized_collections : Bool? = nil,
-    session : Session::ClientSession? = nil
+    session : Session::ClientSession? = nil,
   ) : Mongo::Cursor
-    self.command(Commands::ListCollections, session: session, options: {
+    result = self.command(Commands::ListCollections, session: session, options: {
       filter:                 filter,
       name_only:              name_only,
       authorized_collections: authorized_collections,
-    }).try { |result|
-      Cursor.new(@client, result, session: session)
-    }.not_nil!
+    })
+
+    raise Mongo::Error.new("Command ListCollections failed to return a result") unless result
+
+    Cursor.new(@client, result, session: session)
   end
 
   # Returns a `Mongo::GridFS` instance configured with the arguments provided.
@@ -144,7 +146,7 @@ class Mongo::Database
     chunk_size_bytes : Int32 = 255 * 1024,
     write_concern : WriteConcern? = nil,
     read_concern : ReadConcern? = nil,
-    read_preference : ReadPreference? = nil
+    read_preference : ReadPreference? = nil,
   ) : GridFS::Bucket
     GridFS::Bucket.new(
       self,
@@ -197,7 +199,7 @@ class Mongo::Database
     start_after : BSON? = nil,
     read_concern : ReadConcern? = nil,
     read_preference : ReadPreference? = nil,
-    session : Session::ClientSession? = nil
+    session : Session::ClientSession? = nil,
   ) : Mongo::ChangeStream::Cursor
     ChangeStream::Cursor.new(
       client: @client,
