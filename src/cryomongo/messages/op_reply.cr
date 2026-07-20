@@ -34,7 +34,7 @@ struct Mongo::Messages::OpReply < Mongo::Messages::Part
     size = header.body_size
     msg_bytes = Bytes.new(size)
     io.read_fully(msg_bytes)
-    msg_view = IO::Memory.new(msg_bytes, writeable: false)
+    msg_view = IO::Memory.new(msg_bytes, false)
 
     @response_flags = ResponseFlags.from_value(msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian))
     @cursor_id = msg_view.read_bytes(Int64, IO::ByteFormat::LittleEndian)

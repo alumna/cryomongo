@@ -34,7 +34,7 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
     size = header.body_size
     msg_bytes = Bytes.new(size)
     io.read_fully(msg_bytes)
-    msg_view = IO::Memory.new(msg_bytes, writeable: false)
+    msg_view = IO::Memory.new(msg_bytes, false)
 
     @flag_bits = Flags.from_value(msg_view.read_bytes(UInt32, IO::ByteFormat::LittleEndian))
     @sections = typeof(@sections).new
