@@ -9,15 +9,9 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
 
   @[Flags]
   enum Flags : Int32
-    # The message ends with 4 bytes containing a CRC-32C checksum.
     ChecksumPresent
-    # Another message will follow this one without further action from the receiver.
-    # The receiver MUST NOT send another message until receiving one with moreToCome set to 0 as sends may block, causing deadlock.
-    # Requests with the moreToCome bit set will not receive a reply. Replies will only have this set in response to requests with the exhaustAllowed bit set.
     MoreToCome
-    # The client is prepared for multiple replies to this request using the moreToCome bit.
-    # The server will never produce replies with the moreToCome bit set unless the request has this bit set.
-    ExhaustAllowed = 16
+    ExhaustAllowed  = 16
   end
 
   getter flag_bits : Flags
@@ -38,44 +32,60 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
 
   def initialize(io : IO, header : Messages::Header)
     size = header.body_size
-    msg_bytes = Bytes.new(size)
-    io.read_fully(msg_bytes)
-    msg_view = IO::Memory.new(msg_bytes)
 
-    @flag_bits = Flags.from_value UInt32.from_io(msg_view, IO::ByteFormat::LittleEndian)
+    # Wrap the socket IO to securely bound our reads to this specific message length,
+    # preventing any possibility of over-reading into the next message on the wire.
+    sized_io = IO::Sized.new(io, read_size: size)
+
+    @flag_bits = Flags.from_value UInt32.from_io(sized_io, IO::ByteFormat::LittleEndian)
     @sections = typeof(@sections).new
 
     has_checksum = @flag_bits.checksum_present?
 
-    loop do
-      break if msg_view.pos >= size - (has_checksum ? 4 : 0)
-      payload_type = UInt8.from_io(msg_view, IO::ByteFormat::LittleEndian)
+    # Calculate exactly how many bytes the payload sections consume
+    sections_size = size - 4 - (has_checksum ? 4 : 0)
+    bytes_read = 0
+
+    while bytes_read < sections_size
+      payload_type = UInt8.from_io(sized_io, IO::ByteFormat::LittleEndian)
+      bytes_read += 1
+
       case payload_type
       when 0_u8
-        payload = BSON.new msg_view
+        # Stream the BSON document directly from the socket
+        payload = BSON.new(sized_io)
         @sections << SectionBody.new(payload)
+        bytes_read += payload.size
       when 1_u8
-        marker = msg_view.pos
-        sequence_size = Int32.from_io(msg_view, IO::ByteFormat::LittleEndian)
-        delimited = IO::Delimited.new(msg_view, read_delimiter: "\0")
-        sequence_identifier = delimited.gets_to_end
+        sequence_size = Int32.from_io(sized_io, IO::ByteFormat::LittleEndian)
+
+        # Read exactly up to the null byte to avoid any internal IO buffering side-effects
+        sequence_identifier = sized_io.gets('\0', chomp: true)
+        raise Mongo::Error.new("Invalid OP_MSG: EOF while reading sequence identifier") unless sequence_identifier
+
         contents = Array(BSON).new
-        loop do
-          break if msg_view.pos - marker >= sequence_size
-          contents << BSON.new(msg_view)
+
+        # Track bytes read for this specific sequence (4 bytes for size + string length + 1 for null byte)
+        seq_bytes_read = 4 + sequence_identifier.bytesize + 1
+        while seq_bytes_read < sequence_size
+          doc = BSON.new(sized_io)
+          contents << doc
+          seq_bytes_read += doc.size
         end
+
         @sections << SectionDocumentSequence.new(
           payload: SectionDocumentSequence::SectionPayload.new(
             sequence_identifier, contents
           )
         )
+        bytes_read += sequence_size
       else
         raise Mongo::Error.new "Received invalid payload type: #{payload_type}"
       end
     end
 
     if has_checksum
-      @checksum = UInt32.from_io(msg_view, IO::ByteFormat::LittleEndian)
+      @checksum = UInt32.from_io(sized_io, IO::ByteFormat::LittleEndian)
     end
   end
 
@@ -93,12 +103,8 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
     def initialize(@payload : SectionPayload); end
 
     struct SectionPayload < Part
-      # Payload size (includes this 4-byte field).
       getter sequence_size : Int32 = 0
-      # Document sequence identifier. In all current commands this field is the (possibly nested) field that it is replacing from the body section.
-      # This field MUST NOT also exist in the body section.
       getter sequence_identifier : String
-      # Zero or more BSON objects.
       getter contents : Array(BSON)
 
       def initialize(@sequence_identifier, @contents)
@@ -158,13 +164,14 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
   end
 
   def safe_payload(command)
-    # see: https://github.com/mongodb/specifications/blob/master/source/command-monitoring/command-monitoring.rst#security
     cached_body = self.body
     if command.is_a?(Commands::Hello) && cached_body["speculativeAuthenticate"]?
       BSON.new
     else
       payload = BSON.new(cached_body)
-      self.each_sequence { |key, contents| payload[key] = contents }
+      self.each_sequence { |key, contents|
+        payload[key] = contents
+      }
       payload
     end
   end
