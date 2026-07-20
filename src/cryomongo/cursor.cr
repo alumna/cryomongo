@@ -34,7 +34,7 @@ class Mongo::Cursor
     @limit : Int32? = nil,
     @await_time_ms : Int64? = nil,
     @tailable : Bool = false,
-    @session : Session::ClientSession? = nil
+    @session : Session::ClientSession? = nil,
   )
     @counter = @batch.size
     @database, @collection = namespace.split(".", 2)
@@ -48,7 +48,7 @@ class Mongo::Cursor
     @limit : Int32? = nil,
     @await_time_ms : Int64? = nil,
     @tailable : Bool = false,
-    @session : Session::ClientSession? = nil
+    @session : Session::ClientSession? = nil,
   )
     @cursor_id = result.cursor.id
     @batch = result.cursor.first_batch
@@ -116,7 +116,10 @@ class Mongo::Cursor
       max_time_ms: @await_time_ms,
       server_description: @server_description,
       session: @session
-    ).not_nil!
+    )
+
+    raise Mongo::Error.new("GetMore command failed to return a result") unless reply
+
     @cursor_id = reply.cursor.id
     @batch = reply.cursor.next_batch
     @counter += @batch.size

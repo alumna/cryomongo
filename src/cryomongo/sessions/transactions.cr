@@ -40,7 +40,7 @@ module Mongo::Session
     # The recoveryToken field enables the driver to recover a sharded transaction's outcome on a new mongos when the original mongos is no longer available.
     property recovery_token : BSON? = nil
 
-    @transactions_lock = Mutex.new
+    @transactions_lock = Sync::Mutex.new
     @empty_commit = false
 
     def is_transaction?

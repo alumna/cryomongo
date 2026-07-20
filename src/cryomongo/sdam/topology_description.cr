@@ -7,7 +7,7 @@ class Mongo::SDAM::TopologyDescription
     Unknown
   end
 
-  @@lock : Mutex = Mutex.new
+  @@lock : Sync::Mutex = Sync::Mutex.new
 
   property type : TopologyType = :unknown
   # The replica set name.
@@ -303,16 +303,12 @@ class Mongo::SDAM::TopologyDescription
       }
     }
 
-    @servers = @servers.map { |server|
-      out_of_scope = {
-        description.hosts,
-        description.passives,
-        description.arbiters,
-      }.to_a.flatten.none? { |addr_str|
-        addr_str.try(&.downcase) == server.address
-      }
-      out_of_scope ? nil : server
-    }.compact
+    @servers = @servers.compact_map { |server|
+      in_scope = {description.hosts, description.passives, description.arbiters}.any? do |addrs|
+        addrs && addrs.any? { |addr| addr.downcase == server.address }
+      end
+      server if in_scope
+    }
 
     check_if_has_primary
   end
@@ -327,7 +323,7 @@ class Mongo::SDAM::TopologyDescription
   end
 
   def remove(server_description)
-    @servers = @servers.select &.!= server_description
+    @servers.delete(server_description)
   end
 
   def supports_sessions?

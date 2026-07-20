@@ -29,13 +29,13 @@ class Mongo::Connection::Pool(T)
   # communicate that a connection is available for checkout
   @availability_channel : Channel(Nil)
   # global pool mutex
-  @mutex : Mutex
+  @mutex : Sync::Mutex
 
   def initialize(@initial_pool_size = 1, @max_pool_size = 0, @max_idle_pool_size = 1, @checkout_timeout = 5.0,
                  &@factory : -> T)
     @availability_channel = Channel(Nil).new
     @inflight = 0
-    @mutex = Mutex.new
+    @mutex = Sync::Mutex.new
 
     @initial_pool_size.times { build_resource }
   end
@@ -151,7 +151,7 @@ class Mongo::Connection::Pool(T)
   end
 
   # :nodoc:
-  def each_resource
+  def each_resource(&)
     sync do
       @idle.each do |resource|
         yield resource
@@ -197,7 +197,7 @@ class Mongo::Connection::Pool(T)
     end
   end
 
-  private def sync
+  private def sync(&)
     @mutex.lock
     begin
       yield
@@ -206,7 +206,7 @@ class Mongo::Connection::Pool(T)
     end
   end
 
-  private def unsync
+  private def unsync(&)
     @mutex.unlock
     begin
       yield

@@ -1,5 +1,5 @@
 require "./spec_helper"
-require "./unified_runner"
+require "./unified/runner"
 
 describe "Unified Test Runner" do
   it "bootstraps the environment successfully" do

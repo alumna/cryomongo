@@ -58,7 +58,7 @@ module Mongo
     end
 
     def add_unknown_transaction_label
-      if self.is_a?(Mongo::Error) && self.retryable_write?
+      if self.retryable_write?
         self.add_error_label("UnknownTransactionCommitResult")
       elsif self.is_a?(Mongo::Error::Command) && self.max_time_ms_expired?
         self.add_error_label("UnknownTransactionCommitResult")
@@ -84,9 +84,6 @@ module Mongo
     end
   end
 
-  # class Error::Handshake < Error
-  # end
-
   class Error::Connection < Error::Client
   end
 
@@ -111,30 +108,31 @@ module Mongo
     # See: https://github.com/mongodb/specifications/blob/master/source/retryable-reads/retryable-reads.rst#retryable-error
     RETRYABLE_READ_CODES = RETRYABLE_CODES + {133, 134}
     # See: https://github.com/mongodb/specifications/blob/f1fcb6aa9751e5ed7eb8e64c0f08f1edf10a859a/source/change-streams/change-streams.rst#resumable-error
-    RESUMABLE_CODES = {63, 133, 150, 234, 13388, 133} + RETRYABLE_CODES
+    RESUMABLE_CODES = {63, 150, 234, 13388, 133} + RETRYABLE_CODES
 
     def initialize(code, @code_name, message, @details, *, @error_labels = Set(String).new)
       @code = code.try &.as(Int32) || 0
       @message = message.try(&.as(String)) || ""
     end
 
+    def message : String
+      @message || ""
+    end
+
     def to_s(io : IO)
-      io << "Code: #{@code} - #{@message}"
+      io << "Code: " << @code << " - " << message
     end
 
     def recovering?
-      @code.in?(RECOVERING_CODES) ||
-        RECOVERING_MESSAGES.any? &.in? @message.not_nil!
+      @code.in?(RECOVERING_CODES) || RECOVERING_MESSAGES.any?(&.in?(message))
     end
 
     def not_master?
-      @code.in?(NOT_MASTER_CODES) ||
-        self.recovering? ||
-        NOT_MASTER_MESSAGES.any? &.in? @message.not_nil!
+      @code.in?(NOT_MASTER_CODES) || self.recovering? || NOT_MASTER_MESSAGES.any?(&.in?(message))
     end
 
     def shutdown?
-      @code.in? SHUTDOWN_CODES
+      @code.in?(SHUTDOWN_CODES)
     end
 
     def state_change?
@@ -150,7 +148,7 @@ module Mongo
     end
 
     def resumable?
-      @code.in? RESUMABLE_CODES
+      @code.in?(RESUMABLE_CODES)
     end
 
     def max_time_ms_expired?

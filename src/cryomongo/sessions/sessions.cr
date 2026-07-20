@@ -47,7 +47,7 @@ module Mongo::Session
     getter client : Mongo::Client
     @server_session : ServerSession
     @released = false
-    @lock = Mutex.new
+    @lock = Sync::Mutex.new
 
     # This property returns the most recent cluster time seen by this session.
     # If no operations have been executed using this session this value will be null unless advanceClusterTime has been called.
@@ -71,7 +71,7 @@ module Mongo::Session
           {{ k.id }}: options[{{ k.symbolize }}],
         {% end %}
       )
-      @server_session = @client.session_pool.acquire(logical_timeout).not_nil!
+      @server_session = @client.session_pool.acquire(logical_timeout)
       {% end %}
     end
 
@@ -138,7 +138,7 @@ module Mongo::Session
   # :nodoc:
   # see: https://github.com/mongodb/specifications/blob/master/source/sessions/driver-sessions.rst#server-session-pool
   class Pool
-    @lock = Mutex.new(:reentrant)
+    @lock = Sync::Mutex.new(:reentrant)
     @closed : Bool = false
     @pool : Deque(ServerSession) = Deque(ServerSession).new
 

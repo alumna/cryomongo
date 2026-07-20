@@ -18,6 +18,14 @@ class Mongo::Auth::Scram
   @client_proof : String?
   @mongo_hashed_password : String?
 
+  private def safe_salt : Bytes
+    @salt || raise Mongo::Error.new("SCRAM salt is not initialized")
+  end
+
+  private def safe_iterations : Int32
+    @iterations || raise Mongo::Error.new("SCRAM iterations are not initialized")
+  end
+
   def initialize(mechanism : Mongo::Auth::Mechanism, @credentials : Credentials)
     if mechanism.scram_sha1?
       @mechanism_string = "SCRAM-SHA-1"
@@ -118,7 +126,13 @@ class Mongo::Auth::Scram
 
   def first_bare
     raise Mongo::Error.new "Username is missing" unless username = @credentials.username
-    encoded_name = username.gsub('=', "=3D").gsub(',', "=2C")
+    encoded_name = username.gsub do |char|
+      case char
+      when '=' then "=3D"
+      when ',' then "=2C"
+      else          char
+      end
+    end
     @first_bare ||= "n=#{encoded_name},r=#{@client_nonce}"
   end
 
@@ -161,18 +175,18 @@ class Mongo::Auth::Scram
 
   # ClientKey := HMAC(SaltedPassword, "Client Key")
   def client_key
-    @client_key ||= hmac(salted_password(@salt, @iterations), "Client Key")
+    @client_key ||= hmac(salted_password, "Client Key")
   end
 
   def server_key
-    @server_key ||= hmac(salted_password(@salt, @iterations), "Server Key")
+    @server_key ||= hmac(salted_password, "Server Key")
   end
 
-  def hmac(key, data)
+  def hmac(key : Bytes, data : String | Bytes)
     if @mechanism.scram_sha1?
-      OpenSSL::HMAC.digest(:sha1, key.not_nil!, data.not_nil!)
+      OpenSSL::HMAC.digest(:sha1, key, data)
     else
-      OpenSSL::HMAC.digest(:sha256, key.not_nil!, data.not_nil!)
+      OpenSSL::HMAC.digest(:sha256, key, data)
     end
   end
 
@@ -182,12 +196,12 @@ class Mongo::Auth::Scram
   end
 
   # SaltedPassword := Hi(Normalize(password), salt, i)
-  def salted_password(salt, iterations)
+  def salted_password
     if @mechanism.scram_sha1?
       # See: https://github.com/mongodb/specifications/blob/master/source/auth/auth.rst#scram-sha-1
-      hi(mongo_hashed_password, salt, iterations)
+      hi(mongo_hashed_password, safe_salt, safe_iterations)
     else
-      hi(@credentials.password, salt, iterations)
+      hi(@credentials.password || "", safe_salt, safe_iterations)
     end
   end
 
@@ -196,13 +210,13 @@ class Mongo::Auth::Scram
     @mongo_hashed_password ||= Digest::MD5.hexdigest(pwd)
   end
 
-  def hi(data : String?, salt, iterations)
+  def hi(data : String, salt : Bytes, iterations : Int32)
     OpenSSL::PKCS5.pbkdf2_hmac(
-      data.not_nil!,
-      salt.not_nil!,
-      iterations: iterations.not_nil!,
+      data,
+      salt,
+      iterations: iterations,
       algorithm: @mechanism.scram_sha1? ? OpenSSL::Algorithm::SHA1 : OpenSSL::Algorithm::SHA256,
-      key_size: @mechanism.scram_sha1? ? 20 : 32 # @digest.block_size,
+      key_size: @mechanism.scram_sha1? ? 20 : 32
     )
   end
 

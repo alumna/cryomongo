@@ -231,7 +231,8 @@ module Mongo::GridFS
       count = chunk_count(file)
       remaining = file.length
 
-      reader, writer = Pipe.create(capacity: file.chunk_size.to_i32!)
+      # to_i32 naturally raises on overflow. Using `!` was an unsafe bypass.
+      reader, writer = Pipe.create(capacity: file.chunk_size.to_i32)
 
       spawn do
         count.times { |n|
@@ -302,7 +303,8 @@ module Mongo::GridFS
       file = get_file_by_name(filename, revision)
       count = chunk_count(file)
 
-      reader, writer = Pipe.create(capacity: file.chunk_size.to_i32!)
+      # to_i32 naturally raises on overflow. Using `!` was an unsafe bypass.
+      reader, writer = Pipe.create(capacity: file.chunk_size.to_i32)
 
       spawn do
         remaining = file.length
