@@ -78,8 +78,6 @@ module Mongo::Unified
         rescue e : Exception
           if e.message == "SKIP_TEST"
             test_aborted = true
-          elsif test.operations.any?(&.expectError)
-            # Expected error caught successfully!
           else
             raise e
           end
