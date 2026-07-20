@@ -71,7 +71,7 @@ collection = database["collection_name"]
 collection.insert_one({ one: 1 })
 collection.replace_one({ one: 1 }, { two: 2 })
 bson = collection.find_one({ two: 2 })
-puts bson.not_nil!.["two"] # => 2
+puts bson.try(&.["two"]) # => 2
 collection.delete_one({ two: 2 })
 puts collection.count_documents # => 0
 ```
@@ -108,9 +108,7 @@ rescue e : Mongo::Error::Command
 end
 
 # Insert User structures that are automatically serialized to BSON.
-users.insert_many({ "John", "Jane" }.map { |name|
-  User.new(name: name)
-}.to_a)
+users.insert_many(["John", "Jane"].map { |name| User.new(name: name) })
 
 # Fetch a Cursor pointing to the users collection.
 cursor = users.find
@@ -188,9 +186,11 @@ client = Mongo::Client.new("mongodb://address:port/database", options)
 # Instantiate objects to interact with a specific database or a collection…
 database   = client["database_name"]
 collection = database["collection_name"]
+
 # …or using `default_database` if the connection uri string contains a default auth database component ("/database").
-database   = client.default_database
-collection = database.not_nil!.collection["collection_name"]
+if database = client.default_database
+  collection = database["collection_name"]
+end
 
 # The overwhelming majority of programs should use a single client and should not bother with closing clients.
 # Otherwise, to free the underlying resources a client must be manually closed.
@@ -237,7 +237,7 @@ collection = client["database_name"]["collection_name"]
 # Insert a single document
 collection.insert_one({ key: "value" })
 # Insert multiple documents
-collection.insert_many((1..100).map{|i| { count: i }}.to_a)
+collection.insert_many((1..100).map { |i| { count: i } })
 
 # To track the _id, generate and pass it as a property
 id = BSON::ObjectId.new
@@ -248,6 +248,7 @@ collection.insert_one({ _id: id, key: "value" })
 # Find a single document
 document = collection.find_one({ _id: id })
 document.try { |d| puts d.to_json }
+
 # Find multiple documents.
 cursor = collection.find({ qty: { "$gt": 4 }})
 elements = cursor.to_a # cursor is an Iterable(BSON)
@@ -281,7 +282,7 @@ puts document.try &.["age"]
 
 # Perform an aggregation pipeline query
 cursor = collection.aggregate([
-  {"$match": { status: "available" }}
+  {"$match": { status: "available" }},
   {"$limit": 5},
 ])
 cursor.try &.each { |bson| puts bson.to_json }
@@ -317,12 +318,12 @@ bulk = collection.bulk
 # A bulk is ordered by default.
 bulk.ordered? # => true
 
-500.times { |idx|
+500.times do |idx|
   # Build the queries by calling bulk methods multiple times.
   bulk.insert_one({number: idx})
   bulk.delete_many({number: {"$lt": 450}})
   bulk.replace_one({ number: idx }, { number: idx + 1})
-}
+end
 
 # Execute all the queries and return an aggregated result.
 pp bulk.execute(write_concern: Mongo::WriteConcern.new(w: 1))
@@ -391,13 +392,13 @@ require "cryomongo"
 client = Mongo::Client.new
 database = client["database_name"]
 
-# A GridFS bucket belong to a database.
+# A GridFS bucket belongs to a database.
 gridfs = database.grid_fs
 
-# Upload
-file = File.new("file.txt")
-id = gridfs.upload_from_stream("file.txt", file)
-file.close
+# Upload (using File.open ensures the file descriptor is closed automatically)
+id = File.open("file.txt") do |file|
+  gridfs.upload_from_stream("file.txt", file)
+end
 
 # Download
 stream = IO::Memory.new
@@ -408,9 +409,9 @@ puts stream.rewind.gets_to_end
 files = gridfs.find({
   length: {"$gte": 5000},
 })
-files.each { |file|
+files.each do |file|
   puts file.filename
-}
+end
 
 # Delete
 gridfs.delete(id)
@@ -433,7 +434,7 @@ require "cryomongo"
 client = Mongo::Client.new
 collection = client["database_name"]["collection_name"]
 
-spawn {
+spawn do
   cursor = collection.watch(
     [
       {"$match": {"operationType": "insert"}},
@@ -441,11 +442,11 @@ spawn {
     max_await_time_ms: 10000
   )
   # cursor.of(BSON) converts fetched elements to the Mongo::ChangeStream::Document(BSON) type.
-  cursor.of(BSON).each { |doc|
+  cursor.of(BSON).each do |doc|
     puts doc.document_key
     puts doc.full_document.to_json
-  }
-}
+  end
+end
 
 100.times do |i|
   collection.insert_one({count: i})
@@ -629,19 +630,19 @@ collection.with_session(default_transaction_options: transaction_options) do |co
 
   # `with_transaction` will commit after the block ends.
   # if the block raises, the transaction will be aborted.
-  session.with_transaction {
+  session.with_transaction do
     collection.insert_one({_id: 1})
     collection.insert_one({_id: 2})
-  }
+  end
   puts collection.find.to_a.to_json # => [{"_id":1},{"_id":2}]
 
   # The transaction below will be aborted because the block raises an Exception.
   begin
-    session.with_transaction {
+    session.with_transaction do
       collection.insert_one({_id: 3})
       raise "Interrupted!"
       collection.insert_one({_id: 4})
-    }
+    end
   rescue e
     puts e # => Interrupted!
   end
