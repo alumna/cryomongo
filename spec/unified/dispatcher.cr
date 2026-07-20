@@ -82,6 +82,7 @@ module Mongo::Unified::Dispatcher
       when "withTransaction"                          then execute_with_transaction(args, target, registry, internal_client, runner)
       else
         # Ignore unsupported operations silently
+        return
       end
 
       if expected_error
