@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.7.0 - 2026-07-20
+
+### Added
+* **deps:** Integrated `jgaskins/pipe` to replace kernel-level `IO.pipe` with a fast and efficient user-space pipe implementation, increasing throughput for GridFS streaming.
+
+### Changed
+* **architecture:** Split `Mongo::Client` and `Mongo::Collection` large classed into better organized modules (`src/cryomongo/client/*` and `src/cryomongo/collection/*`).
+* **performance:** Revamped TCP socket reading for `OP_MSG` and `OP_REPLY`. The driver now uses length-prefixed `read_fully` framing combined with read-only `IO::Memory` buffers and direct `memchr` (`gets('\0')`) scanning. Eliminates intermediate `Bytes` allocations and maximizes network throughput.
+* **performance:** Replaced one instance  of `Mutex` for tracking message request IDs with a lock-free `Atomic(Int32)`.
+* **performance:** Optimized internal BSON document building, read-preference tag parsing, and topology array filtering to use single-pass logic, lazy iterators, and `String.build`, reducing Garbage Collector (GC) pressure.
+* **modernization:** Updated other instances of `Mutex` with `Sync::Mutex` from Crystal 1.20+, for better compatibility with the new `Parallel` Execution Contexts.
+* **testing:** Refactored the monolithic Unified Test Runner into a clean, modular directory structure (`spec/unified/`) with a dedicated `Dispatcher`, making future specification implementations much easier to create and test.
+
+### Fixed
+* **stability:** Eliminated unsafe unboxings and the risk of silently panics from the driver, replacing them with type-narrowing and explicit `Mongo::Error` raises.
+* **protocol:** Fixed an off-by-4 byte boundary bug in `OP_MSG` sequence size parsing to strictly conform to the MongoDB wire protocol.
+* **error-handling:** Shadowed the `message` getter in `Error::Command` to guarantee a non-nil `String`, and deduplicated error codes for better exception matching.
+
 ## 0.6.0 - 2026-07-17
 
 ### Added

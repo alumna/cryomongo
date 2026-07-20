@@ -16,6 +16,7 @@ It follows the newest MongoDB specifications (MongoDB 8.0).
 On a technical level, the current update already includes:
 
 * **MongoDB 8.0 & Spec Compliance:** Bumped to the latest wire version of `25`. Implemented the official MongoDB Unified Test Format (UTF), already 100% compliant with the official `crud`, `retryable-reads`, and `retryable-writes` test suites.
+* **Performance & Reduced Allocations:** Optimized TCP socket, replacing intermediate buffer allocations with read-only `IO::Memory` byte scanning. Optimizations for efficiency, performance and less GC pressure, like lock-free atomics, single-pass iterators and user-space pipes ([`jgaskins/pipe`](https://github.com/jgaskins/pipe) for GridFS).
 * **Crystal 1.20 Ready:** Updated for the latest Crystal 1.20.x branch, migrating to the updated Mutex, replacing `Time.monotonic` with `Time.instant`, and refactoring `same_thread: true` fiber spawns.
 * **BSON 8.0 Integration:** Uses the updated `alumna/bson.cr` shard, enabling zero-allocation Extended JSON, native 16-byte `Decimal128`, and the new Binary `Vector` types.
 
