@@ -32,22 +32,19 @@ struct Mongo::Messages::OpReply < Mongo::Messages::Part
 
   def initialize(io : IO, header : Messages::Header)
     size = header.body_size
-    sized_io = IO::Sized.new(io, read_size: size)
+    msg_bytes = Bytes.new(size)
+    io.read_fully(msg_bytes)
+    msg_view = IO::Memory.new(msg_bytes, writeable: false)
 
-    @response_flags = ResponseFlags.from_value Int32.from_io(sized_io, IO::ByteFormat::LittleEndian)
-    @cursor_id = Int64.from_io(sized_io, IO::ByteFormat::LittleEndian)
-    @starting_from = Int32.from_io(sized_io, IO::ByteFormat::LittleEndian)
-    @number_returned = Int32.from_io(sized_io, IO::ByteFormat::LittleEndian)
+    @response_flags = ResponseFlags.from_value(msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian))
+    @cursor_id = msg_view.read_bytes(Int64, IO::ByteFormat::LittleEndian)
+    @starting_from = msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian)
+    @number_returned = msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian)
 
-    # Track exactly how many bytes the above integers consumed (4 + 8 + 4 + 4 = 20)
-    bytes_read = 20
     @documents = [] of BSON
 
-    # Stream the documents directly off the socket
-    while bytes_read < size
-      doc = BSON.new(sized_io)
-      @documents << doc
-      bytes_read += doc.size
+    while msg_view.pos < size
+      @documents << BSON.new(msg_view)
     end
   end
 end

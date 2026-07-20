@@ -32,45 +32,34 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
 
   def initialize(io : IO, header : Messages::Header)
     size = header.body_size
+    msg_bytes = Bytes.new(size)
+    io.read_fully(msg_bytes)
+    msg_view = IO::Memory.new(msg_bytes, writeable: false)
 
-    # Wrap the socket IO to securely bound our reads to this specific message length,
-    # preventing any possibility of over-reading into the next message on the wire.
-    sized_io = IO::Sized.new(io, read_size: size)
-
-    @flag_bits = Flags.from_value UInt32.from_io(sized_io, IO::ByteFormat::LittleEndian)
+    @flag_bits = Flags.from_value(msg_view.read_bytes(UInt32, IO::ByteFormat::LittleEndian))
     @sections = typeof(@sections).new
 
     has_checksum = @flag_bits.checksum_present?
+    limit_pos = size - (has_checksum ? 4 : 0)
 
-    # Calculate exactly how many bytes the payload sections consume
-    sections_size = size - 4 - (has_checksum ? 4 : 0)
-    bytes_read = 0
-
-    while bytes_read < sections_size
-      payload_type = UInt8.from_io(sized_io, IO::ByteFormat::LittleEndian)
-      bytes_read += 1
+    while msg_view.pos < limit_pos
+      payload_type = msg_view.read_bytes(UInt8, IO::ByteFormat::LittleEndian)
 
       case payload_type
       when 0_u8
-        # Stream the BSON document directly from the socket
-        payload = BSON.new(sized_io)
+        payload = BSON.new(msg_view)
         @sections << SectionBody.new(payload)
-        bytes_read += payload.size
       when 1_u8
-        sequence_size = Int32.from_io(sized_io, IO::ByteFormat::LittleEndian)
+        marker = msg_view.pos
+        sequence_size = msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian)
 
-        # Read exactly up to the null byte to avoid any internal IO buffering side-effects
-        sequence_identifier = sized_io.gets('\0', chomp: true)
+        sequence_identifier = msg_view.gets('\0', chomp: true)
         raise Mongo::Error.new("Invalid OP_MSG: EOF while reading sequence identifier") unless sequence_identifier
 
         contents = Array(BSON).new
 
-        # Track bytes read for this specific sequence (4 bytes for size + string length + 1 for null byte)
-        seq_bytes_read = 4 + sequence_identifier.bytesize + 1
-        while seq_bytes_read < sequence_size
-          doc = BSON.new(sized_io)
-          contents << doc
-          seq_bytes_read += doc.size
+        while msg_view.pos - marker < sequence_size
+          contents << BSON.new(msg_view)
         end
 
         @sections << SectionDocumentSequence.new(
@@ -78,14 +67,13 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
             sequence_identifier, contents
           )
         )
-        bytes_read += sequence_size
       else
         raise Mongo::Error.new "Received invalid payload type: #{payload_type}"
       end
     end
 
     if has_checksum
-      @checksum = UInt32.from_io(sized_io, IO::ByteFormat::LittleEndian)
+      @checksum = msg_view.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
     end
   end
 
@@ -121,11 +109,11 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
   end
 
   def each_sequence(&)
-    sections.each { |section|
-      if section.is_a? SectionDocumentSequence
+    sections.each do |section|
+      if section.is_a?(SectionDocumentSequence)
         yield section.payload.sequence_identifier, section.payload.contents
       end
-    }
+    end
   end
 
   def sequence(key : String, contents : Array(BSON))
@@ -138,11 +126,11 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
   end
 
   def valid?
-    self.body["ok"] == 1
+    body["ok"] == 1
   end
 
   def error? : Exception?
-    cached_body = self.body
+    cached_body = body
 
     err_label_set = cached_body["errorLabels"]?.try { |labels|
       Set(String).new(Array(String).from_bson(labels))
@@ -155,23 +143,23 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
         Mongo::Error::WriteConcern.new(write_error.as(BSON), error_labels: err_label_set)
       end
     else
-      err_msg = cached_body["errmsg"]?.try &.as(String)
-      err_code_name = cached_body["codeName"]?.try &.as(String)
+      err_msg = cached_body["errmsg"]?.try(&.as(String))
+      err_code_name = cached_body["codeName"]?.try(&.as(String))
       err_code = cached_body["code"]?
-      details = cached_body["errInfo"]?.try &.as(BSON)
+      details = cached_body["errInfo"]?.try(&.as(BSON))
       Mongo::Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: err_label_set)
     end
   end
 
   def safe_payload(command)
-    cached_body = self.body
+    cached_body = body
     if command.is_a?(Commands::Hello) && cached_body["speculativeAuthenticate"]?
       BSON.new
     else
       payload = BSON.new(cached_body)
-      self.each_sequence { |key, contents|
+      each_sequence do |key, contents|
         payload[key] = contents
-      }
+      end
       payload
     end
   end

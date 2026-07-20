@@ -10,35 +10,33 @@ abstract struct Mongo::Messages::Part
     when BSON
       field.size
     when Array
-      field.sum { |elt|
-        self.field_size elt
-      }
+      field.sum { |elt| self.field_size(elt) }
     when Enum
       sizeof(typeof(field.value))
     when Messages::Part
       field.part_size
-    else raise Mongo::Error.new "Unsupported field type: #{typeof(field)}."
+    else
+      raise Mongo::Error.new "Unsupported field type: #{typeof(field)}."
     end
   end
 
   def self.field_to_io(io : IO, field)
     case field
     when Number
-      field.to_io(io, IO::ByteFormat::LittleEndian)
+      io.write_bytes(field, IO::ByteFormat::LittleEndian)
     when String
       io << field
       io.write_byte 0_u8
     when BSON
       io.write field.data
     when Array
-      field.each { |elt|
-        self.field_to_io io, elt
-      }
+      field.each { |elt| self.field_to_io(io, elt) }
     when Enum
-      field.value.to_io(io, IO::ByteFormat::LittleEndian)
+      io.write_bytes(field.value, IO::ByteFormat::LittleEndian)
     when Messages::Part
       field.to_io(io)
-    else raise Mongo::Error.new "Unsupported field type: #{typeof(field)}."
+    else
+      raise Mongo::Error.new "Unsupported field type: #{typeof(field)}."
     end
   end
 
@@ -48,7 +46,13 @@ abstract struct Mongo::Messages::Part
       {% for ivar in @type.instance_vars %}
         {% ann = ivar.annotation(Mongo::Messages::Part::Field) %}
         {% unless ann && ann[:ignore] %}
-          s += Messages::Part.field_size({{ivar.id}}) if {{ivar.id}}
+          {% if ivar.type.nilable? %}
+            if {{ivar.id}}
+              s += Messages::Part.field_size({{ivar.id}})
+            end
+          {% else %}
+            s += Messages::Part.field_size({{ivar.id}})
+          {% end %}
         {% end %}
       {% end %}
     {% end %}
@@ -60,7 +64,13 @@ abstract struct Mongo::Messages::Part
       {% for ivar in @type.instance_vars %}
         {% ann = ivar.annotation(Mongo::Messages::Part::Field) %}
         {% unless ann && ann[:ignore] %}
-          Messages::Part.field_to_io(io, {{ivar.id}}) if {{ivar.id}}
+          {% if ivar.type.nilable? %}
+            if {{ivar.id}}
+              Messages::Part.field_to_io(io, {{ivar.id}})
+            end
+          {% else %}
+            Messages::Part.field_to_io(io, {{ivar.id}})
+          {% end %}
         {% end %}
       {% end %}
     {% end %}
