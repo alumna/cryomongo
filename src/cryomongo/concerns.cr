@@ -41,9 +41,11 @@ module Mongo
     property level : String? = nil
     # :nodoc:
     property after_cluster_time : BSON::Timestamp? = nil
+    # :nodoc:
+    property at_cluster_time : BSON::Timestamp? = nil
 
     # Create a ReadConcern instance.
-    def initialize(@level = nil, @after_cluster_time = nil)
+    def initialize(@level = nil, @after_cluster_time = nil, @at_cluster_time = nil)
     end
   end
 
@@ -98,7 +100,20 @@ module Mongo
     protected def self.mix_read_concern(command, args, read_concern : ReadConcern?, *, session : Session::ClientSession)
       options = args["options"]?
 
-      if options && session.is_transaction?
+      if options && session.options.snapshot
+        # Snapshot session logic: all operations in a snapshot session must include readConcern: { level: "snapshot", atClusterTime: ... }
+        existing_concern = options["read_concern"]?.try { |c| c.as?(ReadConcern) } || read_concern
+        level = existing_concern.try(&.level) || "snapshot"
+        snapshot_concern = ReadConcern.new(
+          level: level,
+          at_cluster_time: session.snapshot_time
+        )
+        args.merge({
+          options: options.merge({
+            read_concern: snapshot_concern,
+          }),
+        })
+      elsif options && session.is_transaction?
         if options["read_concern"]?
           raise Error::Transaction.new("Cannot set read concern after starting a transaction.")
         end
@@ -122,24 +137,28 @@ module Mongo
         else
           args
         end
-      elsif options && command.is_a?(Commands::ReadCommand) && command.read_command?(**args)
-        concern = options["read_concern"]? || read_concern
+      elsif options
+        is_read = command.is_a?(Commands::ReadCommand) && command.read_command?(**args)
+        is_write = command.is_a?(Commands::WriteCommand) && command.write_command?(**args)
+
+        concern = options["read_concern"]?.try { |c| c.as?(ReadConcern) } || read_concern
         after_cluster_time = session.operation_time if session.options.causal_consistency
 
-        if after_cluster_time
-          concern = concern || read_concern || ReadConcern.new
-          concern.after_cluster_time = after_cluster_time
+        if after_cluster_time && (is_read || is_write)
+          concern = concern ? ReadConcern.new(level: concern.level, after_cluster_time: after_cluster_time) : ReadConcern.new(after_cluster_time: after_cluster_time)
           args.merge({
             options: options.merge({
               read_concern: concern,
             }),
           })
-        else
+        elsif is_read
           args.merge({
             options: options.merge({
               read_concern: read_concern,
             }),
           })
+        else
+          args
         end
       else
         args

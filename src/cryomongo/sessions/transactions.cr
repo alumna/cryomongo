@@ -64,6 +64,10 @@ module Mongo::Session
     # )
     # ```
     def start_transaction(**options)
+      if @options.snapshot
+        raise Error::Transaction.new("Transactions are not supported in snapshot sessions")
+      end
+
       @current_transaction_options = (@options.default_transaction_options || TransactionOptions.new)
       @current_transaction_options = @current_transaction_options.copy_with(
         read_concern: options["read_concern"]? || @current_transaction_options.read_concern || @client.read_concern,

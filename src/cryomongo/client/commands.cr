@@ -86,9 +86,6 @@ class Mongo::Client
     **args,
   )
     # Mix collection/database/client/options read and write concerns considering the precedence rules.
-    # args = args.merge({
-    #   options: args["options"]? || NamedTuple.new,
-    # })
     args = WithWriteConcern.mix_write_concern(command, args, write_concern || @write_concern, session: session)
     args = WithReadConcern.mix_read_concern(command, args, read_concern || @read_concern, session: session)
 
@@ -137,6 +134,11 @@ class Mongo::Client
     else
       # Select a suitable server and retrieve the underlying connection.
       server_description ||= server_selection(command, args, read_preference)
+
+      if session.options.snapshot && server_description.max_wire_version < 13
+        raise Error::Client.new("Snapshot reads require MongoDB 5.0 or later")
+      end
+
       connection = get_connection(server_description)
       session.pin(server_description)
 
@@ -174,6 +176,10 @@ class Mongo::Client
     **args,
     &
   )
+    if session.options.snapshot && server_description.max_wire_version < 13
+      raise Error::Client.new("Snapshot reads require MongoDB 5.0 or later")
+    end
+
     # Reject for this special case.
     if command == Mongo::Commands::FindAndModify && args["options"]?.try(&.["hint"]?) && server_description.max_wire_version < 8
       raise Mongo::Error.new "The hint option is not supported by MongoDB servers < 4.2"
@@ -320,6 +326,15 @@ class Mongo::Client
 
     if operation_time = base_result.operation_time
       session.advance_operation_time(operation_time) if session
+    end
+
+    if session && session.options.snapshot && session.snapshot_time.nil?
+      at_cluster_time = if cursor_bson = op_msg.body["cursor"]?.try(&.as?(BSON))
+                          cursor_bson["atClusterTime"]?.try(&.as?(BSON::Timestamp))
+                        else
+                          op_msg.body["atClusterTime"]?.try(&.as?(BSON::Timestamp))
+                        end
+      session.snapshot_time = at_cluster_time if at_cluster_time
     end
 
     # Update the session recovery token if needed.

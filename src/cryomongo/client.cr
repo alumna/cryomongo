@@ -233,12 +233,16 @@ class Mongo::Client
   # session.end
   # ```
   def start_session(*,
-                    causal_consistency : Bool = true,
+                    causal_consistency : Bool? = nil,
+                    snapshot : Bool? = nil,
+                    snapshot_time : BSON::Timestamp? = nil,
                     default_transaction_options : Session::TransactionOptions? = nil) : Session::ClientSession
     Session::ClientSession.new(
       client: self,
       implicit: false,
       causal_consistency: causal_consistency,
+      snapshot: snapshot,
+      snapshot_time: snapshot_time,
       default_transaction_options: default_transaction_options
     )
   end
