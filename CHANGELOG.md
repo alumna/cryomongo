@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.0 - 2026-07-22
+
+### Added
+* **sessions:** Fully implemented the MongoDB 5.0+ Snapshot Reads specification (`snapshot: true` and `snapshot_time`).
+* **causal-consistency:** Fully updated causally-consistent sessions to propagate `afterClusterTime` on all write commands (`insert`, `update`, `delete`, `findAndModify`, `bulkWrite`, etc.) outside transactions.
+* **sessions:** Added strict `SessionOptions` validation: enforced mutual exclusion between `snapshot` and `causal_consistency`, required `snapshot` mode when `snapshot_time` is specified, and prohibited `start_transaction` calls on snapshot sessions.
+* **testing:** Enhanced the Unified Test Runner with support for `getSnapshotTime`, `assertSessionDirty`, `assertSessionNotDirty`, `assertSameLsidOnLastTwoCommands`, and `assertDifferentLsidOnLastTwoCommands`.
+
+### Fixed
+* **compatibility:** Enforced minimum server wire version check (`maxWireVersion >= 13` / MongoDB 5.0+) for snapshot sessions, raising clean client-side errors on unsupported topology versions.
+* **spec:** Fixed BSON response parsing to extract `atClusterTime` from both top-level replies and `cursor` documents.
+
 ## 0.7.0 - 2026-07-20
 
 ### Added

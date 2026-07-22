@@ -29,8 +29,8 @@ The update roadmap is actively being worked on. Below is the current progress ag
 - [x] **Retryable Writes** (`retryable-writes.md`): 100% compliant. Gracefully handles network failures, step-downs, and `errorLabels`.
 - [x] **Retryable Reads** (`retryable-reads.md`): 100% compliant.
 - [x] **Transactions** (`transactions.md` & `transactions-convenient-api.md`): 100% compliant. Implements robust exponential backoffs and strict timeouts.
-- [ ] **Sessions & Causal Consistency** (`causal-consistency.md`): Up next.
-- [ ] **Server Discovery and Monitoring** (`server-discovery-and-monitoring.md`): Pending sync.
+- [ ] **Sessions & Causal Consistency** (`causal-consistency.md`): 100% compliant. Full support for snapshot reads and causally consistent write propagation.
+- [ ] **Server Discovery and Monitoring** (`server-discovery-and-monitoring.md`): Up next.
 - [ ] **Authentication** (`auth.md`): Pending SCRAM-SHA-256 validation.
 
 #### Cryomongo is a high-performance MongoDB driver written in pure Crystal. (i.e. no C dependencies needed.)
