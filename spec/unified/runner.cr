@@ -166,7 +166,16 @@ module Mongo::Unified
               uri += query_parts.join("&")
             end
 
-            @registry.clients[req.id] = Mongo::Client.new(uri)
+            client = Mongo::Client.new(uri)
+            client_id = req.id
+            @registry.clients[client_id] = client
+            @registry.command_started_events[client_id] = [] of Mongo::Monitoring::Commands::CommandStartedEvent
+
+            client.subscribe_commands do |event|
+              if event.is_a?(Mongo::Monitoring::Commands::CommandStartedEvent)
+                @registry.command_started_events[client_id] << event
+              end
+            end
           when "database"
             if client_name = req.client
               if parent_client = @registry.clients[client_name]?
@@ -209,12 +218,24 @@ module Mongo::Unified
               if parent_client = @registry.clients[client_name]?
                 opts = req.sessionOptions
                 causal = nil
+                snapshot = nil
+                snapshot_time = nil
                 default_txn_opts = nil
 
                 if opts
                   if hash = opts.as_h?
                     if cc = hash["causalConsistency"]?
                       causal = cc.as_bool
+                    end
+                    if snap = hash["snapshot"]?
+                      snapshot = snap.as_bool
+                    end
+                    if snap_time_arg = hash["snapshotTime"]?
+                      if snap_time_str = snap_time_arg.as_s?
+                        if val = @registry.entities[snap_time_str]?
+                          snapshot_time = val.as?(BSON::Timestamp)
+                        end
+                      end
                     end
                     if def_opts = hash["defaultTransactionOptions"]?
                       default_txn_opts = parse_transaction_options(def_opts)
@@ -223,7 +244,9 @@ module Mongo::Unified
                 end
 
                 session = parent_client.start_session(
-                  causal_consistency: causal.nil? ? true : causal,
+                  causal_consistency: causal,
+                  snapshot: snapshot,
+                  snapshot_time: snapshot_time,
                   default_transaction_options: default_txn_opts
                 )
                 @registry.sessions[req.id] = session

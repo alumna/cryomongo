@@ -39,6 +39,8 @@ module Mongo::Session
 
   record Options,
     causal_consistency : Bool? = nil,
+    snapshot : Bool? = nil,
+    snapshot_time : BSON::Timestamp? = nil,
     # The default TransactionOptions to use for transactions started on this session.
     default_transaction_options : TransactionOptions? = nil
 
@@ -57,6 +59,8 @@ module Mongo::Session
     # If no operations have been performed using this session the value will be null unless advanceOperationTime has been called.
     # This value will also be null when the cluster does not report operation times.
     getter operation_time : BSON::Timestamp? = nil
+    # Snapshot time for snapshot reads session.
+    property snapshot_time : BSON::Timestamp? = nil
     # The session options used when creating the session.
     getter options : Options
 
@@ -66,11 +70,28 @@ module Mongo::Session
     protected def initialize(@client : Mongo::Client, @implicit = true, **options : **U) forall U
       {% begin %}
       {{ @type }} # see: https://github.com/crystal-lang/crystal/issues/2731
+      raw_causal = options["causal_consistency"]?
+      raw_snapshot = options["snapshot"]? || false
+      raw_snapshot_time = options["snapshot_time"]?
+
+      if raw_snapshot
+        if raw_causal == true
+          raise Mongo::Error::Client.new("Snapshot reads and causal consistency are mutually exclusive.")
+        end
+        causal = false
+      elsif raw_snapshot_time
+        raise Mongo::Error::Client.new("snapshot_time cannot be set when snapshot is false.")
+      else
+        causal = @implicit ? false : (raw_causal.nil? ? true : raw_causal)
+      end
+
       @options = Options.new(
-        {% for k in U %}
-          {{ k.id }}: options[{{ k.symbolize }}],
-        {% end %}
+        causal_consistency: causal,
+        snapshot: raw_snapshot,
+        snapshot_time: raw_snapshot_time,
+        default_transaction_options: options["default_transaction_options"]?
       )
+      @snapshot_time = raw_snapshot_time
       @server_session = @client.session_pool.acquire(logical_timeout)
       {% end %}
     end

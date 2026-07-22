@@ -39,6 +39,11 @@ module Mongo::Unified::Dispatcher
       when "assertSessionPinned"                      then execute_assert_session_pinned(args, registry)
       when "assertSessionUnpinned"                    then execute_assert_session_unpinned(args, registry)
       when "assertSessionTransactionState"            then execute_assert_session_transaction_state(args, registry)
+      when "assertSessionDirty"                       then execute_assert_session_dirty(args, registry)
+      when "assertSessionNotDirty"                    then execute_assert_session_not_dirty(args, registry)
+      when "assertSameLsidOnLastTwoCommands"          then execute_assert_same_lsid(args, registry)
+      when "assertDifferentLsidOnLastTwoCommands"     then execute_assert_different_lsid(args, registry)
+      when "getSnapshotTime"                          then execute_get_snapshot_time(op, registry)
       when "targetedFailPoint"                        then execute_targeted_fail_point(args, registry)
       when "assertCollectionExists"                   then execute_assert_collection_exists(args, internal_client)
       when "assertCollectionNotExists"                then execute_assert_collection_not_exists(args, internal_client)
@@ -141,6 +146,55 @@ module Mongo::Unified::Dispatcher
     raise "Missing arguments" unless args
     entities = Array(Hash(String, EntityRequest)).from_json(args["entities"].to_json)
     runner.create_entities(entities)
+  end
+
+  private def execute_get_snapshot_time(op, registry)
+    target = registry.resolve_target(op.object)
+    if session = target.as?(Mongo::Session::ClientSession)
+      if snap_time = session.snapshot_time
+        if entity_name = op.saveResultAsEntity
+          registry.entities[entity_name] = snap_time
+        end
+      else
+        raise "TEST_FAILED: getSnapshotTime called but session.snapshot_time is nil"
+      end
+    end
+  end
+
+  private def execute_assert_session_dirty(args, registry)
+    if args && (session_id = args["session"]?.try(&.as_s))
+      if session_ent = registry.sessions[session_id]?
+        raise "TEST_FAILED: Expected session #{session_id} to be dirty" unless session_ent.dirty
+      end
+    end
+  end
+
+  private def execute_assert_session_not_dirty(args, registry)
+    if args && (session_id = args["session"]?.try(&.as_s))
+      if session_ent = registry.sessions[session_id]?
+        raise "TEST_FAILED: Expected session #{session_id} to not be dirty" if session_ent.dirty
+      end
+    end
+  end
+
+  private def execute_assert_same_lsid(args, registry)
+    if args && (client_id = args["client"]?.try(&.as_s))
+      events = registry.command_started_events[client_id]? || [] of Mongo::Monitoring::Commands::CommandStartedEvent
+      raise "TEST_FAILED: Expected at least 2 events for client #{client_id}, got #{events.size}" if events.size < 2
+      lsid1 = events[-2].command["lsid"]?
+      lsid2 = events[-1].command["lsid"]?
+      raise "TEST_FAILED: Expected same lsid on last two commands, got #{lsid1} and #{lsid2}" unless lsid1 && lsid2 && lsid1 == lsid2
+    end
+  end
+
+  private def execute_assert_different_lsid(args, registry)
+    if args && (client_id = args["client"]?.try(&.as_s))
+      events = registry.command_started_events[client_id]? || [] of Mongo::Monitoring::Commands::CommandStartedEvent
+      raise "TEST_FAILED: Expected at least 2 events for client #{client_id}, got #{events.size}" if events.size < 2
+      lsid1 = events[-2].command["lsid"]?
+      lsid2 = events[-1].command["lsid"]?
+      raise "TEST_FAILED: Expected different lsid on last two commands, but got same: #{lsid1}" if lsid1 && lsid2 && lsid1 == lsid2
+    end
   end
 
   private def execute_assert_session_pinned(args, registry)

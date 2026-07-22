@@ -5,6 +5,8 @@ module Mongo::Unified
     property collections = Hash(String, Mongo::Collection).new
     property buckets = Hash(String, Mongo::GridFS::Bucket).new
     property sessions = Hash(String, Mongo::Session::ClientSession).new
+    property entities = Hash(String, BSON::Value).new
+    property command_started_events = Hash(String, Array(Mongo::Monitoring::Commands::CommandStartedEvent)).new
 
     def close_all
       clients.each_value(&.close)
