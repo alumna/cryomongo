@@ -36,7 +36,6 @@ module Mongo::SDAM
         connection.socket.close
       end
       @connection = nil
-      @client.close_connection_pool(server_description)
     end
 
     def scan

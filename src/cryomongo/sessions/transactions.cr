@@ -206,7 +206,8 @@ module Mongo::Session
     # ```
     def commit_transaction(*, write_concern : WriteConcern? = nil)
       state_transition(:commit, rollback_status_on_error: false) {
-        skip_commit = @transitions_from.try(&.starting?) || false
+        has_wc = !(write_concern || current_transaction_options.write_concern).nil?
+        skip_commit = (@transitions_from.try(&.starting?) || false) && !has_wc
         @client.command(
           Commands::CommitTransaction,
           session: self,

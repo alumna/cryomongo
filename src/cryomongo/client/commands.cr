@@ -358,12 +358,14 @@ class Mongo::Client
       is_timeout = error.is_a?(IO::TimeoutError)
       unless is_timeout
         server_description.try { |desc|
-          Mongo::Log.error(exception: error) { "I/O error with server address: #{desc.address}" }
-          description = SDAM::ServerDescription.new(desc.address)
-          description.error = error.message
-          description.last_update_time = desc.last_update_time
-          topology.update(desc, description)
-          close_connection_pool(desc)
+          unless desc.type.unknown?
+            Mongo::Log.error(exception: error) { "I/O error with server address: #{desc.address}" }
+            description = SDAM::ServerDescription.new(desc.address)
+            description.error = error.message
+            description.last_update_time = desc.last_update_time
+            topology.update(desc, description)
+            close_connection_pool(desc)
+          end
         }
       end
       session.try &.dirty = true
@@ -375,14 +377,16 @@ class Mongo::Client
       # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#not-master-and-node-is-recovering
       if error.state_change?
         server_description.try { |desc|
-          description = SDAM::ServerDescription.new(desc.address)
-          description.min_wire_version = desc.min_wire_version
-          description.max_wire_version = desc.max_wire_version
-          description.error = error.message
-          description.last_update_time = desc.last_update_time
-          topology.update(desc, description)
-          close_connection_pool(desc) if error.shutdown?
-          @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
+          unless desc.type.unknown?
+            description = SDAM::ServerDescription.new(desc.address)
+            description.min_wire_version = desc.min_wire_version
+            description.max_wire_version = desc.max_wire_version
+            description.error = error.message
+            description.last_update_time = desc.last_update_time
+            topology.update(desc, description)
+            close_connection_pool(desc) if error.shutdown?
+            @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
+          end
         }
       end
     end

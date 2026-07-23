@@ -82,6 +82,8 @@ class Mongo::SDAM::TopologyDescription
   def update(old_description : ServerDescription, new_description : ServerDescription)
     @@lock.synchronize {
       previous_td = self.dup
+      current_server = @servers.find { |s| s.address == old_description.address }
+      actual_old_description = current_server || old_description
 
       # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#updating-the-topologydescription
       if @type.single? && set_name.try { |name| new_description.set_name != name }
@@ -91,10 +93,10 @@ class Mongo::SDAM::TopologyDescription
 
       replace_description(old_description, new_description)
 
-      if old_description != new_description
+      if actual_old_description != new_description
         @client.broadcast_sdam(Monitoring::SDAM::ServerDescriptionChangedEvent.new(
           address: old_description.address,
-          previous_description: old_description,
+          previous_description: actual_old_description,
           new_description: new_description
         ))
       end
@@ -179,7 +181,7 @@ class Mongo::SDAM::TopologyDescription
         # ignore
       end
 
-      if previous_td.type != @type || old_description != new_description
+      if previous_td.type != @type || actual_old_description != new_description
         @client.broadcast_sdam(Monitoring::SDAM::TopologyDescriptionChangedEvent.new(
           previous_description: previous_td,
           new_description: self
@@ -235,7 +237,7 @@ class Mongo::SDAM::TopologyDescription
     remove(description) if (me = description.me) && description.address != me.downcase
   end
 
-  # This subroutine is executed with the ServerDescription from an RSSecondary, RSArbiter, or RSOther when the TopologyType is ReplicaSetWithPrimary.
+  # This subroutine is executed with an RSSecondary, RSArbiter, or RSOther when the TopologyType is ReplicaSetWithPrimary.
   def update_rs_with_primary_from_member(description)
     return unless servers.any? &.address.== description.address
 
