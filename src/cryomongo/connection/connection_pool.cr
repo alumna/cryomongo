@@ -71,8 +71,11 @@ class Mongo::Connection::Pool(T)
         resource = if @idle.empty?
                      if can_increase_pool?
                        @inflight += 1
-                       r = unsync { build_resource }
-                       @inflight -= 1
+                       r = begin
+                         unsync { build_resource }
+                       ensure
+                         @inflight -= 1
+                       end
                        r
                      else
                        unsync { wait_for_available }

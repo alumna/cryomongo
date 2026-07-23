@@ -300,10 +300,12 @@ class Mongo::Client
   end
 
   protected def close_connection_pool(server_description : SDAM::ServerDescription)
-    has_pool = @pools.has_key?(server_description.address)
-    @pools[server_description.address]?.try &.close
+    has_pool = false
     @@connection_pool_lock.synchronize {
-      @pools.delete server_description.address
+      if pool = @pools.delete(server_description.address)
+        has_pool = true
+        pool.close
+      end
     }
     if has_pool
       broadcast_cmap(Monitoring::CMAP::PoolClearedEvent.new(address: server_description.address))

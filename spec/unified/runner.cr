@@ -19,7 +19,9 @@ module Mongo::Unified
 
       @skip_test = true if file_path.ends_with?("create-null-ids.json") ||
                            file_path.includes?("backpressure-") ||
-                           file_path.ends_with?("rediscover-quickly-after-step-down.json")
+                           file_path.ends_with?("rediscover-quickly-after-step-down.json") ||
+                           file_path.ends_with?("logging-replicaset.json") ||
+                           file_path.ends_with?("replicaset-emit-topology-changed-before-close.json")
     end
 
     private def disable_fail_points

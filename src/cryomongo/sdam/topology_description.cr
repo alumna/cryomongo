@@ -89,12 +89,6 @@ class Mongo::SDAM::TopologyDescription
         return
       end
 
-      # Avoid duplicate Unknown transition if server is already Unknown
-      current_server = @servers.find { |s| s.address == old_description.address }
-      if current_server && current_server.type.unknown? && new_description.type.unknown?
-        return
-      end
-
       replace_description(old_description, new_description)
 
       if old_description != new_description
