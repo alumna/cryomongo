@@ -126,7 +126,6 @@ module Mongo::Unified
         end
 
         if req_auth = req.auth
-          # Cluster has no auth enabled in standard URI
           cluster_has_auth = false
           ok = false if req_auth != cluster_has_auth
         end
@@ -185,18 +184,26 @@ module Mongo::Unified
             @registry.events[client_id] = [] of Mongo::Monitoring::Event
 
             client.subscribe_commands do |event|
-              @registry.events[client_id] << event
+              if list = @registry.events[client_id]?
+                list << event
+              end
               if event.is_a?(Mongo::Monitoring::Commands::CommandStartedEvent)
-                @registry.command_started_events[client_id] << event
+                if cmd_list = @registry.command_started_events[client_id]?
+                  cmd_list << event
+                end
               end
             end
 
             client.subscribe_sdam do |event|
-              @registry.events[client_id] << event
+              if list = @registry.events[client_id]?
+                list << event
+              end
             end
 
             client.subscribe_cmap do |event|
-              @registry.events[client_id] << event
+              if list = @registry.events[client_id]?
+                list << event
+              end
             end
           when "thread"
             @registry.threads[req.id] = ThreadEntity.new

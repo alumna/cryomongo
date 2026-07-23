@@ -99,6 +99,14 @@ class Mongo::Client
 
   # Frees all the resources associated with a client.
   def close
+    previous_td = topology.dup
+    topology.type = :unknown
+    broadcast_sdam(Monitoring::SDAM::TopologyDescriptionChangedEvent.new(
+      previous_description: previous_td,
+      new_description: topology
+    ))
+    broadcast_sdam(Monitoring::SDAM::TopologyClosedEvent.new)
+
     @pools.each do |_, pool|
       pool.close
     rescue e
@@ -292,11 +300,14 @@ class Mongo::Client
   end
 
   protected def close_connection_pool(server_description : SDAM::ServerDescription)
+    has_pool = @pools.has_key?(server_description.address)
     @pools[server_description.address]?.try &.close
     @@connection_pool_lock.synchronize {
       @pools.delete server_description.address
     }
-    broadcast_cmap(Monitoring::CMAP::PoolClearedEvent.new(address: server_description.address))
+    if has_pool
+      broadcast_cmap(Monitoring::CMAP::PoolClearedEvent.new(address: server_description.address))
+    end
   end
 
   protected def on_topology_update

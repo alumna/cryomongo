@@ -146,6 +146,10 @@ class Mongo::Connection::Pool(T)
       else
         resource.close
         @total.delete(resource)
+        select
+        when @availability_channel.send nil
+        else
+        end
       end
     end
   end
@@ -166,8 +170,14 @@ class Mongo::Connection::Pool(T)
 
   # :nodoc:
   def delete(resource : T)
-    @total.delete(resource)
-    @idle.delete(resource)
+    sync do
+      @total.delete(resource)
+      @idle.delete(resource)
+      select
+      when @availability_channel.send nil
+      else
+      end
+    end
   end
 
   private def build_resource : T

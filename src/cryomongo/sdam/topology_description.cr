@@ -81,11 +81,17 @@ class Mongo::SDAM::TopologyDescription
 
   def update(old_description : ServerDescription, new_description : ServerDescription)
     @@lock.synchronize {
-      previous_topology_type = @type
+      previous_td = self.dup
 
       # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#updating-the-topologydescription
       if @type.single? && set_name.try { |name| new_description.set_name != name }
         replace_description(old_description, ServerDescription.new(old_description.address))
+        return
+      end
+
+      # Avoid duplicate Unknown transition if server is already Unknown
+      current_server = @servers.find { |s| s.address == old_description.address }
+      if current_server && current_server.type.unknown? && new_description.type.unknown?
         return
       end
 
@@ -179,9 +185,9 @@ class Mongo::SDAM::TopologyDescription
         # ignore
       end
 
-      if previous_topology_type != @type
+      if previous_td.type != @type || old_description != new_description
         @client.broadcast_sdam(Monitoring::SDAM::TopologyDescriptionChangedEvent.new(
-          previous_description: self,
+          previous_description: previous_td,
           new_description: self
         ))
       end

@@ -355,14 +355,17 @@ class Mongo::Client
     if error.is_a?(NetworkError)
       Mongo::Log.error(exception: error) { "Network error" } unless server_description
       # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#network-or-command-error-during-server-check
-      server_description.try { |desc|
-        Mongo::Log.error(exception: error) { "I/O error with server address: #{desc.address}" }
-        description = SDAM::ServerDescription.new(desc.address)
-        description.error = error.message
-        description.last_update_time = desc.last_update_time
-        topology.update(desc, description)
-        close_connection_pool(desc)
-      }
+      is_timeout = error.is_a?(IO::TimeoutError)
+      unless is_timeout
+        server_description.try { |desc|
+          Mongo::Log.error(exception: error) { "I/O error with server address: #{desc.address}" }
+          description = SDAM::ServerDescription.new(desc.address)
+          description.error = error.message
+          description.last_update_time = desc.last_update_time
+          topology.update(desc, description)
+          close_connection_pool(desc)
+        }
+      end
       session.try &.dirty = true
       error = Error::Network.new(error)
     end
