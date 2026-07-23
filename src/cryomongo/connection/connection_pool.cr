@@ -23,6 +23,7 @@ class Mongo::Connection::Pool(T)
   @idle = Set(T).new
   # connections waiting to be stablished (they are not in *@idle* nor in *@total*)
   @inflight : Int32
+  @cleared : Bool = false
 
   # Sync state
 
@@ -42,9 +43,27 @@ class Mongo::Connection::Pool(T)
 
   # close all resources in the pool
   def close : Nil
-    @total.each &.close
-    @total.clear
-    @idle.clear
+    sync do
+      @total.each &.close
+      @total.clear
+      @idle.clear
+    end
+  end
+
+  def clear : Bool
+    sync do
+      return false if @cleared && @total.empty? && @idle.empty?
+      @cleared = true
+      @idle.each &.close
+      @idle.clear
+      @total.each &.close
+      @total.clear
+      select
+      when @availability_channel.send nil
+      else
+      end
+      true
+    end
   end
 
   record Stats,
@@ -79,11 +98,6 @@ class Mongo::Connection::Pool(T)
                        r
                      else
                        unsync { wait_for_available }
-                       # The wait for available can unlock
-                       # multiple fibers waiting for a resource.
-                       # Although only one will pick it due to the lock
-                       # in the end of the unsync, the pick_available
-                       # will return nil
                        pick_available
                      end
                    else
@@ -135,24 +149,19 @@ class Mongo::Connection::Pool(T)
 
   def release(resource : T) : Nil
     sync do
-      if can_increase_idle_pool
+      is_closed = resource.responds_to?(:socket) && resource.socket.closed?
+      if !is_closed && can_increase_idle_pool
         @idle << resource
         if resource.responds_to?(:after_release)
           resource.after_release
         end
-        select
-        when @availability_channel.send nil
-          # send if someone is waiting…
-        else
-          # …but do not block.
-        end
       else
         resource.close
         @total.delete(resource)
-        select
-        when @availability_channel.send nil
-        else
-        end
+      end
+      select
+      when @availability_channel.send nil
+      else
       end
     end
   end
@@ -185,6 +194,7 @@ class Mongo::Connection::Pool(T)
 
   private def build_resource : T
     resource = @factory.call
+    @cleared = false
     @total << resource
     @idle << resource
     resource

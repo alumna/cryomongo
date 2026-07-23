@@ -206,6 +206,7 @@ module Mongo::Session
     # ```
     def commit_transaction(*, write_concern : WriteConcern? = nil)
       state_transition(:commit, rollback_status_on_error: false) {
+        skip_commit = @transitions_from.try(&.starting?) || false
         @client.command(
           Commands::CommitTransaction,
           session: self,
@@ -214,7 +215,8 @@ module Mongo::Session
             max_time_ms:    current_transaction_options.max_commit_time_ms,
             recovery_token: recovery_token,
           }
-        )
+        ) unless @empty_commit || skip_commit
+        @empty_commit = skip_commit
       }
     end
 
