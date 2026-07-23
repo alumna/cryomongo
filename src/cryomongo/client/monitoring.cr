@@ -34,6 +34,22 @@ class Mongo::Client
     @commands_observable.unsubscribe(callback)
   end
 
+  def subscribe_sdam(&callback : Monitoring::SDAM::Event -> Nil) : Monitoring::SDAM::Event -> Nil
+    @sdam_observable.subscribe(&callback)
+  end
+
+  def unsubscribe_sdam(callback : Monitoring::SDAM::Event -> Nil) : Nil
+    @sdam_observable.unsubscribe(callback)
+  end
+
+  def subscribe_cmap(&callback : Monitoring::CMAP::Event -> Nil) : Monitoring::CMAP::Event -> Nil
+    @cmap_observable.subscribe(&callback)
+  end
+
+  def unsubscribe_cmap(callback : Monitoring::CMAP::Event -> Nil) : Nil
+    @cmap_observable.unsubscribe(callback)
+  end
+
   private def start_monitoring
     @monitors.each { spawn &.scan }
   end

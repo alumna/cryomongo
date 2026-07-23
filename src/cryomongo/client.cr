@@ -44,6 +44,8 @@ class Mongo::Client
   @last_scan : Time = Time::UNIX_EPOCH
   @topology_update = Channel(Nil).new
   @commands_observable = Monitoring::Observable(Monitoring::Commands::Event).new
+  @sdam_observable = Monitoring::Observable(Monitoring::SDAM::Event).new
+  @cmap_observable = Monitoring::Observable(Monitoring::CMAP::Event).new
 
   # The default auth database is optionally provided as a part of the connection string uri.
   #
@@ -251,6 +253,14 @@ class Mongo::Client
   # Internal #
   ############
 
+  protected def broadcast_sdam(event : Monitoring::SDAM::Event)
+    @sdam_observable.broadcast(event)
+  end
+
+  protected def broadcast_cmap(event : Monitoring::CMAP::Event)
+    @cmap_observable.broadcast(event)
+  end
+
   protected def get_connection(server_description : SDAM::ServerDescription) : Mongo::Connection
     @@connection_pool_lock.synchronize {
       @pools[server_description.address] ||= Mongo::Connection::Pool(Mongo::Connection).new(
@@ -272,10 +282,12 @@ class Mongo::Client
         raise e
       end
     }
+    broadcast_cmap(Monitoring::CMAP::ConnectionCheckedOutEvent.new(address: server_description.address))
     @pools[server_description.address].checkout
   end
 
   private def release_connection(connection : Mongo::Connection)
+    broadcast_cmap(Monitoring::CMAP::ConnectionCheckedInEvent.new(address: connection.server_description.address))
     @pools[connection.server_description.address]?.try &.release(connection)
   end
 
@@ -284,6 +296,7 @@ class Mongo::Client
     @@connection_pool_lock.synchronize {
       @pools.delete server_description.address
     }
+    broadcast_cmap(Monitoring::CMAP::PoolClearedEvent.new(address: server_description.address))
   end
 
   protected def on_topology_update

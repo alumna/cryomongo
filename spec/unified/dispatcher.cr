@@ -85,6 +85,15 @@ module Mongo::Unified::Dispatcher
       when "abortTransaction"                         then execute_abort_transaction(args, target)
       when "endSession"                               then execute_end_session(args, target)
       when "withTransaction"                          then execute_with_transaction(args, target, registry, internal_client, runner)
+      when "runOnThread"                              then execute_run_on_thread(args, registry, internal_client, runner)
+      when "waitForThread"                            then execute_wait_for_thread(args, registry)
+      when "waitForEvent"                             then execute_wait_for_event(args, registry)
+      when "assertEventCount"                         then execute_assert_event_count(args, registry)
+      when "recordTopologyDescription"                then execute_record_topology_description(args, registry)
+      when "assertTopologyType"                       then execute_assert_topology_type(args, registry)
+      when "waitForPrimaryChange"                     then execute_wait_for_primary_change(args, registry)
+      when "close"                                    then execute_close(target)
+      when "wait"                                     then execute_wait(args)
       else
         # Ignore unsupported operations silently
         return
@@ -122,6 +131,133 @@ module Mongo::Unified::Dispatcher
     if args && (session_id = args["session"]?.try(&.as_s))
       registry.sessions[session_id]?
     end
+  end
+
+  private def match_event?(event : Mongo::Monitoring::Event, spec : JSON::Any) : Bool
+    spec_hash = spec.as_h?
+    return false unless spec_hash
+
+    spec_hash.each do |event_type_name, event_matcher|
+      case event_type_name
+      when "commandStartedEvent"
+        return false unless event.is_a?(Mongo::Monitoring::Commands::CommandStartedEvent)
+        return match_command_started_event?(event, event_matcher)
+      when "commandSucceededEvent"
+        return false unless event.is_a?(Mongo::Monitoring::Commands::CommandSucceededEvent)
+      when "commandFailedEvent"
+        return false unless event.is_a?(Mongo::Monitoring::Commands::CommandFailedEvent)
+      when "serverDescriptionChangedEvent"
+        return false unless event.is_a?(Mongo::Monitoring::SDAM::ServerDescriptionChangedEvent)
+        return match_server_description_changed_event?(event, event_matcher)
+      when "topologyDescriptionChangedEvent"
+        return false unless event.is_a?(Mongo::Monitoring::SDAM::TopologyDescriptionChangedEvent)
+        return match_topology_description_changed_event?(event, event_matcher)
+      when "serverHeartbeatStartedEvent"
+        return false unless event.is_a?(Mongo::Monitoring::SDAM::ServerHeartbeatStartedEvent)
+        return match_heartbeat_started_event?(event, event_matcher)
+      when "serverHeartbeatSucceededEvent"
+        return false unless event.is_a?(Mongo::Monitoring::SDAM::ServerHeartbeatSucceededEvent)
+        return match_heartbeat_succeeded_event?(event, event_matcher)
+      when "serverHeartbeatFailedEvent"
+        return false unless event.is_a?(Mongo::Monitoring::SDAM::ServerHeartbeatFailedEvent)
+        return match_heartbeat_failed_event?(event, event_matcher)
+      when "poolClearedEvent"
+        return false unless event.is_a?(Mongo::Monitoring::CMAP::PoolClearedEvent)
+        return match_pool_cleared_event?(event, event_matcher)
+      when "poolReadyEvent"
+        return false unless event.is_a?(Mongo::Monitoring::CMAP::PoolReadyEvent)
+      when "connectionClosedEvent"
+        return false unless event.is_a?(Mongo::Monitoring::CMAP::ConnectionClosedEvent)
+      when "connectionCheckedOutEvent"
+        return false unless event.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckedOutEvent)
+      when "connectionCheckedInEvent"
+        return false unless event.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckedInEvent)
+      when "connectionCheckOutStartedEvent"
+        return false unless event.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckOutStartedEvent)
+      else
+        return false
+      end
+    end
+
+    true
+  end
+
+  private def match_command_started_event?(event : Mongo::Monitoring::Commands::CommandStartedEvent, matcher : JSON::Any) : Bool
+    if hash = matcher.as_h?
+      if cmd_name = hash["commandName"]?.try(&.as_s?)
+        return false unless event.command_name == cmd_name
+      end
+      if db_name = hash["databaseName"]?.try(&.as_s?)
+        return false unless event.database_name == db_name
+      end
+    end
+    true
+  end
+
+  private def match_server_description_changed_event?(event : Mongo::Monitoring::SDAM::ServerDescriptionChangedEvent, matcher : JSON::Any) : Bool
+    if hash = matcher.as_h?
+      if new_desc_matcher = hash["newDescription"]?.try(&.as_h?)
+        if expected_type = new_desc_matcher["type"]?.try(&.as_s?)
+          actual_type = event.new_description.type.to_s
+          return false unless actual_type.downcase == expected_type.downcase
+        end
+      end
+    end
+    true
+  end
+
+  private def match_topology_description_changed_event?(event : Mongo::Monitoring::SDAM::TopologyDescriptionChangedEvent, matcher : JSON::Any) : Bool
+    if hash = matcher.as_h?
+      if prev_desc_matcher = hash["previousDescription"]?.try(&.as_h?)
+        if expected_type = prev_desc_matcher["type"]?.try(&.as_s?)
+          actual_type = event.previous_description.type.to_s
+          return false unless actual_type.downcase == expected_type.downcase
+        end
+      end
+      if new_desc_matcher = hash["newDescription"]?.try(&.as_h?)
+        if expected_type = new_desc_matcher["type"]?.try(&.as_s?)
+          actual_type = event.new_description.type.to_s
+          return false unless actual_type.downcase == expected_type.downcase
+        end
+      end
+    end
+    true
+  end
+
+  private def match_heartbeat_started_event?(event : Mongo::Monitoring::SDAM::ServerHeartbeatStartedEvent, matcher : JSON::Any) : Bool
+    if hash = matcher.as_h?
+      if awaited = hash["awaited"]?.try(&.as_bool?)
+        return false unless event.awaited? == awaited
+      end
+    end
+    true
+  end
+
+  private def match_heartbeat_succeeded_event?(event : Mongo::Monitoring::SDAM::ServerHeartbeatSucceededEvent, matcher : JSON::Any) : Bool
+    if hash = matcher.as_h?
+      if awaited = hash["awaited"]?.try(&.as_bool?)
+        return false unless event.awaited? == awaited
+      end
+    end
+    true
+  end
+
+  private def match_heartbeat_failed_event?(event : Mongo::Monitoring::SDAM::ServerHeartbeatFailedEvent, matcher : JSON::Any) : Bool
+    if hash = matcher.as_h?
+      if awaited = hash["awaited"]?.try(&.as_bool?)
+        return false unless event.awaited? == awaited
+      end
+    end
+    true
+  end
+
+  private def match_pool_cleared_event?(event : Mongo::Monitoring::CMAP::PoolClearedEvent, matcher : JSON::Any) : Bool
+    if hash = matcher.as_h?
+      if interrupt = hash["interruptInUseConnections"]?.try(&.as_bool?)
+        return false unless event.interrupt_in_use_connections? == interrupt
+      end
+    end
+    true
   end
 
   # --- Operation Implementations ---
@@ -682,5 +818,139 @@ module Mongo::Unified::Dispatcher
         end
       end
     end
+  end
+
+  private def execute_run_on_thread(args, registry, internal_client, runner)
+    raise "Missing arguments" unless args
+    thread_id = args["thread"].as_s
+    op_json = args["operation"]
+    if thread_entity = registry.threads[thread_id]?
+      thread_entity.run do
+        op_obj = Operation.from_json(op_json.to_json)
+        execute(op_obj, registry, internal_client, runner)
+      end
+    else
+      raise "Thread entity not found: #{thread_id}"
+    end
+  end
+
+  private def execute_wait_for_thread(args, registry)
+    raise "Missing arguments" unless args
+    thread_id = args["thread"].as_s
+    if thread_entity = registry.threads[thread_id]?
+      thread_entity.wait
+    else
+      raise "Thread entity not found: #{thread_id}"
+    end
+  end
+
+  private def execute_wait_for_event(args, registry)
+    raise "Missing arguments" unless args
+    client_id = args["client"].as_s
+    expected_event_spec = args["event"]
+    target_count = args["count"]?.try(&.as_i) || 1
+
+    start_time = Time.instant
+    timeout = 10.seconds
+
+    loop do
+      events = registry.events[client_id]? || [] of Mongo::Monitoring::Event
+      matching_count = events.count { |ev| match_event?(ev, expected_event_spec) }
+      break if matching_count >= target_count
+
+      if Time.instant - start_time > timeout
+        raise "TEST_FAILED: Timeout waiting for event #{expected_event_spec.to_json} on client #{client_id}. Expected #{target_count}, got #{matching_count}"
+      end
+
+      sleep 10.milliseconds
+    end
+  end
+
+  private def execute_assert_event_count(args, registry)
+    raise "Missing arguments" unless args
+    client_id = args["client"].as_s
+    expected_event_spec = args["event"]
+    expected_count = args["count"].as_i
+
+    events = registry.events[client_id]? || [] of Mongo::Monitoring::Event
+    actual_count = events.count { |ev| match_event?(ev, expected_event_spec) }
+
+    unless actual_count == expected_count
+      raise "TEST_FAILED: Expected #{expected_count} events matching #{expected_event_spec.to_json} on client #{client_id}, but got #{actual_count}"
+    end
+  end
+
+  private def execute_record_topology_description(args, registry)
+    raise "Missing arguments" unless args
+    client_id = args["client"].as_s
+    id = args["id"].as_s
+    if client = registry.clients[client_id]?
+      registry.entities[id] = client.topology
+    else
+      raise "Client entity not found: #{client_id}"
+    end
+  end
+
+  private def execute_assert_topology_type(args, registry)
+    raise "Missing arguments" unless args
+    top_entity_id = args["topologyDescription"].as_s
+    expected_type = args["topologyType"].as_s
+
+    actual_type = if top_desc = registry.entities[top_entity_id]?.as?(Mongo::SDAM::TopologyDescription)
+                    top_desc.type.to_s
+                  else
+                    raise "Topology description entity not found: #{top_entity_id}"
+                  end
+
+    mapped_actual = case actual_type.downcase
+                    when "single"                then "Single"
+                    when "replicasetnoprimary"   then "ReplicaSetNoPrimary"
+                    when "replicasetwithprimary" then "ReplicaSetWithPrimary"
+                    when "sharded"               then "Sharded"
+                    when "loadbalanced"          then "LoadBalanced"
+                    else                              actual_type
+                    end
+
+    unless mapped_actual == expected_type
+      raise "TEST_FAILED: Expected topology type #{expected_type}, got #{mapped_actual}"
+    end
+  end
+
+  private def execute_wait_for_primary_change(args, registry)
+    raise "Missing arguments" unless args
+    client_id = args["client"].as_s
+    prior_id = args["priorTopologyDescription"].as_s
+    timeout_ms = args["timeoutMS"]?.try(&.as_i) || 10000
+
+    client = registry.clients[client_id]? || raise "Client entity not found: #{client_id}"
+    prior_td = registry.entities[prior_id]?.as?(Mongo::SDAM::TopologyDescription) || raise "Prior topology description entity not found: #{prior_id}"
+
+    prior_primary = prior_td.servers.find(&.type.rs_primary?).try(&.address)
+
+    start_time = Time.instant
+    timeout = timeout_ms.milliseconds
+
+    loop do
+      current_primary = client.topology.servers.find(&.type.rs_primary?).try(&.address)
+      break if current_primary != prior_primary
+
+      if Time.instant - start_time > timeout
+        raise "TEST_FAILED: Timeout waiting for primary change from #{prior_primary}"
+      end
+
+      sleep 10.milliseconds
+    end
+  end
+
+  private def execute_close(target)
+    if client = target.as?(Mongo::Client)
+      client.close
+    end
+  end
+
+  private def execute_wait(args)
+    raise "Missing arguments" unless args
+    ms = args["ms"].as_i
+    sleep ms.milliseconds
   end
 end

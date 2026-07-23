@@ -81,6 +81,8 @@ class Mongo::SDAM::TopologyDescription
 
   def update(old_description : ServerDescription, new_description : ServerDescription)
     @@lock.synchronize {
+      previous_topology_type = @type
+
       # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#updating-the-topologydescription
       if @type.single? && set_name.try { |name| new_description.set_name != name }
         replace_description(old_description, ServerDescription.new(old_description.address))
@@ -88,6 +90,14 @@ class Mongo::SDAM::TopologyDescription
       end
 
       replace_description(old_description, new_description)
+
+      if old_description != new_description
+        @client.broadcast_sdam(Monitoring::SDAM::ServerDescriptionChangedEvent.new(
+          address: old_description.address,
+          previous_description: old_description,
+          new_description: new_description
+        ))
+      end
 
       unless new_description.type.unknown?
         if new_description.min_wire_version > Client::MAX_WIRE_VERSION
@@ -167,6 +177,13 @@ class Mongo::SDAM::TopologyDescription
         end
       else
         # ignore
+      end
+
+      if previous_topology_type != @type
+        @client.broadcast_sdam(Monitoring::SDAM::TopologyDescriptionChangedEvent.new(
+          previous_description: self,
+          new_description: self
+        ))
       end
     }
   ensure

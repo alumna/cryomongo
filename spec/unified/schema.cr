@@ -6,6 +6,8 @@ module Mongo::Unified
     property minServerVersion : String?
     property maxServerVersion : String?
     property topologies : Array(String)?
+    property auth : Bool?
+    property serverless : String?
   end
 
   struct CollectionData

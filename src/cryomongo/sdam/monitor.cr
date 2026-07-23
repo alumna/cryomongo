@@ -79,23 +79,44 @@ module Mongo::SDAM
 
     def check(server_description : ServerDescription)
       server_description.last_update_time = Time.utc
-      connection = get_connection(server_description)
-      result, round_trip_time = connection.handshake
-      new_rtt = Connection.average_round_trip_time(round_trip_time, server_description.round_trip_time)
-      ServerDescription.new(server_description.address, result, new_rtt)
-    rescue error : Exception
-      Mongo::Log.error { "Monitoring handshake error: #{error}" }
-      Mongo::Log.debug { error.backtrace.join("\n") }
-      # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#network-or-command-error-during-server-check
-      known_state = !server_description.type.unknown?
-      description = ServerDescription.new(server_description.address)
-      description.error = error.message
-      description.last_update_time = server_description.last_update_time
-      close_connection(server_description)
-      if known_state && error.is_a? Client::NetworkError
-        check(description)
-      else
-        description
+      @client.broadcast_sdam(Monitoring::SDAM::ServerHeartbeatStartedEvent.new(
+        address: server_description.address,
+        awaited: false
+      ))
+      start_time = Time.instant
+      begin
+        connection = get_connection(server_description)
+        result, round_trip_time = connection.handshake
+        duration = start_time.elapsed
+        @client.broadcast_sdam(Monitoring::SDAM::ServerHeartbeatSucceededEvent.new(
+          address: server_description.address,
+          duration: duration,
+          reply: BSON.new,
+          awaited: false
+        ))
+        new_rtt = Connection.average_round_trip_time(round_trip_time, server_description.round_trip_time)
+        ServerDescription.new(server_description.address, result, new_rtt)
+      rescue error : Exception
+        duration = start_time.elapsed
+        @client.broadcast_sdam(Monitoring::SDAM::ServerHeartbeatFailedEvent.new(
+          address: server_description.address,
+          duration: duration,
+          failure: error,
+          awaited: false
+        ))
+        Mongo::Log.error { "Monitoring handshake error: #{error}" }
+        Mongo::Log.debug { error.backtrace.join("\n") }
+        # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#network-or-command-error-during-server-check
+        known_state = !server_description.type.unknown?
+        description = ServerDescription.new(server_description.address)
+        description.error = error.message
+        description.last_update_time = server_description.last_update_time
+        close_connection(server_description)
+        if known_state && error.is_a? Client::NetworkError
+          check(description)
+        else
+          description
+        end
       end
     end
 

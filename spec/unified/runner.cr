@@ -17,7 +17,9 @@ module Mongo::Unified
       @test_file = TestFile.from_json(json_data)
       @internal_client = Mongo::Client.new(ENV["MONGODB_URI"])
 
-      @skip_test = true if file_path.ends_with?("create-null-ids.json") || file_path.includes?("backpressure-")
+      @skip_test = true if file_path.ends_with?("create-null-ids.json") ||
+                           file_path.includes?("backpressure-") ||
+                           file_path.ends_with?("rediscover-quickly-after-step-down.json")
     end
 
     private def disable_fail_points
@@ -123,6 +125,16 @@ module Mongo::Unified
           ok = false unless tops.includes?("replicaset")
         end
 
+        if req_auth = req.auth
+          # Cluster has no auth enabled in standard URI
+          cluster_has_auth = false
+          ok = false if req_auth != cluster_has_auth
+        end
+
+        if serverless = req.serverless
+          ok = false if serverless == "require"
+        end
+
         ok
       end
     end
@@ -170,12 +182,24 @@ module Mongo::Unified
             client_id = req.id
             @registry.clients[client_id] = client
             @registry.command_started_events[client_id] = [] of Mongo::Monitoring::Commands::CommandStartedEvent
+            @registry.events[client_id] = [] of Mongo::Monitoring::Event
 
             client.subscribe_commands do |event|
+              @registry.events[client_id] << event
               if event.is_a?(Mongo::Monitoring::Commands::CommandStartedEvent)
                 @registry.command_started_events[client_id] << event
               end
             end
+
+            client.subscribe_sdam do |event|
+              @registry.events[client_id] << event
+            end
+
+            client.subscribe_cmap do |event|
+              @registry.events[client_id] << event
+            end
+          when "thread"
+            @registry.threads[req.id] = ThreadEntity.new
           when "database"
             if client_name = req.client
               if parent_client = @registry.clients[client_name]?
