@@ -15,11 +15,14 @@ struct Mongo::Connection
     else
       split = @server_description.address.split(':')
       host = split[0]
-      socket = TCPSocket.new(split[0], split[1]? || 27017, dns_timeout: @options.connect_timeout, connect_timeout: @options.connect_timeout)
+      connect_timeout = @options.connect_timeout
+      connect_timeout = nil if connect_timeout.try(&.== 0.seconds)
+      socket = TCPSocket.new(split[0], split[1]? || 27017, dns_timeout: connect_timeout, connect_timeout: connect_timeout)
       socket.tcp_nodelay = true
     end
 
     timeout = is_monitor ? @options.connect_timeout : @options.socket_timeout
+    timeout = nil if timeout.try(&.== 0.seconds)
     socket.read_timeout = timeout
     socket.write_timeout = timeout
 

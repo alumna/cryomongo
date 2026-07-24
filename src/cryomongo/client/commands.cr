@@ -112,8 +112,9 @@ class Mongo::Client
     server_description ||= session.server_description
 
     retryable_command = acknowledged && command.is_a?(Commands::Retryable) && command.retryable?(**args, session: session)
+    retry_writes_enabled = @options.retry_writes != false
 
-    if (retryable_command && @options.retry_writes || command.is_a?(Commands::AlwaysRetryable)) && command.is_a?(Commands::WriteCommand) && command.write_command?
+    if retry_writes_enabled && (retryable_command || command.is_a?(Commands::AlwaysRetryable)) && command.is_a?(Commands::WriteCommand) && command.write_command?
       execute_retryable_write(
         command,
         session,
@@ -232,7 +233,7 @@ class Mongo::Client
       end
 
       if session.is_transaction? && server_description.supports_retryable_writes?
-        if session.transitions_from.try(&.starting?)
+        if session.starting_transaction? || session.transitions_from.try(&.starting?)
           body["startTransaction"] = true
         end
         body["txnNumber"] = session.txn_number
@@ -348,6 +349,9 @@ class Mongo::Client
       raise error
     end
 
+    # Transaction starting flag clear on successful operation
+    session.starting_transaction = false if session.is_transaction?
+
     # Parse and return the body as a custom Result type.
     result = command.result(op_msg.body)
     result
@@ -355,14 +359,19 @@ class Mongo::Client
     if error.is_a?(NetworkError)
       Mongo::Log.error(exception: error) { "Network error" } unless server_description
       # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#network-or-command-error-during-server-check
-      server_description.try { |desc|
-        Mongo::Log.error(exception: error) { "I/O error with server address: #{desc.address}" }
-        description = SDAM::ServerDescription.new(desc.address)
-        description.error = error.message
-        description.last_update_time = desc.last_update_time
-        topology.update(desc, description)
-        close_connection_pool(desc)
-      }
+      is_timeout = error.is_a?(IO::TimeoutError)
+      unless is_timeout
+        server_description.try { |desc|
+          unless desc.type.unknown?
+            Mongo::Log.error(exception: error) { "I/O error with server address: #{desc.address}" }
+            description = SDAM::ServerDescription.new(desc.address)
+            description.error = error.message
+            description.last_update_time = desc.last_update_time
+            topology.update(desc, description)
+            close_connection_pool(desc)
+          end
+        }
+      end
       session.try &.dirty = true
       error = Error::Network.new(error)
     end
@@ -372,14 +381,16 @@ class Mongo::Client
       # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#not-master-and-node-is-recovering
       if error.state_change?
         server_description.try { |desc|
-          description = SDAM::ServerDescription.new(desc.address)
-          description.min_wire_version = desc.min_wire_version
-          description.max_wire_version = desc.max_wire_version
-          description.error = error.message
-          description.last_update_time = desc.last_update_time
-          topology.update(desc, description)
-          close_connection_pool(desc) if error.shutdown?
-          @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
+          unless desc.type.unknown?
+            description = SDAM::ServerDescription.new(desc.address)
+            description.min_wire_version = desc.min_wire_version
+            description.max_wire_version = desc.max_wire_version
+            description.error = error.message
+            description.last_update_time = desc.last_update_time
+            topology.update(desc, description)
+            close_connection_pool(desc) if error.shutdown?
+            @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
+          end
         }
       end
     end

@@ -19,6 +19,12 @@
 module Mongo::Monitoring
   enum Type
     Commands
+    SDAM
+    CMAP
+  end
+
+  # Abstract base class for all monitoring events.
+  abstract struct Event
   end
 
   # Provides an observable interface for the `Mongo::Client`.
@@ -54,7 +60,7 @@ module Mongo::Monitoring
 
   module Commands
     # Contains common event fields.
-    abstract struct Event
+    abstract struct Event < Mongo::Monitoring::Event
       macro inherited
         # Returns the command name.
         getter command_name : String
@@ -103,6 +109,124 @@ module Mongo::Monitoring
 
       # :nodoc:
       def initialize(@command_name, @request_id, @address, @duration, @failure, @reply, @operation_id = nil)
+      end
+    end
+  end
+
+  module SDAM
+    abstract struct Event < Mongo::Monitoring::Event
+    end
+
+    struct ServerDescriptionChangedEvent < Event
+      getter address : String
+      getter previous_description : Mongo::SDAM::ServerDescription
+      getter new_description : Mongo::SDAM::ServerDescription
+
+      def initialize(@address, @previous_description, @new_description)
+      end
+    end
+
+    struct TopologyDescriptionChangedEvent < Event
+      getter previous_description : Mongo::SDAM::TopologyDescription
+      getter new_description : Mongo::SDAM::TopologyDescription
+
+      def initialize(@previous_description, @new_description)
+      end
+    end
+
+    struct ServerHeartbeatStartedEvent < Event
+      getter address : String
+      getter? awaited : Bool
+
+      def initialize(@address, @awaited = false)
+      end
+    end
+
+    struct ServerHeartbeatSucceededEvent < Event
+      getter address : String
+      getter duration : Time::Span
+      getter reply : BSON
+      getter? awaited : Bool
+
+      def initialize(@address, @duration, @reply, @awaited = false)
+      end
+    end
+
+    struct ServerHeartbeatFailedEvent < Event
+      getter address : String
+      getter duration : Time::Span
+      getter failure : Exception
+      getter? awaited : Bool
+
+      def initialize(@address, @duration, @failure, @awaited = false)
+      end
+    end
+
+    struct TopologyOpeningEvent < Event
+    end
+
+    struct TopologyClosedEvent < Event
+    end
+
+    struct ServerOpeningEvent < Event
+      getter address : String
+
+      def initialize(@address)
+      end
+    end
+
+    struct ServerClosedEvent < Event
+      getter address : String
+
+      def initialize(@address)
+      end
+    end
+  end
+
+  module CMAP
+    abstract struct Event < Mongo::Monitoring::Event
+    end
+
+    struct PoolClearedEvent < Event
+      getter address : String
+      getter? interrupt_in_use_connections : Bool
+
+      def initialize(@address, @interrupt_in_use_connections = false)
+      end
+    end
+
+    struct PoolReadyEvent < Event
+      getter address : String
+
+      def initialize(@address)
+      end
+    end
+
+    struct ConnectionClosedEvent < Event
+      getter address : String
+
+      def initialize(@address)
+      end
+    end
+
+    struct ConnectionCheckedOutEvent < Event
+      getter address : String
+
+      def initialize(@address)
+      end
+    end
+
+    struct ConnectionCheckedInEvent < Event
+      getter address : String
+
+      def initialize(@address)
+      end
+    end
+
+    struct ConnectionCheckOutStartedEvent < Event
+      getter address : String
+
+      def initialize(@address)
       end
     end
   end

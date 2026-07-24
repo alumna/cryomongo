@@ -81,6 +81,16 @@ class Mongo::SDAM::TopologyDescription
 
   def update(old_description : ServerDescription, new_description : ServerDescription)
     @@lock.synchronize {
+      previous_td = self.dup
+      current_server = @servers.find { |s| s.address == old_description.address }
+
+      # Ignore duplicate error transitions if server is already Unknown with an error
+      if current_server && current_server.type.unknown? && current_server.error != nil && new_description.type.unknown?
+        return
+      end
+
+      actual_old_description = current_server || old_description
+
       # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#updating-the-topologydescription
       if @type.single? && set_name.try { |name| new_description.set_name != name }
         replace_description(old_description, ServerDescription.new(old_description.address))
@@ -88,6 +98,14 @@ class Mongo::SDAM::TopologyDescription
       end
 
       replace_description(old_description, new_description)
+
+      if actual_old_description != new_description
+        @client.broadcast_sdam(Monitoring::SDAM::ServerDescriptionChangedEvent.new(
+          address: old_description.address,
+          previous_description: actual_old_description,
+          new_description: new_description
+        ))
+      end
 
       unless new_description.type.unknown?
         if new_description.min_wire_version > Client::MAX_WIRE_VERSION
@@ -168,6 +186,13 @@ class Mongo::SDAM::TopologyDescription
       else
         # ignore
       end
+
+      if previous_td.type != @type || actual_old_description != new_description
+        @client.broadcast_sdam(Monitoring::SDAM::TopologyDescriptionChangedEvent.new(
+          previous_description: previous_td,
+          new_description: self
+        ))
+      end
     }
   ensure
     @client.on_topology_update
@@ -218,7 +243,7 @@ class Mongo::SDAM::TopologyDescription
     remove(description) if (me = description.me) && description.address != me.downcase
   end
 
-  # This subroutine is executed with the ServerDescription from an RSSecondary, RSArbiter, or RSOther when the TopologyType is ReplicaSetWithPrimary.
+  # This subroutine is executed with an RSSecondary, RSArbiter, or RSOther when the TopologyType is ReplicaSetWithPrimary.
   def update_rs_with_primary_from_member(description)
     return unless servers.any? &.address.== description.address
 

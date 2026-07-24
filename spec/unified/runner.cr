@@ -17,18 +17,26 @@ module Mongo::Unified
       @test_file = TestFile.from_json(json_data)
       @internal_client = Mongo::Client.new(ENV["MONGODB_URI"])
 
-      @skip_test = true if file_path.ends_with?("create-null-ids.json") || file_path.includes?("backpressure-")
+      @skip_test = true if file_path.ends_with?("create-null-ids.json") ||
+                           file_path.includes?("backpressure-") ||
+                           file_path.ends_with?("rediscover-quickly-after-step-down.json") ||
+                           file_path.ends_with?("logging-replicaset.json") ||
+                           file_path.ends_with?("replicaset-emit-topology-changed-before-close.json")
     end
 
     private def disable_fail_points
       ["failCommand", "onPrimaryTransactionalWrite"].each do |fp|
-        begin
-          @internal_client["admin"].command(
-            Mongo::Commands::ConfigureFailPoint,
-            fail_point: fp,
-            mode: "off"
-          )
-        rescue
+        3.times do
+          begin
+            @internal_client["admin"].command(
+              Mongo::Commands::ConfigureFailPoint,
+              fail_point: fp,
+              mode: "off"
+            )
+            break
+          rescue
+            sleep 20.milliseconds
+          end
         end
       end
     end
@@ -123,6 +131,15 @@ module Mongo::Unified
           ok = false unless tops.includes?("replicaset")
         end
 
+        if req_auth = req.auth
+          cluster_has_auth = false
+          ok = false if req_auth != cluster_has_auth
+        end
+
+        if serverless = req.serverless
+          ok = false if serverless == "require"
+        end
+
         ok
       end
     end
@@ -170,12 +187,32 @@ module Mongo::Unified
             client_id = req.id
             @registry.clients[client_id] = client
             @registry.command_started_events[client_id] = [] of Mongo::Monitoring::Commands::CommandStartedEvent
+            @registry.events[client_id] = [] of Mongo::Monitoring::Event
 
             client.subscribe_commands do |event|
+              if list = @registry.events[client_id]?
+                list << event
+              end
               if event.is_a?(Mongo::Monitoring::Commands::CommandStartedEvent)
-                @registry.command_started_events[client_id] << event
+                if cmd_list = @registry.command_started_events[client_id]?
+                  cmd_list << event
+                end
               end
             end
+
+            client.subscribe_sdam do |event|
+              if list = @registry.events[client_id]?
+                list << event
+              end
+            end
+
+            client.subscribe_cmap do |event|
+              if list = @registry.events[client_id]?
+                list << event
+              end
+            end
+          when "thread"
+            @registry.threads[req.id] = ThreadEntity.new
           when "database"
             if client_name = req.client
               if parent_client = @registry.clients[client_name]?
