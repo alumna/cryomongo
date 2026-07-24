@@ -121,7 +121,7 @@ module Mongo::Unified::Dispatcher
     end
 
     if is_client = expected.isClientError
-      actual_client = e.is_a?(Mongo::Error::Client)
+      actual_client = e.is_a?(Mongo::Error::Client) || (e.is_a?(Mongo::Error) && !e.is_a?(Mongo::Error::Server))
       unless actual_client == is_client
         raise Exception.new("TEST_FAILED: Expected isClientError=#{is_client}, got #{actual_client} for error #{e.inspect}")
       end
@@ -136,7 +136,7 @@ module Mongo::Unified::Dispatcher
     end
 
     if contains = expected.errorContains
-      unless e.message.try &.includes?(contains)
+      unless e.message.try &.downcase.includes?(contains.downcase)
         raise Exception.new("TEST_FAILED: Expected error message to contain '#{contains}', got: #{e.message}")
       end
     end

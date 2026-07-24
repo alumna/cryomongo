@@ -396,6 +396,11 @@ class Mongo::Client
     end
 
     if error.is_a?(Mongo::Error)
+      if command.is_a?(Commands::WriteCommand) && command.write_command?
+        wire_v = server_description.try(&.max_wire_version) || 0
+        error.add_retryable_label(wire_v)
+      end
+
       if command.is_a? Commands::CommitTransaction
         error.add_unknown_transaction_label
       else
