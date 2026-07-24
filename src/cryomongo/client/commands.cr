@@ -396,14 +396,16 @@ class Mongo::Client
     end
 
     if error.is_a?(Mongo::Error)
+      in_txn = session ? session.is_transaction? : false
+
       if command.is_a?(Commands::WriteCommand) && command.write_command?
         wire_v = server_description.try(&.max_wire_version) || 0
-        error.add_retryable_label(wire_v)
+        error.add_retryable_label(wire_v, is_transaction: in_txn)
       end
 
       if command.is_a? Commands::CommitTransaction
         error.add_unknown_transaction_label
-      else
+      elsif in_txn
         error.add_transient_transaction_label
       end
 

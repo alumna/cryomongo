@@ -33,7 +33,9 @@ module Mongo
       has_error_label?("UnknownTransactionCommitResult")
     end
 
-    def add_retryable_label(wire_version : Int32)
+    def add_retryable_label(wire_version : Int32, is_transaction : Bool = false)
+      return if is_transaction
+
       add_label = begin
         if self.is_a?(Error::Network)
           true
@@ -43,6 +45,8 @@ module Mongo
           elsif self.is_a?(Error::CommandWrite)
             self.errors.any?(&.retryable_code?)
           end
+        else
+          false
         end
       end
 
@@ -53,6 +57,10 @@ module Mongo
       # "in the case of network errors or server selection errors where the client receives no server reply, the client adds the label"
       # https://github.com/mongodb/specifications/blob/master/source/transactions/transactions.rst#transienttransactionerror
       if self.is_a?(Error::ServerSelection) || self.is_a?(Error::Network)
+        add_error_label("TransientTransactionError")
+      elsif self.is_a?(Mongo::Error::Command) && (self.retryable_code? || self.state_change?)
+        add_error_label("TransientTransactionError")
+      elsif self.is_a?(Error::WriteConcern) && (self.max_time_ms_expired? || self.shutdown_in_progress? || self.failed_or_timeout?)
         add_error_label("TransientTransactionError")
       end
     end
