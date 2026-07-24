@@ -85,6 +85,8 @@ module Mongo::Unified::Dispatcher
       when "abortTransaction"                         then execute_abort_transaction(args, target)
       when "endSession"                               then execute_end_session(args, target)
       when "withTransaction"                          then execute_with_transaction(args, target, registry, internal_client, runner)
+      when "runOnThread"                              then execute_run_on_thread(args, registry, internal_client, runner)
+      when "waitForThread"                            then execute_wait_for_thread(args, registry)
       else
         # Ignore unsupported operations silently
         return
@@ -679,6 +681,32 @@ module Mongo::Unified::Dispatcher
             op_obj = Operation.from_json(cb_op.to_json)
             execute(op_obj, registry, internal_client, runner)
           end
+        end
+      end
+    end
+  end
+
+  private def execute_run_on_thread(args, registry, internal_client, runner)
+    if args && (thread_id = args["thread"]?.try(&.as_s)) && (op_json = args["operation"]?)
+      op = Operation.from_json(op_json.to_json)
+      if channel = registry.threads[thread_id]?
+        spawn do
+          begin
+            execute(op, registry, internal_client, runner)
+            channel.send(nil)
+          rescue e : Exception
+            channel.send(e)
+          end
+        end
+      end
+    end
+  end
+
+  private def execute_wait_for_thread(args, registry)
+    if args && (thread_id = args["thread"]?.try(&.as_s))
+      if channel = registry.threads[thread_id]?
+        if err = channel.receive
+          raise err
         end
       end
     end

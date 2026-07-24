@@ -7,6 +7,7 @@ module Mongo::Unified
     property sessions = Hash(String, Mongo::Session::ClientSession).new
     property entities = Hash(String, BSON::Value).new
     property command_started_events = Hash(String, Array(Mongo::Monitoring::Commands::CommandStartedEvent)).new
+    property threads = Hash(String, Channel(Exception?)).new
 
     def close_all
       clients.each_value(&.close)

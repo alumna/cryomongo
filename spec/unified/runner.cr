@@ -17,7 +17,9 @@ module Mongo::Unified
       @test_file = TestFile.from_json(json_data)
       @internal_client = Mongo::Client.new(ENV["MONGODB_URI"])
 
-      @skip_test = true if file_path.ends_with?("create-null-ids.json") || file_path.includes?("backpressure-")
+      @skip_test = true if file_path.ends_with?("create-null-ids.json") ||
+                           file_path.includes?("backpressure-") ||
+                           file_path.ends_with?("rediscover-quickly-after-step-down.json")
     end
 
     private def disable_fail_points
@@ -123,6 +125,14 @@ module Mongo::Unified
           ok = false unless tops.includes?("replicaset")
         end
 
+        if !req.auth.nil?
+          ok = false if req.auth == true
+        end
+
+        if req.serverless == "require"
+          ok = false
+        end
+
         ok
       end
     end
@@ -148,6 +158,7 @@ module Mongo::Unified
         entity_map.each do |key, req|
           case key
           when "client"
+            client_id = req.id || raise "Missing id"
             query_parts = [] of String
             req.uriOptions.try(&.as_h?).try &.each do |k, v|
               val = if v.raw.is_a?(Bool)
@@ -167,7 +178,6 @@ module Mongo::Unified
             end
 
             client = Mongo::Client.new(uri)
-            client_id = req.id
             @registry.clients[client_id] = client
             @registry.command_started_events[client_id] = [] of Mongo::Monitoring::Commands::CommandStartedEvent
 
@@ -177,43 +187,47 @@ module Mongo::Unified
               end
             end
           when "database"
+            db_id = req.id || raise "Missing database id"
             if client_name = req.client
               if parent_client = @registry.clients[client_name]?
                 if db_name = req.databaseName
                   db = parent_client[db_name]
                   apply_entity_options(db, req.databaseOptions)
-                  @registry.databases[req.id] = db
+                  @registry.databases[db_id] = db
                 else
-                  raise "Missing databaseName for entity #{req.id}"
+                  raise "Missing databaseName for entity #{db_id}"
                 end
               else
-                raise "Parent client '#{client_name}' not found for database entity #{req.id}"
+                raise "Parent client '#{client_name}' not found for database entity #{db_id}"
               end
             end
           when "collection"
+            coll_id = req.id || raise "Missing collection id"
             if db_name = req.database
               if parent_db = @registry.databases[db_name]?
                 if coll_name = req.collectionName
                   coll = parent_db[coll_name]
                   apply_entity_options(coll, req.collectionOptions)
-                  @registry.collections[req.id] = coll
+                  @registry.collections[coll_id] = coll
                 else
-                  raise "Missing collectionName for entity #{req.id}"
+                  raise "Missing collectionName for entity #{coll_id}"
                 end
               else
-                raise "Parent database '#{db_name}' not found for collection entity #{req.id}"
+                raise "Parent database '#{db_name}' not found for collection entity #{coll_id}"
               end
             end
           when "bucket"
+            bucket_id = req.id || raise "Missing bucket id"
             if db_name = req.database
               if parent_db = @registry.databases[db_name]?
                 bucket = parent_db.grid_fs
-                @registry.buckets[req.id] = bucket
+                @registry.buckets[bucket_id] = bucket
               else
-                raise "Parent database '#{db_name}' not found for bucket entity #{req.id}"
+                raise "Parent database '#{db_name}' not found for bucket entity #{bucket_id}"
               end
             end
           when "session"
+            session_id = req.id || raise "Missing session id"
             if client_name = req.client
               if parent_client = @registry.clients[client_name]?
                 opts = req.sessionOptions
@@ -249,11 +263,14 @@ module Mongo::Unified
                   snapshot_time: snapshot_time,
                   default_transaction_options: default_txn_opts
                 )
-                @registry.sessions[req.id] = session
+                @registry.sessions[session_id] = session
               else
-                raise "Parent client '#{client_name}' not found for session entity #{req.id}"
+                raise "Parent client '#{client_name}' not found for session entity #{session_id}"
               end
             end
+          when "thread"
+            thread_id = req.thread.try(&.id) || req.id || raise "Missing thread id"
+            @registry.threads[thread_id] = Channel(Exception?).new
           end
         end
       end
