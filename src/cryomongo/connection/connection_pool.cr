@@ -52,7 +52,8 @@ class Mongo::Connection::Pool(T)
 
   def clear(interrupt_in_use_connections = false) : Bool
     sync do
-      return false if @cleared && @total.empty? && @idle.empty?
+      return false if @cleared && @idle.empty? && (!interrupt_in_use_connections || @total.empty?)
+      was_already_cleared = @cleared
       @cleared = true
       @idle.each &.close
       @idle.clear
@@ -64,7 +65,7 @@ class Mongo::Connection::Pool(T)
       when @availability_channel.send nil
       else
       end
-      true
+      !was_already_cleared
     end
   end
 
@@ -152,7 +153,7 @@ class Mongo::Connection::Pool(T)
   def release(resource : T) : Nil
     sync do
       is_closed = resource.responds_to?(:socket) && resource.socket.closed?
-      if !is_closed && can_increase_idle_pool
+      if !is_closed && !@cleared && can_increase_idle_pool
         @idle << resource
         if resource.responds_to?(:after_release)
           resource.after_release

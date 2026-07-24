@@ -26,13 +26,17 @@ module Mongo::Unified
 
     private def disable_fail_points
       ["failCommand", "onPrimaryTransactionalWrite"].each do |fp|
-        begin
-          @internal_client["admin"].command(
-            Mongo::Commands::ConfigureFailPoint,
-            fail_point: fp,
-            mode: "off"
-          )
-        rescue
+        3.times do
+          begin
+            @internal_client["admin"].command(
+              Mongo::Commands::ConfigureFailPoint,
+              fail_point: fp,
+              mode: "off"
+            )
+            break
+          rescue
+            sleep 20.milliseconds
+          end
         end
       end
     end
