@@ -50,14 +50,16 @@ class Mongo::Connection::Pool(T)
     end
   end
 
-  def clear : Bool
+  def clear(interrupt_in_use_connections = false) : Bool
     sync do
       return false if @cleared && @total.empty? && @idle.empty?
       @cleared = true
       @idle.each &.close
       @idle.clear
-      @total.each &.close
-      @total.clear
+      if interrupt_in_use_connections
+        @total.each &.close
+        @total.clear
+      end
       select
       when @availability_channel.send nil
       else

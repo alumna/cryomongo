@@ -112,8 +112,9 @@ class Mongo::Client
     server_description ||= session.server_description
 
     retryable_command = acknowledged && command.is_a?(Commands::Retryable) && command.retryable?(**args, session: session)
+    retry_writes_enabled = @options.retry_writes != false
 
-    if (retryable_command && @options.retry_writes || command.is_a?(Commands::AlwaysRetryable)) && command.is_a?(Commands::WriteCommand) && command.write_command?
+    if retry_writes_enabled && (retryable_command || command.is_a?(Commands::AlwaysRetryable)) && command.is_a?(Commands::WriteCommand) && command.write_command?
       execute_retryable_write(
         command,
         session,

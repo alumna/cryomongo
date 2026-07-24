@@ -111,6 +111,7 @@ module Mongo::SDAM
         description.error = error.message
         description.last_update_time = server_description.last_update_time
         close_connection(server_description)
+        @client.close_connection_pool(server_description, interrupt_in_use_connections: error.is_a?(IO::TimeoutError))
         if known_state && error.is_a? Client::NetworkError
           check(description)
         else

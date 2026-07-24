@@ -83,6 +83,12 @@ class Mongo::SDAM::TopologyDescription
     @@lock.synchronize {
       previous_td = self.dup
       current_server = @servers.find { |s| s.address == old_description.address }
+
+      # Ignore duplicate error transitions if server is already Unknown with an error
+      if current_server && current_server.type.unknown? && current_server.error != nil && new_description.type.unknown?
+        return
+      end
+
       actual_old_description = current_server || old_description
 
       # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#updating-the-topologydescription
