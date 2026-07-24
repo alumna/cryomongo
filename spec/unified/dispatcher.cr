@@ -106,7 +106,7 @@ module Mongo::Unified::Dispatcher
       if e.message.try &.starts_with?("TEST_FAILED")
         raise e
       elsif expected_error
-        # Expected error caught successfully!
+        verify_expected_error(e, expected_error)
       else
         raise e
       end
@@ -114,6 +114,55 @@ module Mongo::Unified::Dispatcher
   end
 
   # --- Helpers ---
+
+  private def verify_expected_error(e : Exception, expected : ExpectedError)
+    if expected.isError == false
+      raise Exception.new("TEST_FAILED: Expected operation not to fail, but it raised: #{e.message}")
+    end
+
+    if is_client = expected.isClientError
+      actual_client = e.is_a?(Mongo::Error::Client)
+      unless actual_client == is_client
+        raise Exception.new("TEST_FAILED: Expected isClientError=#{is_client}, got #{actual_client} for error #{e.inspect}")
+      end
+    end
+
+    if code = expected.errorCode
+      if e.is_a?(Mongo::Error::Command)
+        unless e.code == code
+          raise Exception.new("TEST_FAILED: Expected errorCode #{code}, got #{e.code}")
+        end
+      end
+    end
+
+    if contains = expected.errorContains
+      unless e.message.try &.includes?(contains)
+        raise Exception.new("TEST_FAILED: Expected error message to contain '#{contains}', got: #{e.message}")
+      end
+    end
+
+    if labels_contain = expected.errorLabelsContain
+      if mongo_err = e.as?(Mongo::Error)
+        labels_contain.each do |label|
+          unless mongo_err.has_error_label?(label)
+            raise Exception.new("TEST_FAILED: Expected error labels to contain '#{label}', but got labels: #{mongo_err.error_labels.inspect}")
+          end
+        end
+      else
+        raise Exception.new("TEST_FAILED: Expected error labels to contain #{labels_contain.inspect}, but exception is not a Mongo::Error")
+      end
+    end
+
+    if labels_omit = expected.errorLabelsOmit
+      if mongo_err = e.as?(Mongo::Error)
+        labels_omit.each do |label|
+          if mongo_err.has_error_label?(label)
+            raise Exception.new("TEST_FAILED: Expected error labels to omit '#{label}', but it was present in labels: #{mongo_err.error_labels.inspect}")
+          end
+        end
+      end
+    end
+  end
 
   def json_to_bson_value(json : JSON::Any)
     BSON.from_json(%({"v": #{json.to_json}}))["v"]
@@ -859,7 +908,7 @@ module Mongo::Unified::Dispatcher
       break if matching_count >= target_count
 
       if Time.instant - start_time > timeout
-        raise "TEST_FAILED: Timeout waiting for event #{expected_event_spec.to_json} on client #{client_id}. Expected #{target_count}, got #{matching_count}"
+        raise Exception.new("TEST_FAILED: Timeout waiting for event #{expected_event_spec.to_json} on client #{client_id}. Expected #{target_count}, got #{matching_count}")
       end
 
       sleep 10.milliseconds
@@ -876,7 +925,7 @@ module Mongo::Unified::Dispatcher
     actual_count = events.count { |ev| match_event?(ev, expected_event_spec) }
 
     unless actual_count == expected_count
-      raise "TEST_FAILED: Expected #{expected_count} events matching #{expected_event_spec.to_json} on client #{client_id}, but got #{actual_count}"
+      raise Exception.new("TEST_FAILED: Expected #{expected_count} events matching #{expected_event_spec.to_json} on client #{client_id}, but got #{actual_count}")
     end
   end
 
@@ -912,7 +961,7 @@ module Mongo::Unified::Dispatcher
                     end
 
     unless mapped_actual == expected_type
-      raise "TEST_FAILED: Expected topology type #{expected_type}, got #{mapped_actual}"
+      raise Exception.new("TEST_FAILED: Expected topology type #{expected_type}, got #{mapped_actual}")
     end
   end
 
@@ -935,7 +984,7 @@ module Mongo::Unified::Dispatcher
       break if current_primary != prior_primary
 
       if Time.instant - start_time > timeout
-        raise "TEST_FAILED: Timeout waiting for primary change from #{prior_primary}"
+        raise Exception.new("TEST_FAILED: Timeout waiting for primary change from #{prior_primary}")
       end
 
       sleep 10.milliseconds

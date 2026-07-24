@@ -58,15 +58,15 @@ module Mongo
     end
 
     def add_unknown_transaction_label
-      if self.retryable_write?
+      if self.is_a?(Error::Network) || self.is_a?(Error::ServerSelection) || self.is_a?(Error::Client)
         self.add_error_label("UnknownTransactionCommitResult")
-      elsif self.is_a?(Mongo::Error::Command) && self.max_time_ms_expired?
+      elsif self.is_a?(Mongo::Error::Command) && (self.retryable_code? || self.max_time_ms_expired?)
         self.add_error_label("UnknownTransactionCommitResult")
       elsif self.is_a?(Error::WriteConcern)
         if self.max_time_ms_expired? || self.shutdown_in_progress? || self.failed_or_timeout?
           self.add_error_label("UnknownTransactionCommitResult")
         end
-      elsif self.is_a?(Error::Client) || self.is_a?(Error::ServerSelection)
+      elsif self.retryable_write?
         self.add_error_label("UnknownTransactionCommitResult")
       end
     end
