@@ -84,6 +84,7 @@ module Mongo::Session
 
       state_transition(:start) {
         increment_txn_number
+        @starting_transaction = true
         self.unpin
       }
     end

@@ -233,7 +233,7 @@ class Mongo::Client
       end
 
       if session.is_transaction? && server_description.supports_retryable_writes?
-        if session.transitions_from.try(&.starting?)
+        if session.starting_transaction? || session.transitions_from.try(&.starting?)
           body["startTransaction"] = true
         end
         body["txnNumber"] = session.txn_number
@@ -348,6 +348,9 @@ class Mongo::Client
     if error = op_msg.error?
       raise error
     end
+
+    # Transaction starting flag clear on successful operation
+    session.starting_transaction = false if session.is_transaction?
 
     # Parse and return the body as a custom Result type.
     result = command.result(op_msg.body)

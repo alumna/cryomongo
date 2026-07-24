@@ -63,6 +63,8 @@ module Mongo::Session
     property snapshot_time : BSON::Timestamp? = nil
     # The session options used when creating the session.
     getter options : Options
+    # Indicates whether the transaction is in its starting phase (for startTransaction payload generation)
+    property? starting_transaction : Bool = false
 
     protected getter? implicit : Bool = true
     protected delegate :dirty, :dirty=, :txn_number, :session_id, to: @server_session
@@ -130,9 +132,7 @@ module Mongo::Session
     end
 
     protected def increment_txn_number
-      # @lock.synchronize {
       @server_session.txn_number += 1
-      # }
     end
   end
 

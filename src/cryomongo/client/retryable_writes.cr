@@ -41,7 +41,7 @@ class Mongo::Client
       error.add_retryable_label(server_description.max_wire_version)
       error.add_unknown_transaction_label if error.retryable_write?
 
-      if error.is_a?(Mongo::Error::Command) && error.code == 20 && error.message.try &.starts_with? "Transaction numbers"
+      if error.is_a?(Mongo::Error::Command) && (error.code == 20 || error.max_time_ms_expired?)
         raise error
       elsif error.retryable_write?
         original_error = error
