@@ -46,7 +46,7 @@ class Mongo::SDAM::TopologyDescription
   protected setter logical_session_timeout_minutes
 
   # Fast-path bare initializer for #clone and empty topologies
-  protected def initialize(@client : Mongo::Client)
+  def initialize(@client : Mongo::Client)
   end
 
   def initialize(@client : Mongo::Client, seeds : Array(String), options : Mongo::Options)
@@ -74,6 +74,7 @@ class Mongo::SDAM::TopologyDescription
     # Safely handle uninitialized raw HTTP params during cloning
     if options.raw?.try(&.["loadbalanced"]?) == "true"
       @type = :load_balanced
+      @servers.each { |s| s.type = :load_balancer }
     end
   end
 
@@ -92,14 +93,22 @@ class Mongo::SDAM::TopologyDescription
   end
 
   def replace_description(old_description, new_description)
-    if old_description != new_description
+    effective_new = if @type.load_balanced? && !new_description.type.load_balancer?
+                      copy = new_description.clone
+                      copy.type = :load_balancer
+                      copy
+                    else
+                      new_description
+                    end
+
+    if old_description != effective_new
       @client.emit_sdam_event(Monitoring::SDAM::ServerDescriptionChangedEvent.new(
-        @client.object_id, new_description.address, old_description, new_description
+        @client.object_id, effective_new.address, old_description, effective_new
       ))
     end
 
     @servers = @servers.map do |desc|
-      desc.address == old_description.address ? new_description : desc
+      desc.address == old_description.address ? effective_new : desc
     end
 
     min_logical_session_timeout = nil.as(Int32?)
@@ -119,8 +128,6 @@ class Mongo::SDAM::TopologyDescription
       end
     end
 
-    # If erase is true, we must set to nil.
-    # If there are no data-bearing servers, min will be nil, correctly clearing the timeout.
     @logical_session_timeout_minutes = erase_logical_session_timeout ? nil : min_logical_session_timeout
   end
 
@@ -163,7 +170,7 @@ class Mongo::SDAM::TopologyDescription
       else
         replace_description(old_description, new_description)
 
-        unless new_description.type.unknown?
+        unless new_description.type.unknown? || @type.load_balanced?
           if new_description.min_wire_version > Client::MAX_WIRE_VERSION
             @compatible = false
             @compatibility_error = "Server at #{new_description.address} requires wire version #{new_description.min_wire_version}, but this version of cryomongo only supports up to #{Client::MAX_WIRE_VERSION}."
@@ -365,9 +372,18 @@ class Mongo::SDAM::TopologyDescription
       max_elec_id = @max_election_id
 
       if max_set_v && max_elec_id
-        if max_set_v > set_version || (max_set_v == set_version && max_elec_id.data > election_id.data)
-          # Stale primary.
-          replace_description(description, ServerDescription.new(description.address))
+        stale = if description.max_wire_version >= 17
+                  max_elec_id.data > election_id.data ||
+                    (max_elec_id.data == election_id.data && max_set_v > set_version)
+                else
+                  max_set_v > set_version ||
+                    (max_set_v == set_version && max_elec_id.data > election_id.data)
+                end
+
+        if stale
+          stale_desc = ServerDescription.new(description.address)
+          stale_desc.error = "primary marked stale due to electionId/setVersion mismatch"
+          replace_description(description, stale_desc)
           check_if_has_primary
           return
         end
@@ -381,11 +397,11 @@ class Mongo::SDAM::TopologyDescription
       @max_set_version = description.set_version
     end
 
-    @servers = @servers.map do |server|
+    @servers.dup.each do |server|
       if server.address != description.address && server.type.rs_primary?
-        ServerDescription.new(server.address)
-      else
-        server
+        stale_desc = ServerDescription.new(server.address)
+        stale_desc.error = "primary marked stale due to discovery of newer primary"
+        replace_description(server, stale_desc)
       end
     end
 

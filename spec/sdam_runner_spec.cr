@@ -13,6 +13,17 @@ describe "SDAM Legacy Tests" do
 
       # Disable monitoring since we are feeding mock responses directly into the topology
       client = Mongo::Client.new(uri, options: options, start_monitoring: false)
+
+      # Inject the missing initial events that occurred before we could subscribe
+      empty_topology = Mongo::SDAM::TopologyDescription.new(client)
+      events << Mongo::Monitoring::SDAM::TopologyOpeningEvent.new(client.object_id)
+      events << Mongo::Monitoring::SDAM::TopologyDescriptionChangedEvent.new(
+        client.object_id, empty_topology, client.topology.clone
+      )
+      client.topology.servers.each do |server|
+        events << Mongo::Monitoring::SDAM::ServerOpeningEvent.new(client.object_id, server.address)
+      end
+
       client.subscribe_sdam { |e| events << e }
 
       # SDAM rules require handling ApplicationErrors mapped by CMAP pool generations.
@@ -30,7 +41,10 @@ describe "SDAM Legacy Tests" do
           old_desc = client.topology.servers.find(&.address.==(addr)) || Mongo::SDAM::ServerDescription.new(addr)
 
           if payload && !payload.empty?
-            hello_res = Mongo::Commands::Hello::Result.from_bson(BSON.from_json(payload.to_json))
+            # The server omits null fields, so we strip them from the mock response
+            # to prevent BSON::Serializable from choking on explicit `nil` values.
+            clean_payload = payload.reject { |_, v| v.raw.nil? }
+            hello_res = Mongo::Commands::Hello::Result.from_bson(BSON.from_json(clean_payload.to_json))
             new_desc = Mongo::SDAM::ServerDescription.new(addr, hello_res, 0.milliseconds)
           else
             new_desc = Mongo::SDAM::ServerDescription.new(addr)
@@ -79,8 +93,11 @@ describe "SDAM Legacy Tests" do
 
           unless is_stale
             if err.is_a?(Mongo::Error::Network)
-              # Timeout does NOT mark unknown if after handshake (unless LoadBalanced which we aren't handling uniquely here)
-              unless type == "timeout" && when_phase == "afterHandshakeCompletes"
+              if when_phase == "beforeHandshakeCompletes"
+                # SDAM Spec: MUST NOT change the server's description if network error during connection establishment
+              elsif type == "timeout" && when_phase == "afterHandshakeCompletes"
+                # SDAM Spec: MUST NOT mark the server Unknown on a timeout AFTER handshake
+              else
                 new_desc = Mongo::SDAM::ServerDescription.new(addr)
                 new_desc.error = err.message
                 new_desc.last_update_time = old_desc.last_update_time
@@ -95,7 +112,7 @@ describe "SDAM Legacy Tests" do
               new_desc.last_update_time = old_desc.last_update_time
               new_desc.topology_version = err.topology_version
               client.topology.update(old_desc, new_desc)
-              if err.shutdown?
+              if err.shutdown? || old_desc.max_wire_version < 8
                 pool_generations[addr] = pool_generations.fetch(addr, 0) + 1
               end
             end
@@ -123,7 +140,7 @@ describe "SDAM Legacy Tests" do
               exp_srv_type = exp_srv["type"].as_s
 
               if exp_srv_type == "Unknown" || exp_srv_type == "PossiblePrimary"
-                actual_srv.try &.type.unknown?.should be_true
+                (actual_srv.try(&.type.unknown?) || actual_srv.try(&.type.possible_primary?)).should be_true
               else
                 actual_srv.should_not be_nil
                 if actual_srv

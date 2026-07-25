@@ -108,7 +108,7 @@ module Mongo
     # See: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#not-master-and-node-is-recovering
     RECOVERING_CODES    = {11600, 11602, 13436, 189, 91}
     RECOVERING_MESSAGES = {"not master or secondary", "node is recovering"}
-    NOT_MASTER_CODES    = {10107, 13435}
+    NOT_MASTER_CODES    = {10107, 13435, 10058}
     NOT_MASTER_MESSAGES = {"not master"}
     SHUTDOWN_CODES      = {11600, 91}
     # See: https://github.com/mongodb/specifications/blob/master/source/retryable-writes/retryable-writes.rst#determining-retryable-errors
@@ -132,11 +132,20 @@ module Mongo
     end
 
     def recovering?
-      @code.in?(RECOVERING_CODES) || RECOVERING_MESSAGES.any?(&.in?(message))
+      if @code != 0
+        @code.in?(RECOVERING_CODES)
+      else
+        RECOVERING_MESSAGES.any? { |msg| message.includes?(msg) }
+      end
     end
 
     def not_master?
-      @code.in?(NOT_MASTER_CODES) || self.recovering? || NOT_MASTER_MESSAGES.any?(&.in?(message))
+      return true if recovering?
+      if @code != 0
+        @code.in?(NOT_MASTER_CODES)
+      else
+        NOT_MASTER_MESSAGES.any? { |msg| message.includes?(msg) }
+      end
     end
 
     def shutdown?
