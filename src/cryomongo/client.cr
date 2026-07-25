@@ -95,7 +95,7 @@ class Mongo::Client
     emit_sdam_event(Monitoring::SDAM::TopologyOpeningEvent.new(self.object_id))
 
     # An unknown/empty topology representation for the event
-    empty_topology = SDAM::TopologyDescription.new(self, [] of String, @options)
+    empty_topology = SDAM::TopologyDescription.new(self)
     empty_topology.type = :unknown
 
     # Use a local variable to satisfy the compiler's strict non-nil checks
