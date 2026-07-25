@@ -20,6 +20,11 @@ struct Mongo::Connection
     end
 
     timeout = is_monitor ? @options.connect_timeout : @options.socket_timeout
+
+    if timeout && timeout.total_milliseconds == 0
+      timeout = nil
+    end
+
     socket.read_timeout = timeout
     socket.write_timeout = timeout
 

@@ -23,6 +23,8 @@ class Mongo::Connection::Pool(T)
   @idle = Set(T).new
   # connections waiting to be stablished (they are not in *@idle* nor in *@total*)
   @inflight : Int32
+  # indicates if the pool has been cleared
+  @closed : Bool = false
 
   # Sync state
 
@@ -42,9 +44,13 @@ class Mongo::Connection::Pool(T)
 
   # close all resources in the pool
   def close : Nil
-    @total.each &.close
-    @total.clear
-    @idle.clear
+    sync do
+      @closed = true
+      @availability_channel.close
+      @total.each &.close
+      @total.clear
+      @idle.clear
+    end
   end
 
   record Stats,
@@ -65,22 +71,22 @@ class Mongo::Connection::Pool(T)
 
   def checkout : T
     res = sync do
+      raise Mongo::Error::PoolCleared.new("Connection pool was cleared") if @closed
+
       resource = nil
 
       until resource
         resource = if @idle.empty?
                      if can_increase_pool?
                        @inflight += 1
-                       r = unsync { build_resource }
-                       @inflight -= 1
-                       r
+                       begin
+                         unsync { build_resource }
+                       ensure
+                         @inflight -= 1
+                       end
                      else
                        unsync { wait_for_available }
-                       # The wait for available can unlock
-                       # multiple fibers waiting for a resource.
-                       # Although only one will pick it due to the lock
-                       # in the end of the unsync, the pick_available
-                       # will return nil
+                       raise Mongo::Error::PoolCleared.new("Connection pool was cleared") if @closed
                        pick_available
                      end
                    else
@@ -116,6 +122,8 @@ class Mongo::Connection::Pool(T)
   # or `selected` will be a new resource and `is_candidate` == `false`
   def checkout_some(candidates : Enumerable(WeakRef(T))) : {T, Bool}
     sync do
+      raise Mongo::Error::PoolCleared.new("Connection pool was cleared") if @closed
+
       candidates.each do |ref|
         resource = ref.value
         if resource && is_available?(resource)
@@ -132,6 +140,12 @@ class Mongo::Connection::Pool(T)
 
   def release(resource : T) : Nil
     sync do
+      if @closed
+        resource.close
+        @total.delete(resource)
+        return
+      end
+
       if can_increase_idle_pool
         @idle << resource
         if resource.responds_to?(:after_release)
@@ -195,6 +209,8 @@ class Mongo::Connection::Pool(T)
     when timeout(@checkout_timeout.seconds)
       raise Mongo::Error::Connection.new("Too many open connections, could not check out a connection in #{@checkout_timeout} seconds.")
     end
+  rescue Channel::ClosedError
+    raise Mongo::Error::PoolCleared.new("Connection pool was cleared")
   end
 
   private def sync(&)

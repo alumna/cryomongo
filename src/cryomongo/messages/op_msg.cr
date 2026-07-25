@@ -137,17 +137,19 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
     } || Set(String).new
 
     if cached_body["ok"] == 1
+      topology_version = cached_body["topologyVersion"]?.try(&.as(BSON))
       if errors = cached_body["writeErrors"]?
-        Mongo::Error::CommandWrite.new(errors.as(BSON), error_labels: err_label_set)
+        Mongo::Error::CommandWrite.new(errors.as(BSON), error_labels: err_label_set, topology_version: topology_version)
       elsif write_error = cached_body["writeConcernError"]?
-        Mongo::Error::WriteConcern.new(write_error.as(BSON), error_labels: err_label_set)
+        Mongo::Error::WriteConcern.new(write_error.as(BSON), error_labels: err_label_set, topology_version: topology_version)
       end
     else
       err_msg = cached_body["errmsg"]?.try(&.as(String))
       err_code_name = cached_body["codeName"]?.try(&.as(String))
       err_code = cached_body["code"]?
       details = cached_body["errInfo"]?.try(&.as(BSON))
-      Mongo::Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: err_label_set)
+      topology_version = cached_body["topologyVersion"]?.try(&.as(BSON))
+      Mongo::Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: err_label_set, topology_version: topology_version)
     end
   end
 

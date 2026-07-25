@@ -6,6 +6,8 @@ module Mongo::Unified
     property minServerVersion : String?
     property maxServerVersion : String?
     property topologies : Array(String)?
+    property auth : Bool?
+    property serverless : String?
   end
 
   struct CollectionData
@@ -15,9 +17,14 @@ module Mongo::Unified
     property documents : Array(JSON::Any)
   end
 
-  struct EntityRequest
+  struct ThreadRequest
     include JSON::Serializable
     property id : String
+  end
+
+  struct EntityRequest
+    include JSON::Serializable
+    property id : String?
     property uriOptions : JSON::Any?
     property observeEvents : Array(String)?
 
@@ -31,6 +38,8 @@ module Mongo::Unified
 
     property bucketOptions : JSON::Any?
     property sessionOptions : JSON::Any?
+
+    property thread : ThreadRequest?
   end
 
   struct Operation

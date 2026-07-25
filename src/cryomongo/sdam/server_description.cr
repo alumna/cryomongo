@@ -52,7 +52,7 @@ class Mongo::SDAM::ServerDescription
   property last_update_time : Time = Time::UNIX_EPOCH
   getter logical_session_timeout_minutes : Int32? = nil
   # The "topologyVersion" from the server's most recent ismaster response or State Change Error.
-  getter topology_version : BSON? = nil
+  property topology_version : BSON? = nil
 
   def initialize(@address : String)
   end
@@ -83,6 +83,7 @@ class Mongo::SDAM::ServerDescription
     @last_update_time = Time.utc
     @last_write_date = hello_result.last_write.try &.["lastWriteDate"]?.try &.as(Time)
     @op_time = hello_result.last_write.try &.["opTime"]?.try &.as(BSON)
+    @topology_version = hello_result.topology_version
 
     if hello_result.msg === "isdbgrid"
       @type = :mongos

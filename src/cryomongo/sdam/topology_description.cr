@@ -79,8 +79,26 @@ class Mongo::SDAM::TopologyDescription
     @logical_session_timeout_minutes = nil if erase_logical_session_timeout
   end
 
+  private def is_newer_or_equal_topology_version?(current_tv : BSON?, new_tv : BSON?) : Bool
+    return true if current_tv.nil? || new_tv.nil?
+    pid_current = current_tv["processId"]?
+    pid_new = new_tv["processId"]?
+    return true if pid_current != pid_new
+
+    counter_current = current_tv["counter"]?.try(&.as(Int64)) || 0_i64
+    counter_new = new_tv["counter"]?.try(&.as(Int64)) || 0_i64
+    counter_new >= counter_current
+  end
+
   def update(old_description : ServerDescription, new_description : ServerDescription)
     @@lock.synchronize {
+      current_server = @servers.find { |s| s.address == old_description.address }
+      if current_server
+        unless is_newer_or_equal_topology_version?(current_server.topology_version, new_description.topology_version)
+          return
+        end
+      end
+
       # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#updating-the-topologydescription
       if @type.single? && set_name.try { |name| new_description.set_name != name }
         replace_description(old_description, ServerDescription.new(old_description.address))

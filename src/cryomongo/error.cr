@@ -79,9 +79,16 @@ module Mongo
   end
 
   class Error::Network < Error::Client
-    def initialize(original_error : IO::Error | Socket::Error)
-      initialize(message: original_error.message, cause: original_error)
+    def initialize(original_error : Exception)
+      super(message: original_error.message, cause: original_error)
     end
+
+    def initialize(message : String)
+      super(message: message)
+    end
+  end
+
+  class Error::PoolCleared < Error::Network
   end
 
   class Error::Connection < Error::Client
@@ -96,6 +103,7 @@ module Mongo
     getter code : Int32
     getter code_name : String?
     getter details : BSON?
+    getter topology_version : BSON?
 
     # See: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#not-master-and-node-is-recovering
     RECOVERING_CODES    = {11600, 11602, 13436, 189, 91}
@@ -110,7 +118,7 @@ module Mongo
     # See: https://github.com/mongodb/specifications/blob/f1fcb6aa9751e5ed7eb8e64c0f08f1edf10a859a/source/change-streams/change-streams.rst#resumable-error
     RESUMABLE_CODES = {63, 150, 234, 13388, 133} + RETRYABLE_CODES
 
-    def initialize(code, @code_name, message, @details, *, @error_labels = Set(String).new)
+    def initialize(code, @code_name, message, @details, *, @error_labels = Set(String).new, @topology_version : BSON? = nil)
       @code = code.try &.as(Int32) || 0
       @message = message.try(&.as(String)) || ""
     end
@@ -160,14 +168,14 @@ module Mongo
   class Error::CommandWrite < Error::Server
     getter errors = [] of Error::Command
 
-    def initialize(errors : BSON, *, @error_labels = Set(String).new)
+    def initialize(errors : BSON, *, @error_labels = Set(String).new, topology_version : BSON? = nil)
       errors.each { |_, error|
         error = error.as(BSON)
         err_code = error["code"]?
         err_code_name = error["codeName"]?.try &.as(String)
         err_msg = error["errmsg"]?.try &.as(String)
         details = error["errInfo"]?.try &.as(BSON)
-        @errors << Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: @error_labels)
+        @errors << Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: @error_labels, topology_version: topology_version)
       }
     end
 
@@ -180,10 +188,11 @@ module Mongo
   class Error::WriteConcern < Error::Command
     getter details : BSON?
 
-    def initialize(error : BSON, *, @error_labels = Set(String).new)
+    def initialize(error : BSON, *, @error_labels = Set(String).new, topology_version : BSON? = nil)
       @code = error["code"]?.try(&.as(Int).to_i32) || 0
       @message = error["errmsg"]?.try(&.as(String)) || ""
       @details = error["errInfo"]?.try &.as(BSON)
+      @topology_version = topology_version || error["topologyVersion"]?.try(&.as(BSON))
     end
 
     def failed_or_timeout?

@@ -66,6 +66,7 @@ module Mongo::Commands::Hello
     property election_id : BSON::ObjectId?
     property last_write : BSON?
     property isreplicaset : Bool?
+    property topology_version : BSON?
   }
 
   # Transforms the server result.
