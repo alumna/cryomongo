@@ -51,15 +51,7 @@ class Mongo::SDAM::TopologyDescription
 
   def initialize(@client : Mongo::Client, seeds : Array(String), options : Mongo::Options)
     seeds.each do |seed|
-      if seed.ends_with?(".sock")
-        @servers << ServerDescription.new(seed)
-      elsif colon = seed.byte_index(':')
-        host = seed.byte_slice(0, colon).downcase
-        port = seed.byte_slice(colon + 1)
-        @servers << ServerDescription.new("#{host}:#{port}")
-      else
-        @servers << ServerDescription.new("#{seed.downcase}:27017")
-      end
+      @servers << ServerDescription.new(seed.downcase)
     end
 
     if options.direct_connection
@@ -74,7 +66,6 @@ class Mongo::SDAM::TopologyDescription
     # Safely handle uninitialized raw HTTP params during cloning
     if options.raw?.try(&.["loadbalanced"]?) == "true"
       @type = :load_balanced
-      @servers.each { |s| s.type = :load_balancer }
     end
   end
 
@@ -372,15 +363,15 @@ class Mongo::SDAM::TopologyDescription
       max_elec_id = @max_election_id
 
       if max_set_v && max_elec_id
-        stale = if description.max_wire_version >= 17
-                  max_elec_id.data > election_id.data ||
-                    (max_elec_id.data == election_id.data && max_set_v > set_version)
-                else
-                  max_set_v > set_version ||
-                    (max_set_v == set_version && max_elec_id.data > election_id.data)
-                end
+        is_stale = if description.max_wire_version >= 17
+                     max_elec_id.data > election_id.data ||
+                       (max_elec_id.data == election_id.data && max_set_v > set_version)
+                   else
+                     max_set_v > set_version ||
+                       (max_set_v == set_version && max_elec_id.data > election_id.data)
+                   end
 
-        if stale
+        if is_stale
           stale_desc = ServerDescription.new(description.address)
           stale_desc.error = "primary marked stale due to electionId/setVersion mismatch"
           replace_description(description, stale_desc)

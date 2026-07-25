@@ -36,6 +36,8 @@ class Mongo::Client
   # :nodoc:
   protected getter min_heartbeat_frequency : Time::Span = 500.milliseconds
 
+  @monitoring_enabled : Bool = true
+
   @topology_lock = Sync::Mutex.new(:reentrant)
   @connection_pool_lock = Sync::Mutex.new
   @pool_locks = Hash(String, Sync::Mutex).new
@@ -67,6 +69,7 @@ class Mongo::Client
   # :nodoc:
   def initialize(connection_string : String = "mongodb://localhost:27017", *, options : Mongo::Options = Mongo::Options.new, start_monitoring = true)
     seeds, @options, @credentials, @default_auth_db = Mongo::URI.parse(connection_string, options)
+    @monitoring_enabled = start_monitoring
 
     if (w = @options.w) || (w_timeout = @options.w_timeout) || (journal = @options.journal)
       @write_concern = WriteConcern.new(w: w, w_timeout: w_timeout.try &.milliseconds.to_i64, j: journal)
@@ -110,7 +113,17 @@ class Mongo::Client
 
     new_topology.servers.each do |server|
       emit_sdam_event(Monitoring::SDAM::ServerOpeningEvent.new(self.object_id, server.address))
-      add_monitor(server, start_monitoring: start_monitoring)
+      add_monitor(server, start_monitoring: @monitoring_enabled)
+    end
+
+    # The spec mandates LoadBalanced topology starts with Unknown servers, emits the
+    # ServerOpeningEvent, and then transitions them to LoadBalancer automatically.
+    if @options.raw?.try(&.["loadbalanced"]?) == "true"
+      new_topology.servers.dup.each do |server|
+        lb_desc = server.clone
+        lb_desc.type = :load_balancer
+        new_topology.update(server, lb_desc)
+      end
     end
   end
 
@@ -362,7 +375,7 @@ class Mongo::Client
         no_monitor = @monitors.none? { |monitor|
           monitor.server_description.address == server.address
         }
-        add_monitor(server) if no_monitor
+        add_monitor(server, start_monitoring: @monitoring_enabled) if no_monitor
       end
     end
   end
