@@ -8,7 +8,7 @@ class Mongo::SDAM::TopologyDescription
     Unknown
   end
 
-  @@lock : Sync::Mutex = Sync::Mutex.new
+  @lock : Sync::Mutex = Sync::Mutex.new
 
   property type : TopologyType = :unknown
   # The replica set name.
@@ -29,7 +29,7 @@ class Mongo::SDAM::TopologyDescription
   property logical_session_timeout_minutes : Int32? = nil
 
   def initialize(@client : Mongo::Client, seeds : Array(String), options : Mongo::Options)
-    seeds.each { |seed|
+    seeds.each do |seed|
       if seed.ends_with? ".sock"
         @servers << ServerDescription.new(seed)
       else
@@ -38,7 +38,7 @@ class Mongo::SDAM::TopologyDescription
         port = split[1]? || "27017"
         @servers << ServerDescription.new("#{host.downcase}:#{port}")
       end
-    }
+    end
 
     if options.direct_connection
       @type = :single
@@ -49,7 +49,8 @@ class Mongo::SDAM::TopologyDescription
       @set_name = options.replica_set
     end
 
-    if options.raw["loadbalanced"]? == "true"
+    # Safely handle uninitialized raw HTTP params during cloning
+    if options.raw?.try(&.["loadbalanced"]?) == "true"
       @type = :load_balanced
     end
   end
@@ -82,13 +83,13 @@ class Mongo::SDAM::TopologyDescription
     end
 
     # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#logical-session-timeout
-    @servers = servers.map { |desc|
+    @servers = servers.map do |desc|
       if desc.data_bearing?
-        min_logical_session_timeout.try { |min|
-          desc.logical_session_timeout_minutes.try { |lstm|
+        min_logical_session_timeout.try do |min|
+          desc.logical_session_timeout_minutes.try do |lstm|
             min_logical_session_timeout = lstm if lstm < min
-          }
-        }
+          end
+        end
         erase_logical_session_timeout = true if desc.logical_session_timeout_minutes.nil?
       end
 
@@ -97,7 +98,7 @@ class Mongo::SDAM::TopologyDescription
       else
         desc
       end
-    }
+    end
 
     @logical_session_timeout_minutes = min_logical_session_timeout if min_logical_session_timeout
     @logical_session_timeout_minutes = nil if erase_logical_session_timeout
@@ -115,7 +116,7 @@ class Mongo::SDAM::TopologyDescription
   end
 
   def update(old_description : ServerDescription, new_description : ServerDescription)
-    @@lock.synchronize {
+    @lock.synchronize do
       previous_topology = self.clone
 
       current_server = @servers.find { |s| s.address == old_description.address }
@@ -218,7 +219,7 @@ class Mongo::SDAM::TopologyDescription
           @client.object_id, previous_topology, self.clone
         ))
       end
-    }
+    end
   ensure
     @client.on_topology_update
   end
@@ -255,12 +256,12 @@ class Mongo::SDAM::TopologyDescription
       description.hosts,
       description.passives,
       description.arbiters,
-    }.each &.try &.each { |addr_str|
+    }.each &.try &.each do |addr_str|
       unless @servers.any? &.address.==(addr_str)
         @servers << ServerDescription.new(addr_str)
         @client.emit_sdam_event(Monitoring::SDAM::ServerOpeningEvent.new(@client.object_id, addr_str))
       end
-    }
+    end
 
     unless (primary_address = description.primary).nil?
       update_possible_primary(primary_address)
@@ -333,34 +334,34 @@ class Mongo::SDAM::TopologyDescription
       @max_set_version = description.set_version
     end
 
-    @servers = @servers.map { |server|
+    @servers = @servers.map do |server|
       if server.address != description.address && server.type.rs_primary?
         ServerDescription.new(server.address)
       else
         server
       end
-    }
+    end
 
     {
       description.hosts,
       description.passives,
       description.arbiters,
-    }.each { |addresses|
-      addresses.try &.each { |address|
+    }.each do |addresses|
+      addresses.try &.each do |address|
         address = address.downcase
         unless @servers.any? &.address.== address
           @servers << ServerDescription.new(address)
           @client.emit_sdam_event(Monitoring::SDAM::ServerOpeningEvent.new(@client.object_id, address))
         end
-      }
-    }
+      end
+    end
 
-    @servers = @servers.compact_map { |server|
+    @servers = @servers.compact_map do |server|
       in_scope = {description.hosts, description.passives, description.arbiters}.any? do |addrs|
         addrs && addrs.any? { |addr| addr.downcase == server.address }
       end
       server if in_scope
-    }
+    end
 
     check_if_has_primary
   end

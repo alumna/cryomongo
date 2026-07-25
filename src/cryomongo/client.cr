@@ -36,13 +36,15 @@ class Mongo::Client
   # :nodoc:
   protected getter min_heartbeat_frequency : Time::Span = 500.milliseconds
 
-  @@topology_lock = Sync::Mutex.new(:reentrant)
-  @@connection_pool_lock = Sync::Mutex.new
+  @topology_lock = Sync::Mutex.new(:reentrant)
+  @connection_pool_lock = Sync::Mutex.new
+  @pool_locks = Hash(String, Sync::Mutex).new
   @pools : Hash(String, Mongo::Connection::Pool(Mongo::Connection)) = Hash(String, Mongo::Connection::Pool(Mongo::Connection)).new
+
   @monitors : Array(SDAM::Monitor) = Array(SDAM::Monitor).new
   @socket_check_interval : Time::Span = 5.seconds
   @last_scan : Time = Time::UNIX_EPOCH
-  @topology_update = Channel(Nil).new
+  @topology_update = Channel(Bool).new
   @commands_observable = Monitoring::Observable(Monitoring::Commands::Event).new
   @sdam_observable = Monitoring::Observable(Monitoring::SDAM::Event).new
 
@@ -78,15 +80,15 @@ class Mongo::Client
       @read_preference = ReadPreference.new(
         mode: read_pref,
         max_staleness_seconds: @options.max_staleness_seconds,
-        tags: @options.read_preference_tags.map { |tags_str|
+        tags: @options.read_preference_tags.map do |tags_str|
           bson = BSON.new
-          tags_str.split(',') { |tag|
+          tags_str.split(',') do |tag|
             if byte_idx = tag.byte_index(':')
               bson[tag.byte_slice(0, byte_idx)] = tag.byte_slice(byte_idx + 1)
             end
-          }
+          end
           bson
-        }
+        end
       )
     end
 
@@ -108,25 +110,25 @@ class Mongo::Client
 
     new_topology.servers.each do |server|
       emit_sdam_event(Monitoring::SDAM::ServerOpeningEvent.new(self.object_id, server.address))
-    end
-
-    new_topology.servers.each { |server|
       add_monitor(server, start_monitoring: start_monitoring)
-    }
+    end
   end
 
   # Frees all the resources associated with a client.
   def close
-    @pools.each do |_, pool|
+    pools_to_close = @connection_pool_lock.synchronize { @pools.values.dup }
+    pools_to_close.each do |pool|
       pool.close
     rescue e
       Log.warn { "Error while trying to close connection pool. #{e}" }
     end
+
     begin
       @session_pool.close(self)
     rescue e
       Log.warn { "Error while trying to close session pool. #{e}" }
     end
+
     @monitors.each do |monitor|
       monitor.close
     rescue e
@@ -292,27 +294,46 @@ class Mongo::Client
   ############
 
   protected def get_connection(server_description : SDAM::ServerDescription) : Mongo::Connection
-    @@connection_pool_lock.synchronize {
-      @pools[server_description.address] ||= Mongo::Connection::Pool(Mongo::Connection).new(
-        initial_pool_size: @options.min_pool_size,
-        max_pool_size: @options.max_pool_size,
-        max_idle_pool_size: @options.max_pool_size,
-        checkout_timeout: @options.wait_queue_timeout.try(&.seconds.to_f64) || 5.0
-      ) do
-        connection = Mongo::Connection.new(server_description, @credentials, @options, is_monitor: false)
-        result, round_trip_time = connection.handshake(send_metadata: true, appname: @options.appname)
-        connection.authenticate
-        new_rtt = Connection.average_round_trip_time(round_trip_time, server_description.round_trip_time)
-        new_description = SDAM::ServerDescription.new(server_description.address, result, new_rtt)
-        topology.update(server_description, new_description)
-        server_description.update(new_description)
-        connection
-      rescue e
-        connection.try &.close
-        raise e
+    # Fast path: see if the pool already exists
+    pool = @connection_pool_lock.synchronize { @pools[server_description.address]? }
+
+    unless pool
+      # Get or create a lock specific to this server address
+      addr_lock = @connection_pool_lock.synchronize do
+        @pool_locks[server_description.address] ||= Sync::Mutex.new
       end
-    }
-    @pools[server_description.address].checkout
+
+      # Synchronize on the specific address to prevent concurrent initializations for the same server
+      # while allowing other servers to initialize their pools in parallel.
+      pool = addr_lock.synchronize do
+        # Double-check inside the lock
+        @connection_pool_lock.synchronize { @pools[server_description.address]? } || begin
+          new_pool = Mongo::Connection::Pool(Mongo::Connection).new(
+            initial_pool_size: @options.min_pool_size,
+            max_pool_size: @options.max_pool_size,
+            max_idle_pool_size: @options.max_pool_size,
+            checkout_timeout: @options.wait_queue_timeout.try(&.seconds.to_f64) || 5.0
+          ) do
+            connection = Mongo::Connection.new(server_description, @credentials, @options, is_monitor: false)
+            result, round_trip_time = connection.handshake(send_metadata: true, appname: @options.appname)
+            connection.authenticate
+            new_rtt = Connection.average_round_trip_time(round_trip_time, server_description.round_trip_time)
+            new_description = SDAM::ServerDescription.new(server_description.address, result, new_rtt)
+            topology.update(server_description, new_description)
+            server_description.update(new_description)
+            connection
+          rescue e
+            connection.try &.close
+            raise e
+          end
+
+          @connection_pool_lock.synchronize { @pools[server_description.address] = new_pool }
+          new_pool
+        end
+      end
+    end
+
+    pool.checkout
   end
 
   private def release_connection(connection : Mongo::Connection)
@@ -320,45 +341,36 @@ class Mongo::Client
   end
 
   protected def close_connection_pool(server_description : SDAM::ServerDescription)
-    @pools[server_description.address]?.try &.close
-    @@connection_pool_lock.synchronize {
-      @pools.delete server_description.address
-    }
+    pool_to_close = @connection_pool_lock.synchronize do
+      @pool_locks.delete(server_description.address)
+      @pools.delete(server_description.address)
+    end
+    pool_to_close.try(&.close)
   end
 
   protected def on_topology_update
     loop do
       select
-      when @topology_update.send nil
-        # Fiber.yield
+      when @topology_update.send true
       else
         break
       end
     end
 
-    @@topology_lock.synchronize {
-      self.topology.servers.each { |server|
+    @topology_lock.synchronize do
+      self.topology.servers.each do |server|
         no_monitor = @monitors.none? { |monitor|
-          monitor.server_description.address.== server.address
+          monitor.server_description.address == server.address
         }
         add_monitor(server) if no_monitor
-      }
-    }
+      end
+    end
   end
 
   private def gossip_cluster_time(session : Session::ClientSession? = nil)
     # see: https://github.com/mongodb/specifications/blob/master/source/sessions/driver-sessions.rst#gossipping-the-cluster-time
-    if session
-      client_time = @cluster_time
-      session_time = session.cluster_time
-      if !client_time || (session_time && client_time < session_time)
-        session_time
-      else
-        client_time
-      end
-    else
-      @cluster_time
-    end
+    return @cluster_time unless session
+    [session.cluster_time, @cluster_time].compact.max?
   end
 
   # :nodoc:
@@ -369,7 +381,7 @@ class Mongo::Client
     "array_filters",
   }
 
-  private def acknowledged?(args, session, validate = true)
+  private def acknowledged?(args : NamedTuple, session : Session::ClientSession, validate : Bool = true) : Bool
     unacknowledged = false
     if concern = args["options"]?.try(&.["write_concern"]?)
       unacknowledged = concern.unacknowledged?
