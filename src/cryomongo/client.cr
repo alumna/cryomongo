@@ -36,7 +36,7 @@ class Mongo::Client
   # :nodoc:
   protected getter min_heartbeat_frequency : Time::Span = 500.milliseconds
 
-  @monitoring_enabled : Bool = true
+  @monitoring_enabled : Bool
 
   @topology_lock = Sync::Mutex.new(:reentrant)
   @connection_pool_lock = Sync::Mutex.new
@@ -99,7 +99,6 @@ class Mongo::Client
 
     # An unknown/empty topology representation for the event
     empty_topology = SDAM::TopologyDescription.new(self)
-    empty_topology.type = :unknown
 
     # Use a local variable to satisfy the compiler's strict non-nil checks
     new_topology = SDAM::TopologyDescription.new(self, seeds.map(&.address), @options)
@@ -119,11 +118,17 @@ class Mongo::Client
     # The spec mandates LoadBalanced topology starts with Unknown servers, emits the
     # ServerOpeningEvent, and then transitions them to LoadBalancer automatically.
     if @options.raw?.try(&.["loadbalanced"]?) == "true"
+      previous_topology = new_topology.clone
+
       new_topology.servers.dup.each do |server|
         lb_desc = server.clone
         lb_desc.type = :load_balancer
-        new_topology.update(server, lb_desc)
+        new_topology.replace_description(server, lb_desc)
       end
+
+      emit_sdam_event(Monitoring::SDAM::TopologyDescriptionChangedEvent.new(
+        self.object_id, previous_topology, new_topology.clone
+      ))
     end
   end
 
@@ -350,7 +355,8 @@ class Mongo::Client
   end
 
   private def release_connection(connection : Mongo::Connection)
-    @pools[connection.server_description.address]?.try &.release(connection)
+    pool = @connection_pool_lock.synchronize { @pools[connection.server_description.address]? }
+    pool.try &.release(connection)
   end
 
   protected def close_connection_pool(server_description : SDAM::ServerDescription)
