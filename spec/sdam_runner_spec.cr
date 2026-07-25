@@ -1,3 +1,4 @@
+# spec/sdam_runner_spec.cr
 require "./spec_helper"
 
 describe "SDAM Legacy Tests" do
@@ -14,7 +15,8 @@ describe "SDAM Legacy Tests" do
       # Disable monitoring since we are feeding mock responses directly into the topology
       client = Mongo::Client.new(uri, options: options, start_monitoring: false)
 
-      # Inject the missing initial events that occurred before we could subscribe
+      # Inject the missing initial events that occurred before we could subscribe.
+      # These will be asserted in the first phase, and cleared at the END of each phase.
       empty_topology = Mongo::SDAM::TopologyDescription.new(client)
       events << Mongo::Monitoring::SDAM::TopologyOpeningEvent.new(client.object_id)
       events << Mongo::Monitoring::SDAM::TopologyDescriptionChangedEvent.new(
@@ -31,14 +33,14 @@ describe "SDAM Legacy Tests" do
       pool_generations = Hash(String, Int32).new
 
       test["phases"].as_a.each do |phase|
-        events.clear
-
         # 1. Process simulated hello/legacy hello responses
         phase["responses"]?.try &.as_a.each do |resp|
           addr = resp[0].as_s
           payload = resp[1].as_h?
 
-          old_desc = client.topology.servers.find(&.address.==(addr)) || Mongo::SDAM::ServerDescription.new(addr)
+          # Skip if server is not in topology, avoiding phantom allocation
+          old_desc = client.topology.servers.find(&.address.==(addr))
+          next unless old_desc
 
           if payload && !payload.empty?
             # The server omits null fields, so we strip them from the mock response
@@ -57,13 +59,15 @@ describe "SDAM Legacy Tests" do
         # 2. Process simulated application errors
         phase["applicationErrors"]?.try &.as_a.each do |app_err|
           addr = app_err["address"].as_s
-          old_desc = client.topology.servers.find(&.address.==(addr)) || Mongo::SDAM::ServerDescription.new(addr)
 
-          type = app_err["type"].as_s
+          old_desc = client.topology.servers.find(&.address.==(addr))
+          next unless old_desc
+
+          error_type = app_err["type"].as_s
           when_phase = app_err["when"].as_s
           err_gen = app_err["generation"]?.try(&.as_i)
 
-          err = if type == "command"
+          err = if error_type == "command"
                   resp = app_err["response"]
                   Mongo::Error::Command.new(
                     code: resp["code"]?.try(&.as_i),
@@ -72,7 +76,7 @@ describe "SDAM Legacy Tests" do
                     details: nil,
                     topology_version: resp["topologyVersion"]?.try { |tv| BSON.from_json(tv.to_json) }
                   )
-                elsif type == "timeout"
+                elsif error_type == "timeout"
                   Mongo::Error::Network.new("timeout")
                 else
                   Mongo::Error::Network.new("network error")
@@ -80,9 +84,10 @@ describe "SDAM Legacy Tests" do
 
           # Determine if error is stale based on generation or topologyVersion
           is_stale = false
-          if err_gen
-            current_gen = pool_generations.fetch(addr, 0)
-            is_stale = true if err_gen < current_gen
+          current_gen = pool_generations.fetch(addr, 0)
+
+          if err_gen && err_gen < current_gen
+            is_stale = true
           end
 
           if err.is_a?(Mongo::Error::Command) && err.topology_version
@@ -95,14 +100,14 @@ describe "SDAM Legacy Tests" do
             if err.is_a?(Mongo::Error::Network)
               if when_phase == "beforeHandshakeCompletes"
                 # SDAM Spec: MUST NOT change the server's description if network error during connection establishment
-              elsif type == "timeout" && when_phase == "afterHandshakeCompletes"
+              elsif error_type == "timeout" && when_phase == "afterHandshakeCompletes"
                 # SDAM Spec: MUST NOT mark the server Unknown on a timeout AFTER handshake
               else
                 new_desc = Mongo::SDAM::ServerDescription.new(addr)
                 new_desc.error = err.message
                 new_desc.last_update_time = old_desc.last_update_time
                 client.topology.update(old_desc, new_desc)
-                pool_generations[addr] = pool_generations.fetch(addr, 0) + 1
+                pool_generations[addr] = current_gen + 1
               end
             elsif err.is_a?(Mongo::Error::Command) && err.state_change?
               new_desc = Mongo::SDAM::ServerDescription.new(addr)
@@ -113,7 +118,7 @@ describe "SDAM Legacy Tests" do
               new_desc.topology_version = err.topology_version
               client.topology.update(old_desc, new_desc)
               if err.shutdown? || old_desc.max_wire_version < 8
-                pool_generations[addr] = pool_generations.fetch(addr, 0) + 1
+                pool_generations[addr] = current_gen + 1
               end
             end
           end
@@ -140,7 +145,7 @@ describe "SDAM Legacy Tests" do
               exp_srv_type = exp_srv["type"].as_s
 
               if exp_srv_type == "Unknown" || exp_srv_type == "PossiblePrimary"
-                (actual_srv.try(&.type.unknown?) || actual_srv.try(&.type.possible_primary?)).should be_true
+                actual_srv.try { |s| s.type.unknown? || s.type.possible_primary? }.should be_true
               else
                 actual_srv.should_not be_nil
                 if actual_srv
@@ -200,6 +205,10 @@ describe "SDAM Legacy Tests" do
             end
           end
         end
+
+        # Clear events at the END of the phase so the initial topology events
+        # can be successfully asserted during the first phase iteration.
+        events.clear
       end
 
       client.close
