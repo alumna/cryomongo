@@ -119,8 +119,9 @@ class Mongo::SDAM::TopologyDescription
       end
     end
 
-    @logical_session_timeout_minutes = min_logical_session_timeout if min_logical_session_timeout
-    @logical_session_timeout_minutes = nil if erase_logical_session_timeout
+    # If erase is true, we must set to nil.
+    # If there are no data-bearing servers, min will be nil, correctly clearing the timeout.
+    @logical_session_timeout_minutes = erase_logical_session_timeout ? nil : min_logical_session_timeout
   end
 
   def is_newer_or_equal_topology_version?(current_tv : BSON?, new_tv : BSON?) : Bool
@@ -159,90 +160,88 @@ class Mongo::SDAM::TopologyDescription
       # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#updating-the-topologydescription
       if @type.single? && @set_name.try { |name| new_description.set_name != name }
         replace_description(old_description, ServerDescription.new(old_description.address))
-        topology_changed = true
-        return
-      end
-
-      replace_description(old_description, new_description)
-
-      unless new_description.type.unknown?
-        if new_description.min_wire_version > Client::MAX_WIRE_VERSION
-          @compatible = false
-          @compatibility_error = "Server at #{new_description.address} requires wire version #{new_description.min_wire_version}, but this version of cryomongo only supports up to #{Client::MAX_WIRE_VERSION}."
-        elsif new_description.max_wire_version < Client::MIN_WIRE_VERSION
-          @compatible = false
-          @compatibility_error = "Server at #{new_description.address} requires wire version #{new_description.max_wire_version}, but this version of cryomongo requires at least #{Client::MIN_WIRE_VERSION}."
-        else
-          @compatible = true
-        end
-      end
-
-      case new_description.type
-      when .unknown?
-        check_if_has_primary if @type.replica_set_with_primary?
-      when .standalone?
-        case @type
-        when .unknown?
-          update_unknown_with_standalone(new_description)
-        when .sharded?, .replica_set_no_primary?
-          remove(new_description)
-        when .replica_set_with_primary?
-          remove(new_description)
-          check_if_has_primary
-        else
-          # ignore
-        end
-      when .mongos?
-        case @type
-        when .unknown?
-          @type = :sharded
-        when .replica_set_no_primary?
-          remove(new_description)
-        when .replica_set_with_primary?
-          remove(new_description)
-          check_if_has_primary
-        else
-          # ignore
-        end
-      when .rs_primary?
-        case @type
-        when .unknown?
-          update_rs_from_primary(new_description)
-        when .sharded?
-          remove(new_description)
-        when .replica_set_no_primary?
-          @type = :replica_set_with_primary
-          update_rs_from_primary(new_description)
-        when .replica_set_with_primary?
-          update_rs_from_primary(new_description)
-        else
-          # ignore
-        end
-      when .rs_secondary?, .rs_arbiter?, .rs_other?
-        case @type
-        when .unknown?
-          @type = :replica_set_no_primary
-          update_rs_without_primary(new_description)
-        when .sharded?
-          remove(new_description)
-        when .replica_set_no_primary?
-          update_rs_without_primary(new_description)
-        when .replica_set_with_primary?
-          update_rs_with_primary_from_member(new_description)
-        else
-          # ignore
-        end
-      when .rs_ghost?
-        case @type
-        when .sharded?
-          remove(new_description)
-        when .replica_set_with_primary?
-          check_if_has_primary
-        else
-          # ignore
-        end
       else
-        # ignore
+        replace_description(old_description, new_description)
+
+        unless new_description.type.unknown?
+          if new_description.min_wire_version > Client::MAX_WIRE_VERSION
+            @compatible = false
+            @compatibility_error = "Server at #{new_description.address} requires wire version #{new_description.min_wire_version}, but this version of cryomongo only supports up to #{Client::MAX_WIRE_VERSION}."
+          elsif new_description.max_wire_version < Client::MIN_WIRE_VERSION
+            @compatible = false
+            @compatibility_error = "Server at #{new_description.address} requires wire version #{new_description.max_wire_version}, but this version of cryomongo requires at least #{Client::MIN_WIRE_VERSION}."
+          else
+            @compatible = true
+          end
+        end
+
+        case new_description.type
+        when .unknown?
+          check_if_has_primary if @type.replica_set_with_primary?
+        when .standalone?
+          case @type
+          when .unknown?
+            update_unknown_with_standalone(new_description)
+          when .sharded?, .replica_set_no_primary?
+            remove(new_description)
+          when .replica_set_with_primary?
+            remove(new_description)
+            check_if_has_primary
+          else
+            # ignore
+          end
+        when .mongos?
+          case @type
+          when .unknown?
+            @type = :sharded
+          when .replica_set_no_primary?
+            remove(new_description)
+          when .replica_set_with_primary?
+            remove(new_description)
+            check_if_has_primary
+          else
+            # ignore
+          end
+        when .rs_primary?
+          case @type
+          when .unknown?
+            update_rs_from_primary(new_description)
+          when .sharded?
+            remove(new_description)
+          when .replica_set_no_primary?
+            @type = :replica_set_with_primary
+            update_rs_from_primary(new_description)
+          when .replica_set_with_primary?
+            update_rs_from_primary(new_description)
+          else
+            # ignore
+          end
+        when .rs_secondary?, .rs_arbiter?, .rs_other?
+          case @type
+          when .unknown?
+            @type = :replica_set_no_primary
+            update_rs_without_primary(new_description)
+          when .sharded?
+            remove(new_description)
+          when .replica_set_no_primary?
+            update_rs_without_primary(new_description)
+          when .replica_set_with_primary?
+            update_rs_with_primary_from_member(new_description)
+          else
+            # ignore
+          end
+        when .rs_ghost?
+          case @type
+          when .sharded?
+            remove(new_description)
+          when .replica_set_with_primary?
+            check_if_has_primary
+          else
+            # ignore
+          end
+        else
+          # ignore
+        end
       end
 
       if previous_type != @type || previous_servers != @servers
