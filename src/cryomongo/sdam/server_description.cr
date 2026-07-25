@@ -10,6 +10,7 @@ class Mongo::SDAM::ServerDescription
     RSArbiter
     RSOther
     RSGhost
+    LoadBalancer
     Unknown
   end
 
@@ -20,11 +21,11 @@ class Mongo::SDAM::ServerDescription
   # The duration of the ismaster call.
   getter round_trip_time : Time::Span = 0.seconds
   # A 64-bit BSON datetime or null. The "lastWriteDate" from the server's most recent ismaster response.
-  getter last_write_date : Time? = nil
+  property last_write_date : Time? = nil
   # An opaque value representing the position in the oplog of the most recently seen write.
   # (Only mongos and shard servers record this field when monitoring config servers as replica sets,
   # at least until drivers allow applications to use readConcern "afterOptime".)
-  getter op_time : BSON? = nil
+  property op_time : BSON? = nil
   # A ServerType enum value.
   property type : ServerType = :unknown
   # The wire protocol version range supported by the server.
@@ -32,25 +33,25 @@ class Mongo::SDAM::ServerDescription
   property min_wire_version : Int32 = 0
   property max_wire_version : Int32 = 0
   # The hostname or IP, and the port number, that this server was configured with in the replica set.
-  getter me : String? = nil
+  property me : String? = nil
   # Sets of addresses. This server's opinion of the replica set's members, if any.
   # These hostnames are normalized to lower-case.
   # The client monitors all three types of servers in a replica set.
-  getter hosts : Array(String)? = [] of String
-  getter passives : Array(String)? = [] of String
-  getter arbiters : Array(String)? = [] of String
+  property hosts : Array(String)? = [] of String
+  property passives : Array(String)? = [] of String
+  property arbiters : Array(String)? = [] of String
   # Map from string to string.
-  getter tags : BSON? # Hash(String, String) = {} of String => String
-  getter set_name : String? = nil
-  getter set_version : Int32? = nil
+  property tags : BSON? # Hash(String, String) = {} of String => String
+  property set_name : String? = nil
+  property set_version : Int32? = nil
   # An ObjectId, if this is a MongoDB 2.6+ replica set member that believes it is primary.
   # See using setVersion and electionId to detect stale primaries.
-  getter election_id : BSON::ObjectId? = nil
+  property election_id : BSON::ObjectId? = nil
   # This server's opinion of who the primary is.
-  getter primary : String? = nil
+  property primary : String? = nil
   # When this server was last checked.
   property last_update_time : Time = Time::UNIX_EPOCH
-  getter logical_session_timeout_minutes : Int32? = nil
+  property logical_session_timeout_minutes : Int32? = nil
   # The "topologyVersion" from the server's most recent ismaster response or State Change Error.
   property topology_version : BSON? = nil
 
@@ -102,6 +103,30 @@ class Mongo::SDAM::ServerDescription
     else
       @type = :rs_other
     end
+  end
+
+  def clone : ServerDescription
+    copy = ServerDescription.new(@address)
+    copy.error = @error
+    copy.type = @type
+    copy.min_wire_version = @min_wire_version
+    copy.max_wire_version = @max_wire_version
+    copy.me = @me
+    copy.hosts = @hosts.try(&.dup)
+    copy.passives = @passives.try(&.dup)
+    copy.arbiters = @arbiters.try(&.dup)
+    copy.tags = @tags
+    copy.set_name = @set_name
+    copy.set_version = @set_version
+    copy.election_id = @election_id
+    copy.primary = @primary
+    copy.last_update_time = @last_update_time
+    copy.logical_session_timeout_minutes = @logical_session_timeout_minutes
+    copy.topology_version = @topology_version
+
+    # We skip copying transient/internal measuring fields like round_trip_time or last_write_date
+    # since they aren't part of SDAM semantic equality checks.
+    copy
   end
 
   def update(other : ServerDescription)

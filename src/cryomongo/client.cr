@@ -44,6 +44,7 @@ class Mongo::Client
   @last_scan : Time = Time::UNIX_EPOCH
   @topology_update = Channel(Nil).new
   @commands_observable = Monitoring::Observable(Monitoring::Commands::Event).new
+  @sdam_observable = Monitoring::Observable(Monitoring::SDAM::Event).new
 
   # The default auth database is optionally provided as a part of the connection string uri.
   #
@@ -89,8 +90,27 @@ class Mongo::Client
       )
     end
 
-    @topology = SDAM::TopologyDescription.new(self, seeds.map(&.address), @options)
-    topology.servers.each { |server|
+    emit_sdam_event(Monitoring::SDAM::TopologyOpeningEvent.new(self.object_id))
+
+    # An unknown/empty topology representation for the event
+    empty_topology = SDAM::TopologyDescription.new(self, [] of String, @options)
+    empty_topology.type = :unknown
+
+    # Use a local variable to satisfy the compiler's strict non-nil checks
+    new_topology = SDAM::TopologyDescription.new(self, seeds.map(&.address), @options)
+    @topology = new_topology
+
+    emit_sdam_event(Monitoring::SDAM::TopologyDescriptionChangedEvent.new(
+      self.object_id,
+      empty_topology,
+      new_topology.clone
+    ))
+
+    new_topology.servers.each do |server|
+      emit_sdam_event(Monitoring::SDAM::ServerOpeningEvent.new(self.object_id, server.address))
+    end
+
+    new_topology.servers.each { |server|
       add_monitor(server, start_monitoring: start_monitoring)
     }
   end
@@ -112,6 +132,26 @@ class Mongo::Client
     rescue e
       Log.warn { "Error while trying to close monitor fiber. #{e}" }
     end
+
+    emit_sdam_event(Monitoring::SDAM::TopologyClosedEvent.new(self.object_id))
+  end
+
+  ########
+  # SDAM #
+  ########
+
+  # Subscribes to Server Discovery And Monitoring events.
+  def subscribe_sdam(&callback : Monitoring::SDAM::Event -> Nil) : Monitoring::SDAM::Event -> Nil
+    @sdam_observable.subscribe(&callback)
+  end
+
+  # Unsubscribes from SDAM events.
+  def unsubscribe_sdam(callback : Monitoring::SDAM::Event -> Nil) : Nil
+    @sdam_observable.unsubscribe(callback)
+  end
+
+  protected def emit_sdam_event(event : Monitoring::SDAM::Event)
+    @sdam_observable.broadcast(event)
   end
 
   ##################

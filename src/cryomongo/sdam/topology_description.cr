@@ -4,6 +4,7 @@ class Mongo::SDAM::TopologyDescription
     ReplicaSetNoPrimary
     ReplicaSetWithPrimary
     Sharded
+    LoadBalanced
     Unknown
   end
 
@@ -11,22 +12,21 @@ class Mongo::SDAM::TopologyDescription
 
   property type : TopologyType = :unknown
   # The replica set name.
-  getter set_name : String? = nil
+  property set_name : String? = nil
   # The largest setVersion ever reported by a primary.
-  getter max_set_version : Int32? = nil
+  property max_set_version : Int32? = nil
   # The largest electionId ever reported by a primary.
-  getter max_election_id : BSON::ObjectId? = nil
+  property max_election_id : BSON::ObjectId? = nil
   # A set of ServerDescription instances.
-  # getter servers : Hash(String, ServerDescription) = {} of String => ServerDescription
-  getter servers : Array(ServerDescription) = [] of ServerDescription
+  property servers : Array(ServerDescription) = [] of ServerDescription
   # For single-threaded clients, whether the topology must be re-scanned.
   property stale : Bool = false
   # False if any server's wire protocol version range is incompatible with the client's.
-  getter compatible : Bool = true
+  property compatible : Bool = true
   # The error message if "compatible" is false, otherwise nil.
-  getter compatibility_error : String? = nil
+  property compatibility_error : String? = nil
   # See logical session timeout.
-  getter logical_session_timeout_minutes : Int32? = nil
+  property logical_session_timeout_minutes : Int32? = nil
 
   def initialize(@client : Mongo::Client, seeds : Array(String), options : Mongo::Options)
     seeds.each { |seed|
@@ -48,9 +48,33 @@ class Mongo::SDAM::TopologyDescription
       @type = :replica_set_no_primary if @type.unknown?
       @set_name = options.replica_set
     end
+
+    if options.raw["loadbalanced"]? == "true"
+      @type = :load_balanced
+    end
+  end
+
+  def clone : TopologyDescription
+    copy = TopologyDescription.new(@client, [] of String, Mongo::Options.new)
+    copy.type = @type
+    copy.set_name = @set_name
+    copy.max_set_version = @max_set_version
+    copy.max_election_id = @max_election_id
+    copy.servers = @servers.map(&.clone)
+    copy.stale = @stale
+    copy.compatible = @compatible
+    copy.compatibility_error = @compatibility_error
+    copy.logical_session_timeout_minutes = @logical_session_timeout_minutes
+    copy
   end
 
   def replace_description(old_description, new_description)
+    if old_description != new_description
+      @client.emit_sdam_event(Monitoring::SDAM::ServerDescriptionChangedEvent.new(
+        @client.object_id, new_description.address, old_description, new_description
+      ))
+    end
+
     erase_logical_session_timeout = false
     if new_description.data_bearing?
       min_logical_session_timeout = new_description.logical_session_timeout_minutes
@@ -79,7 +103,7 @@ class Mongo::SDAM::TopologyDescription
     @logical_session_timeout_minutes = nil if erase_logical_session_timeout
   end
 
-  private def is_newer_or_equal_topology_version?(current_tv : BSON?, new_tv : BSON?) : Bool
+  def is_newer_or_equal_topology_version?(current_tv : BSON?, new_tv : BSON?) : Bool
     return true if current_tv.nil? || new_tv.nil?
     pid_current = current_tv["processId"]?
     pid_new = new_tv["processId"]?
@@ -92,6 +116,8 @@ class Mongo::SDAM::TopologyDescription
 
   def update(old_description : ServerDescription, new_description : ServerDescription)
     @@lock.synchronize {
+      previous_topology = self.clone
+
       current_server = @servers.find { |s| s.address == old_description.address }
       if current_server
         unless is_newer_or_equal_topology_version?(current_server.topology_version, new_description.topology_version)
@@ -186,6 +212,12 @@ class Mongo::SDAM::TopologyDescription
       else
         # ignore
       end
+
+      if previous_topology.type != @type || previous_topology.servers != @servers
+        @client.emit_sdam_event(Monitoring::SDAM::TopologyDescriptionChangedEvent.new(
+          @client.object_id, previous_topology, self.clone
+        ))
+      end
     }
   ensure
     @client.on_topology_update
@@ -226,6 +258,7 @@ class Mongo::SDAM::TopologyDescription
     }.each &.try &.each { |addr_str|
       unless @servers.any? &.address.==(addr_str)
         @servers << ServerDescription.new(addr_str)
+        @client.emit_sdam_event(Monitoring::SDAM::ServerOpeningEvent.new(@client.object_id, addr_str))
       end
     }
 
@@ -317,6 +350,7 @@ class Mongo::SDAM::TopologyDescription
         address = address.downcase
         unless @servers.any? &.address.== address
           @servers << ServerDescription.new(address)
+          @client.emit_sdam_event(Monitoring::SDAM::ServerOpeningEvent.new(@client.object_id, address))
         end
       }
     }
@@ -341,7 +375,11 @@ class Mongo::SDAM::TopologyDescription
   end
 
   def remove(server_description)
-    @servers.delete(server_description)
+    idx = @servers.index { |s| s.address == server_description.address }
+    if idx
+      @servers.delete_at(idx)
+      @client.emit_sdam_event(Monitoring::SDAM::ServerClosedEvent.new(@client.object_id, server_description.address))
+    end
   end
 
   def supports_sessions?

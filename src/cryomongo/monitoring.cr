@@ -1,3 +1,5 @@
+require "./monitoring/sdam"
+
 # Provides runtime information about commands to any 3rd party APM library as well internal driver use, such as logging.
 #
 # ```
@@ -19,6 +21,7 @@
 module Mongo::Monitoring
   enum Type
     Commands
+    SDAM
   end
 
   # Provides an observable interface for the `Mongo::Client`.
