@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.0 - 2026-07-25
+
+### Added
+* **sdam:** Implemented strict `topologyVersion` tracking across `ServerDescription`, network errors, and `Mongo::Error` to prevent race conditions during concurrent topology state changes.
+* **sdam:** Implemented `Mongo::Error::PoolCleared` to gracefully signal waiting fibers when a connection pool is purged due to network backpressure.
+* **spec:** Added multi-threading execution support (`runOnThread`, `waitForThread`) to the Unified Test Runner Dispatcher.
+* **spec:** Integrated the official Server Discovery and Monitoring (SDAM) Unified Test Format suite.
+
+### Changed
+* **sdam:** `TopologyDescription#update` now strictly enforces `topologyVersion` comparisons, discarding stale heartbeat responses and mitigating split-brain split-second races.
+
+### Fixed
+* **connection:** Mapped `connectTimeoutMS=0` to `nil` internally, ensuring Crystal's `TCPSocket` correctly interprets it as an infinite timeout.
+* **cmap:** Fixed a connection pool starvation issue where fibers waiting in `checkout` would hang until timeout if the pool was concurrently cleared. They are now instantly awakened via `Channel::ClosedError` to seamlessly trigger the CMAP retry logic.
+
 ## 0.8.0 - 2026-07-22
 
 ### Added

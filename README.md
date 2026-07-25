@@ -24,13 +24,14 @@ On a technical level, the current update already includes:
 
 The update roadmap is actively being worked on. Below is the current progress against the official specifications:
 
-- [x] **Unified Test Format** (`unified-test-format.md`): Modern engine built to run the official declarative JSON test files.
+- [x] **Unified Test Format** (`unified-test-format.md`): Modern engine built to run the official declarative JSON test files (now with multi-threading support).
 - [x] **CRUD Operations** (`crud.md`): 100% compliant.
 - [x] **Retryable Writes** (`retryable-writes.md`): 100% compliant. Gracefully handles network failures, step-downs, and `errorLabels`.
 - [x] **Retryable Reads** (`retryable-reads.md`): 100% compliant.
 - [x] **Transactions** (`transactions.md` & `transactions-convenient-api.md`): 100% compliant. Implements robust exponential backoffs and strict timeouts.
 - [x] **Sessions & Causal Consistency** (`causal-consistency.md`): 100% compliant. Full support for snapshot reads and causally consistent write propagation.
-- [ ] **Server Discovery and Monitoring** (`server-discovery-and-monitoring.md`): Up next.
+- [x] **Server Discovery and Monitoring (SDAM) - Phase 1**: 100% Unified Test Format compliant. Improved `topologyVersion` conflict resolution and CMAP backpressure handling.
+- [ ] **Server Discovery and Monitoring (SDAM) - Phase 2**: Up next (Topology Specifics: replica sets, sharded clusters, and event monitoring).
 - [ ] **Authentication** (`auth.md`): Pending SCRAM-SHA-256 validation.
 
 #### Cryomongo is a high-performance MongoDB driver written in pure Crystal. (i.e. no C dependencies needed.)

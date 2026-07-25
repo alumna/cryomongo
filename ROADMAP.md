@@ -5,9 +5,10 @@ This roadmap defines the implementation checklist against the official MongoDB d
 ## Core (Connection & Discovery)
 - [x] connection-string
 - [x] uri-options
-- [x] server-discovery-and-monitoring (SDAM)
-- [x] server-selection
 - [x] connection-monitoring-and-pooling (CMAP)
+- [x] server-discovery-and-monitoring (SDAM) - Unified Tests
+- [ ] server-discovery-and-monitoring (SDAM) - Topology Specifics (rs, sharded, single, errors, monitoring)
+- [x] server-selection
 - [ ] handshake (hello)
 - [ ] max-staleness
 - [ ] load-balancers
