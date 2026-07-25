@@ -79,9 +79,16 @@ module Mongo
   end
 
   class Error::Network < Error::Client
-    def initialize(original_error : IO::Error | Socket::Error)
-      initialize(message: original_error.message, cause: original_error)
+    def initialize(original_error : Exception)
+      super(message: original_error.message, cause: original_error)
     end
+
+    def initialize(message : String)
+      super(message: message)
+    end
+  end
+
+  class Error::PoolCleared < Error::Network
   end
 
   class Error::Connection < Error::Client

@@ -9,14 +9,16 @@ class Mongo::Client
     **args,
   )
     server_description ||= server_selection(command, args, read_preference)
-    connection = get_connection(server_description)
-    session.pin(server_description)
 
     if !topology.supports_sessions? || !server_description.supports_retryable_reads?
+      connection = get_connection(server_description)
+      session.pin(server_description)
       return execute_command(command, session, read_preference, server_description, connection, operation_id, **args)
     end
 
     begin
+      connection = get_connection(server_description)
+      session.pin(server_description)
       return execute_command(command, session, read_preference, server_description, connection, operation_id, **args)
     rescue error : NetworkError
       error = Error::Network.new(error)
