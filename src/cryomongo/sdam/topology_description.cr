@@ -51,7 +51,19 @@ class Mongo::SDAM::TopologyDescription
 
   def initialize(@client : Mongo::Client, seeds : Array(String), options : Mongo::Options)
     seeds.each do |seed|
-      @servers << ServerDescription.new(seed.downcase)
+      if seed.ends_with?(".sock")
+        @servers << ServerDescription.new(seed)
+      elsif colon = seed.byte_rindex(':')
+        if seed.ends_with?(']')
+          @servers << ServerDescription.new("#{seed.downcase}:27017")
+        else
+          host = seed.byte_slice(0, colon).downcase
+          port = seed.byte_slice(colon + 1)
+          @servers << ServerDescription.new("#{host}:#{port}")
+        end
+      else
+        @servers << ServerDescription.new("#{seed.downcase}:27017")
+      end
     end
 
     if options.direct_connection
@@ -66,6 +78,7 @@ class Mongo::SDAM::TopologyDescription
     # Safely handle uninitialized raw HTTP params during cloning
     if options.raw?.try(&.["loadbalanced"]?) == "true"
       @type = :load_balanced
+      @servers.each { |s| s.type = :load_balancer }
     end
   end
 
@@ -131,6 +144,17 @@ class Mongo::SDAM::TopologyDescription
     counter_current = current_tv["counter"]?.try(&.as(Int64)) || 0_i64
     counter_new = new_tv["counter"]?.try(&.as(Int64)) || 0_i64
     counter_new >= counter_current
+  end
+
+  def is_stale_error_topology_version?(current_tv : BSON?, error_tv : BSON?) : Bool
+    return false if current_tv.nil? || error_tv.nil?
+    pid_current = current_tv["processId"]?
+    pid_err = error_tv["processId"]?
+    return false if pid_current != pid_err
+
+    counter_current = current_tv["counter"]?.try(&.as(Int64)) || 0_i64
+    counter_err = error_tv["counter"]?.try(&.as(Int64)) || 0_i64
+    counter_err <= counter_current
   end
 
   def update(old_description : ServerDescription, new_description : ServerDescription)
@@ -358,34 +382,67 @@ class Mongo::SDAM::TopologyDescription
     set_version = description.set_version
     election_id = description.election_id
 
-    if !set_version.nil? && !election_id.nil?
-      max_set_v = @max_set_version
-      max_elec_id = @max_election_id
+    if description.max_wire_version >= 17
+      # MongoDB 6.0+ Tuple Comparison
+      is_stale = false
 
-      if max_set_v && max_elec_id
-        is_stale = if description.max_wire_version >= 17
-                     max_elec_id.data > election_id.data ||
-                       (max_elec_id.data == election_id.data && max_set_v > set_version)
-                   else
-                     max_set_v > set_version ||
-                       (max_set_v == set_version && max_elec_id.data > election_id.data)
-                   end
+      elec_cmp = if election_id && @max_election_id
+                   election_id.data <=> @max_election_id.try(&.data)
+                 elsif election_id
+                   1
+                 elsif @max_election_id
+                   -1
+                 else
+                   0
+                 end
 
-        if is_stale
-          stale_desc = ServerDescription.new(description.address)
-          stale_desc.error = "primary marked stale due to electionId/setVersion mismatch"
-          replace_description(description, stale_desc)
-          check_if_has_primary
-          return
-        end
+      set_cmp = if set_version && @max_set_version
+                  set_version <=> @max_set_version.not_nil!
+                elsif set_version
+                  1
+                elsif @max_set_version
+                  -1
+                else
+                  0
+                end
+
+      if elec_cmp > 0 || (elec_cmp == 0 && set_cmp >= 0)
+        @max_election_id = election_id
+        @max_set_version = set_version
+      else
+        is_stale = true
       end
 
-      @max_election_id = description.election_id
-    end
+      if is_stale
+        stale_desc = ServerDescription.new(description.address)
+        stale_desc.error = "primary marked stale due to electionId/setVersion mismatch"
+        replace_description(description, stale_desc)
+        check_if_has_primary
+        return
+      end
+    else
+      # Pre-6.0 Tuple Comparison
+      if !set_version.nil? && !election_id.nil?
+        if max_set_v = @max_set_version
+          if max_elec_id = @max_election_id
+            if max_set_v > set_version || (max_set_v == set_version && max_elec_id.data > election_id.data)
+              stale_desc = ServerDescription.new(description.address)
+              stale_desc.error = "primary marked stale due to electionId/setVersion mismatch"
+              replace_description(description, stale_desc)
+              check_if_has_primary
+              return
+            end
+          end
+        end
+        @max_election_id = election_id
+      end
 
-    max_set_v = @max_set_version
-    if !set_version.nil? && (max_set_v.nil? || set_version > max_set_v)
-      @max_set_version = description.set_version
+      if !set_version.nil?
+        max_set_v = @max_set_version
+        if max_set_v.nil? || set_version > max_set_v
+          @max_set_version = set_version
+        end
+      end
     end
 
     @servers.dup.each do |server|
@@ -419,7 +476,14 @@ class Mongo::SDAM::TopologyDescription
       addrs.try &.each { |addr| valid_addresses << addr.downcase }
     end
 
-    @servers.select! { |server| valid_addresses.includes?(server.address) }
+    @servers.reject! do |server|
+      unless valid_addresses.includes?(server.address)
+        @client.emit_sdam_event(Monitoring::SDAM::ServerClosedEvent.new(@client.object_id, server.address))
+        true
+      else
+        false
+      end
+    end
 
     check_if_has_primary
   end

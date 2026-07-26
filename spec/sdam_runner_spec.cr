@@ -105,7 +105,7 @@ describe "SDAM Legacy Tests" do
           end
 
           if err.is_a?(Mongo::Error::Command) && err.topology_version
-            unless client.topology.is_newer_or_equal_topology_version?(old_desc.topology_version, err.topology_version)
+            if client.topology.is_stale_error_topology_version?(old_desc.topology_version, err.topology_version)
               is_stale = true
             end
           end

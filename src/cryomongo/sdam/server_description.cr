@@ -23,20 +23,15 @@ class Mongo::SDAM::ServerDescription
   # A 64-bit BSON datetime or null. The "lastWriteDate" from the server's most recent ismaster response.
   property last_write_date : Time? = nil
   # An opaque value representing the position in the oplog of the most recently seen write.
-  # (Only mongos and shard servers record this field when monitoring config servers as replica sets,
-  # at least until drivers allow applications to use readConcern "afterOptime".)
   property op_time : BSON? = nil
   # A ServerType enum value.
   property type : ServerType = :unknown
   # The wire protocol version range supported by the server.
-  # Use min and maxWireVersion only to determine compatibility.
   property min_wire_version : Int32 = 0
   property max_wire_version : Int32 = 0
   # The hostname or IP, and the port number, that this server was configured with in the replica set.
   property me : String? = nil
   # Sets of addresses. This server's opinion of the replica set's members, if any.
-  # These hostnames are normalized to lower-case.
-  # The client monitors all three types of servers in a replica set.
   property hosts : Array(String)? = [] of String
   property passives : Array(String)? = [] of String
   property arbiters : Array(String)? = [] of String
@@ -45,7 +40,6 @@ class Mongo::SDAM::ServerDescription
   property set_name : String? = nil
   property set_version : Int32? = nil
   # An ObjectId, if this is a MongoDB 2.6+ replica set member that believes it is primary.
-  # See using setVersion and electionId to detect stale primaries.
   property election_id : BSON::ObjectId? = nil
   # This server's opinion of who the primary is.
   property primary : String? = nil
@@ -66,6 +60,12 @@ class Mongo::SDAM::ServerDescription
 
   def initialize(address : String, hello_result : Commands::Hello::Result, @round_trip_time : Time::Span)
     @address = address.downcase
+
+    if hello_result.ok != 1.0
+      @type = :unknown
+      return
+    end
+
     from_is_master(%w(
       min_wire_version
       max_wire_version
@@ -105,6 +105,14 @@ class Mongo::SDAM::ServerDescription
     end
   end
 
+  def update(other : ServerDescription)
+    {% begin %}
+      {% for ivar in @type.instance_vars %}
+        @{{ivar.id}} = other.{{ivar.id}}
+      {% end %}
+    {% end %}
+  end
+
   def clone : ServerDescription
     copy = ServerDescription.new(@address)
     copy.error = @error
@@ -123,18 +131,7 @@ class Mongo::SDAM::ServerDescription
     copy.last_update_time = @last_update_time
     copy.logical_session_timeout_minutes = @logical_session_timeout_minutes
     copy.topology_version = @topology_version
-
-    # We skip copying transient/internal measuring fields like round_trip_time or last_write_date
-    # since they aren't part of SDAM semantic equality checks.
     copy
-  end
-
-  def update(other : ServerDescription)
-    {% begin %}
-      {% for ivar in @type.instance_vars %}
-        @{{ivar.id}} = other.{{ivar.id}}
-      {% end %}
-    {% end %}
   end
 
   def_equals @address, @error, @type, @min_wire_version, @max_wire_version,
