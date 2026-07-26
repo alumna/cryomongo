@@ -53,7 +53,7 @@ class Mongo::SDAM::TopologyDescription
     seeds.each do |seed|
       if seed.ends_with?(".sock")
         @servers << ServerDescription.new(seed)
-      elsif colon = seed.byte_rindex(':')
+      elsif colon = seed.rindex(':')
         if seed.ends_with?(']')
           @servers << ServerDescription.new("#{seed.downcase}:27017")
         else
@@ -135,6 +135,7 @@ class Mongo::SDAM::TopologyDescription
     @logical_session_timeout_minutes = erase_logical_session_timeout ? nil : min_logical_session_timeout
   end
 
+  # :nodoc:
   def is_newer_or_equal_topology_version?(current_tv : BSON?, new_tv : BSON?) : Bool
     return true if current_tv.nil? || new_tv.nil?
     pid_current = current_tv["processId"]?
@@ -146,6 +147,7 @@ class Mongo::SDAM::TopologyDescription
     counter_new >= counter_current
   end
 
+  # :nodoc:
   def is_stale_error_topology_version?(current_tv : BSON?, error_tv : BSON?) : Bool
     return false if current_tv.nil? || error_tv.nil?
     pid_current = current_tv["processId"]?
@@ -386,21 +388,23 @@ class Mongo::SDAM::TopologyDescription
       # MongoDB 6.0+ Tuple Comparison
       is_stale = false
 
-      elec_cmp = if election_id && @max_election_id
-                   election_id.data <=> @max_election_id.try(&.data)
+      max_elec = @max_election_id
+      elec_cmp = if election_id && max_elec
+                   election_id.data <=> max_elec.data
                  elsif election_id
                    1
-                 elsif @max_election_id
+                 elsif max_elec
                    -1
                  else
                    0
                  end
 
-      set_cmp = if set_version && @max_set_version
-                  set_version <=> @max_set_version.not_nil!
+      max_set = @max_set_version
+      set_cmp = if set_version && max_set
+                  set_version <=> max_set
                 elsif set_version
                   1
-                elsif @max_set_version
+                elsif max_set
                   -1
                 else
                   0

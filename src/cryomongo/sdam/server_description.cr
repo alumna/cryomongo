@@ -52,9 +52,9 @@ class Mongo::SDAM::ServerDescription
   def initialize(@address : String)
   end
 
-  private macro from_is_master(fields, is_master)
+  private macro from_hello(fields, hello_res)
     {% for field in fields %}
-      @{{field.id}} = {{is_master.id}}.{{field.id}}
+      @{{field.id}} = {{hello_res.id}}.{{field.id}}
     {% end %}
   end
 
@@ -66,7 +66,7 @@ class Mongo::SDAM::ServerDescription
       return
     end
 
-    from_is_master(%w(
+    from_hello(%w(
       min_wire_version
       max_wire_version
       logical_session_timeout_minutes
@@ -86,7 +86,7 @@ class Mongo::SDAM::ServerDescription
     @op_time = hello_result.last_write.try &.["opTime"]?.try &.as(BSON)
     @topology_version = hello_result.topology_version
 
-    if hello_result.msg === "isdbgrid"
+    if hello_result.msg == "isdbgrid"
       @type = :mongos
     elsif hello_result.isreplicaset
       @type = :rs_ghost
@@ -115,22 +115,7 @@ class Mongo::SDAM::ServerDescription
 
   def clone : ServerDescription
     copy = ServerDescription.new(@address)
-    copy.error = @error
-    copy.type = @type
-    copy.min_wire_version = @min_wire_version
-    copy.max_wire_version = @max_wire_version
-    copy.me = @me
-    copy.hosts = @hosts.try(&.dup)
-    copy.passives = @passives.try(&.dup)
-    copy.arbiters = @arbiters.try(&.dup)
-    copy.tags = @tags
-    copy.set_name = @set_name
-    copy.set_version = @set_version
-    copy.election_id = @election_id
-    copy.primary = @primary
-    copy.last_update_time = @last_update_time
-    copy.logical_session_timeout_minutes = @logical_session_timeout_minutes
-    copy.topology_version = @topology_version
+    copy.update(self)
     copy
   end
 
@@ -143,20 +128,20 @@ class Mongo::SDAM::ServerDescription
   end
 
   def primary_or_possible?
-    self.type.rs_primary? || self.type.possible_primary?
+    @type.rs_primary? || @type.possible_primary?
   end
 
   def unknown_or_ghost?
-    self.type.unknown? || self.type.rs_ghost?
+    @type.unknown? || @type.rs_ghost?
   end
 
   def supports_retryable_writes?
-    self.max_wire_version >= 6 &&
-      self.logical_session_timeout_minutes &&
-      !self.type.standalone?
+    @max_wire_version >= 6 &&
+      @logical_session_timeout_minutes &&
+      !@type.standalone?
   end
 
   def supports_retryable_reads?
-    self.max_wire_version >= 6
+    @max_wire_version >= 6
   end
 end
