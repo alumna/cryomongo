@@ -24,15 +24,14 @@ On a technical level, the current update already includes:
 
 The update roadmap is actively being worked on. Below is the current progress against the official specifications:
 
-- [x] **Unified Test Format** (`unified-test-format.md`): Modern engine built to run the official declarative JSON test files (now with multi-threading support).
+- [x] **Unified Test Format** (`unified-test-format.md`): new runner for Unified Test Format (UTF) specifications.
 - [x] **CRUD Operations** (`crud.md`): 100% compliant.
-- [x] **Retryable Writes** (`retryable-writes.md`): 100% compliant. Gracefully handles network failures, step-downs, and `errorLabels`.
+- [x] **Retryable Writes** (`retryable-writes.md`): 100% compliant.
 - [x] **Retryable Reads** (`retryable-reads.md`): 100% compliant.
-- [x] **Transactions** (`transactions.md` & `transactions-convenient-api.md`): 100% compliant. Implements robust exponential backoffs and strict timeouts.
-- [x] **Sessions & Causal Consistency** (`causal-consistency.md`): 100% compliant. Full support for snapshot reads and causally consistent write propagation.
-- [x] **Server Discovery and Monitoring (SDAM) - Phase 1**: 100% Unified Test Format compliant. Improved `topologyVersion` conflict resolution and CMAP backpressure handling.
-- [ ] **Server Discovery and Monitoring (SDAM) - Phase 2**: Up next (Topology Specifics: replica sets, sharded clusters, and event monitoring).
-- [ ] **Authentication** (`auth.md`): Pending SCRAM-SHA-256 validation.
+- [x] **Transactions** (`transactions.md` & `transactions-convenient-api.md`): 100% compliant.
+- [x] **Sessions & Causal Consistency** (`causal-consistency.md`): 100% compliant.
+- [x] **Server Discovery and Monitoring (SDAM)**: 100% compliant (both Unified and Legacy).
+- [ ] **Authentication** (`auth.md`): Pending SCRAM-SHA-256 validation. Up next.
 
 #### Cryomongo is a high-performance MongoDB driver written in pure Crystal. (i.e. no C dependencies needed.)
 
@@ -524,31 +523,47 @@ collection.find(
 - [Mongo::WriteConcern](https://elbywan.github.io/cryomongo/Mongo/WriteConcern.html)
 - [Mongo::ReadPreference](https://elbywan.github.io/cryomongo/Mongo/ReadPreference.html)
 
-## Commands Monitoring
+## Commands and SDAM Monitoring
 
 ```crystal
 require "cryomongo"
 
 client = Mongo::Client.new
 
-# A simple logging subscriber.
+# 1. Command Monitoring Subscriber
+# Tracks the execution of database commands (e.g., find, insert, aggregate).
 
-subscription = client.subscribe_commands { |event|
+cmd_subscription = client.subscribe_commands { |event|
   case event
   when Mongo::Monitoring::Commands::CommandStartedEvent
     Log.info { "COMMAND.#{event.command_name} #{event.address} STARTED: #{event.command.to_json}" }
   when Mongo::Monitoring::Commands::CommandSucceededEvent
-    Log.info { "COMMAND.#{event.command_name} #{event.address} COMPLETED: #{event.reply.to_json} (#{event.duration}s)" }
+    Log.info { "COMMAND.#{event.command_name} #{event.address} COMPLETED (#{event.duration}s)" }
   when Mongo::Monitoring::Commands::CommandFailedEvent
     Log.info { "COMMAND.#{event.command_name} #{event.address} FAILED: #{event.failure.inspect} (#{event.duration}s)" }
+  end
+}
+
+# 2. SDAM (Server Discovery and Monitoring) Subscriber
+# Tracks the lifecycle and topology changes of the MongoDB cluster.
+
+sdam_subscription = client.subscribe_sdam { |event|
+  case event
+  when Mongo::Monitoring::SDAM::ServerDescriptionChangedEvent
+    Log.info { "SERVER.#{event.address} CHANGED: #{event.previous_description.type} -> #{event.new_description.type}" }
+  when Mongo::Monitoring::SDAM::TopologyDescriptionChangedEvent
+    Log.info { "TOPOLOGY CHANGED: #{event.previous_description.type} -> #{event.new_description.type}" }
+  when Mongo::Monitoring::SDAM::ServerClosedEvent
+    Log.info { "SERVER.#{event.address} REMOVED FROM TOPOLOGY" }
   end
 }
 
 # Make some queries…
 client["database_name"]["collection_name"].find({ hello: "world" })
 
-# …and eventually at some point, unsubscribe the logger.
-client.unsubscribe_commands(subscription)
+# …and eventually at some point, unsubscribe the loggers.
+client.unsubscribe_commands(cmd_subscription)
+client.unsubscribe_sdam(sdam_subscription)
 ```
 
 **Links**
@@ -575,10 +590,10 @@ client.write_concern = Mongo::WriteConcern.new(w: "majority")
 # See: https://docs.mongodb.com/manual/core/read-isolation-consistency-recency/#examples
 
 current_date = Time.utc
-items = client["test"]["items"]
+items_collection = client["test"]["items"]
 
 # MongoDB enables causal consistency in client sessions by default.
-# This is the block syntax that creates, ends and pass the session to collection methods automatically.
+# This is the block syntax that creates, ends and passes the session to collection methods automatically.
 items_collection.with_session do |items|
   # Using a causally consistent session ensures that the update occurs before the insert.
   items.update_one(

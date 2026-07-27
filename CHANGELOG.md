@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.10.0 - 2026-07-27
+
+### Added
+* **sdam:** Added the complete SDAM Pub/Sub Event API (`TopologyOpeningEvent`, `TopologyDescriptionChangedEvent`, `ServerOpeningEvent`, `ServerClosedEvent`, `ServerDescriptionChangedEvent`, `TopologyClosedEvent`).
+* **sdam:** Added support for the `LoadBalanced` topology type and `LoadBalancer` server type.
+* **testing:** Created a dedicated `spec/sdam_runner_spec.cr` test runner and achieved 100% compliance on the MongoDB SDAM legacy test suite.
+
+### Changed
+* **performance:** Eliminated global class-level locks (`@@`) in favor of instance-level locks (`@`) in `Mongo::Client`, preventing cross-client contention in multi-cluster applications.
+* **performance:** Restructured `Mongo::Connection::Pool` checkout logic to drastically reduce the scope of critical locks, preventing thread starvation during network I/O and handshake authentication.
+* **testing:** Reorganized the spec tests with `spec/tests/unified/` and `spec/tests/legacy/` to isolate the Unified Test Format (UTF) from the legacy/transitional specs.
+
+### Fixed
+* **connection:** Fixed a parsing bug where IPv6 addresses with brackets (`[::1]`) would crash `TCPSocket` or fail OpenSSL certificate hostname validation. The driver now safely preserves brackets for SDAM string-matching but strips them at the socket level.
+* **sdam:** Fixed a bug where `logical_session_timeout_minutes` was not properly cleared when a cluster lost its last data-bearing node.
+* **sdam:** Implemented MongoDB 6.0+ staleness tuple comparison, ensuring `electionId` takes precedence over `setVersion` on wire versions >= 17.
+* **sdam:** Fixed an issue where `ServerClosedEvent` was not emitted when a server was evicted from a primary's host list.
+* **sdam:** Enforced strict fallback to `Unknown` server types whenever a server responds with `ok: 0.0`, even if structural flags like `isWritablePrimary` are mocked in the payload.
+* **uri:** Corrected URI path decoding to use strict percent-decoding instead of `x-www-form-urlencoded` decoding, ensuring database names with literal `+` characters are not mangled into spaces.
+
 ## 0.9.0 - 2026-07-25
 
 ### Added
