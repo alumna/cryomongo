@@ -85,14 +85,17 @@ module Mongo::URI
 
     # Validate by parsing every host
     seeds = seeds.map { |seed|
-      uri = ::URI.parse("#{scheme}://#{seed}/#{rest}")
-      port = uri.port.try &.to_i32 || 27017
+      uri_parsed = ::URI.parse("#{scheme}://#{seed}/#{rest}")
+      port = uri_parsed.port.try &.to_i32 || 27017
 
       raise Mongo::Error.new "Invalid port" if port < 1 || port > 65535
 
       Seed.new(
-        host: uri.hostname.try &.downcase || "localhost",
-        port: uri.port.try &.to_i32 || 27017
+        # We explicitly use `.host` instead of `.hostname` so that IPv6 brackets
+        # (e.g., "[::1]") are preserved. This guarantees SDAM topology string matching
+        # works correctly when the server responds with its configuration.
+        host: uri_parsed.host.try &.downcase || "localhost",
+        port: port
       )
     }
 

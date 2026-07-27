@@ -13,9 +13,21 @@ struct Mongo::Connection
     if @server_description.address.ends_with? ".sock"
       socket = UNIXSocket.new(@server_description.address)
     else
-      split = @server_description.address.split(':')
-      host = split[0]
-      socket = TCPSocket.new(split[0], split[1]? || 27017, dns_timeout: @options.connect_timeout, connect_timeout: @options.connect_timeout)
+      # Safely extract host and port, supporting IPv6 bracket notation
+      address = @server_description.address
+      colon = address.rindex(':')
+      if colon && !address.ends_with?(']')
+        host = address.byte_slice(0, colon)
+        port = address.byte_slice(colon + 1).to_i? || 27017
+      else
+        host = address
+        port = 27017
+      end
+
+      # TCPSocket.new and OpenSSL expect IPv6 addresses WITHOUT the brackets
+      clean_host = host.starts_with?('[') && host.ends_with?(']') ? host.byte_slice(1, host.bytesize - 2) : host
+
+      socket = TCPSocket.new(clean_host, port, dns_timeout: @options.connect_timeout, connect_timeout: @options.connect_timeout)
       socket.tcp_nodelay = true
     end
 
@@ -47,7 +59,9 @@ struct Mongo::Connection
         NO_COMPRESSION,
         NO_SESSION_RESUMPTION_ON_RENEGOTIATION
       ))
-      socket = OpenSSL::SSL::Socket::Client.new(socket, context, sync_close: true, hostname: host)
+      # Ensure clean_host is passed so OpenSSL uses x509_verify_param_set1_ip_asc
+      # instead of treating the bracketed IP as a DNS hostname.
+      socket = OpenSSL::SSL::Socket::Client.new(socket, context, sync_close: true, hostname: clean_host)
     end
 
     @socket = socket

@@ -671,46 +671,6 @@ end
 - [Mongo::Session#abort_transaction](https://elbywan.github.io/cryomongo/Mongo/Session/ClientSession.html#abort_transaction(*,write_concern:WriteConcern?=nil)-instance-method)
 - [Mongo::Session::TransactionOptions](https://elbywan.github.io/cryomongo/Mongo/Session/TransactionOptions.html)
 
-## Specifications
-
-The goal is to to be compliant with most of the [official MongoDB set of specifications](https://github.com/mongodb/specifications).
-
-**✅ Implemented**
-
- The following specifications are implemented:
-
-- https://github.com/mongodb/specifications/tree/master/source/message
-- https://github.com/mongodb/specifications/tree/master/source/crud
-- https://github.com/mongodb/specifications/blob/master/source/find_getmore_killcursors_commands.rst
-- https://github.com/mongodb/specifications/blob/master/source/driver-bulk-update.rst
-- https://github.com/mongodb/specifications/blob/master/source/read-write-concern/read-write-concern.rst
-- https://github.com/mongodb/specifications/blob/master/source/enumerate-collections.rst
-- https://github.com/mongodb/specifications/blob/master/source/enumerate-databases.rst
-- https://github.com/mongodb/specifications/blob/master/source/enumerate-indexes.rst
-- https://github.com/mongodb/specifications/tree/master/source/connection-string
-- https://github.com/mongodb/specifications/tree/master/source/uri-options (except validation)
-- https://github.com/mongodb/specifications/tree/master/source/server-discovery-and-monitoring
-- https://github.com/mongodb/specifications/blob/master/source/server-selection/server-selection.rst
-- https://github.com/mongodb/specifications/blob/master/source/max-staleness/max-staleness.rst
-- https://github.com/mongodb/specifications/tree/master/source/connection-monitoring-and-pooling (loosely - using the crystal-db pool)
-- https://github.com/mongodb/specifications/blob/master/source/auth/auth.rst (SHA1 / SHA256 only - without SASLprep)
-- https://github.com/mongodb/specifications/blob/master/source/index-management.rst (no IndexView fluid syntax)
-- https://github.com/mongodb/specifications/tree/master/source/gridfs
-- https://github.com/mongodb/specifications/tree/master/source/change-streams
-- https://github.com/mongodb/specifications/blob/master/source/sessions/driver-sessions.rst
-- https://github.com/mongodb/specifications/tree/master/source/command-monitoring
-- https://github.com/mongodb/specifications/blob/master/source/retryable-writes/retryable-writes.rst
-- https://github.com/mongodb/specifications/blob/master/source/retryable-reads/retryable-reads.rst
-- https://github.com/mongodb/specifications/tree/master/source/causal-consistency
-- https://github.com/mongodb/specifications/blob/master/source/initial-dns-seedlist-discovery
-- https://github.com/mongodb/specifications/tree/master/source/transactions
-
-**⏳Next**
-
-The following specifications are to be implemented next:
-
-- https://github.com/mongodb/specifications/blob/master/source/polling-srv-records-for-mongos-discovery
-- https://github.com/mongodb/specifications/tree/master/source/compression
 
 ## Contributing
 
