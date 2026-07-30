@@ -18,6 +18,11 @@ describe "Unified Test Runner" do
   # Gather all JSON files
   files = Dir.glob("spec/tests/unified/**/*.json").sort
 
+  # Shuffle the files deterministically using a fixed seed.
+  # This evenly distributes slow and fast tests across all shards,
+  # because otherwise the first chunk takes a lot more time.
+  files.shuffle!(Random.new(42))
+
   # Use a custom ENV var to bypass Crystal's native SPEC_SPLIT magic.
   # This guarantees predictable, file-based sharding.
   if split = ENV["CI_SHARD"]?

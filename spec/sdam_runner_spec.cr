@@ -3,6 +3,9 @@ require "./spec_helper"
 describe "SDAM Legacy Tests" do
   files = Dir.glob("spec/tests/legacy/server-discovery-and-monitoring/**/*.json").sort
 
+  # Shuffle deterministically here too, as in spec/unified_runner_spec.cr
+  files.shuffle!(Random.new(42))
+
   # Use the custom ENV var to shard these tests across CI runners
   if split = ENV["CI_SHARD"]?
     part, total = split.split('/').map(&.to_i)
