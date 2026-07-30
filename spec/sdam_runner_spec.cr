@@ -1,7 +1,14 @@
 require "./spec_helper"
+require "./sharding"
 
 describe "SDAM Legacy Tests" do
-  Dir.glob("spec/tests/legacy/server-discovery-and-monitoring/**/*.json").sort.each do |file|
+  # Gather all JSON files and sort them deterministically
+  files = Dir.glob("spec/tests/legacy/server-discovery-and-monitoring/**/*.json").sort
+
+  # Dynamically filter the files using our cost-aware bin-packing algorithm
+  files = Mongo::SpecSharding.filter(files)
+
+  files.each do |file|
     it "executes: #{file}" do
       json_data = File.read(file)
       test = JSON.parse(json_data)
