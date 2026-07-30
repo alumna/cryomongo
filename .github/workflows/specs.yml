@@ -8,20 +8,19 @@ on:
 
 jobs:
   tests:
-    # strategy:
-    #   fail-fast: false
-    #   matrix:
-    #     mongodb_version: ['8.0']
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [0, 1, 2, 3] # This creates 4 concurrent jobs
     runs-on: ubuntu-24.04
-    name: Mongodb tests
+    name: Mongodb tests (Shard ${{ matrix.part }})
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
       - name: Start MongoDB ReplicaSet (8.0)
         run: |
-          # Start a Replica Set for the Unified Test Runner
-          # Using tmpfs to speed up I/O
+          # Start a persistent Replica Set for the Unified Test Runner (Using tmpfs for I/O speed)
           docker run --name mongo -d -p 27017:27017 --tmpfs /data/db mongo:8.0 --replSet rs0 --setParameter enableTestCommands=1
           sleep 5
           docker exec mongo mongosh --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]})'
@@ -36,4 +35,5 @@ jobs:
         run: shards install
 
       - name: Run Specs
-        run: crystal spec
+        # Pass the matrix part into our custom sharding logic!
+        run: SPEC_SPLIT="${{ matrix.part }}%4" crystal spec
