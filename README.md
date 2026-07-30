@@ -31,7 +31,9 @@ The update roadmap is actively being worked on. Below is the current progress ag
 - [x] **Transactions** (`transactions.md` & `transactions-convenient-api.md`): 100% compliant.
 - [x] **Sessions & Causal Consistency** (`causal-consistency.md`): 100% compliant.
 - [x] **Server Discovery and Monitoring (SDAM)**: 100% compliant (both Unified and Legacy).
-- [ ] **Authentication** (`auth.md`): Pending SCRAM-SHA-256 validation. Up next.
+- [x] **Versioned API** (`versioned-api.md`): 100% compliant.
+- [x] **Authentication - Basic** (`auth.md`): Basic authentication is ready (SCRAM, X509, and PLAIN).
+- [ ] **Authentication - Advanced** (`auth.md`): AWS and OIDC are pending. Up next.
 
 #### Cryomongo is a high-performance MongoDB driver written in pure Crystal. (i.e. no C dependencies needed.)
 

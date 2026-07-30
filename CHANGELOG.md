@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.0 - 2026-07-30
+
+### Added
+* **versioned-api:** Added the Versioned API feature. You can now configure the `ServerApi` version, strict mode, and deprecation errors on the client.
+* **auth:** Added the `MONGODB-X509` authentication mechanism.
+* **auth:** Added the `PLAIN` (LDAP) authentication mechanism.
+* **testing:** Added the legacy authentication test runner. It uses the `Mongo::SpecSharding` tool to run tests in parallel.
+* **testing:** Added the Versioned API unified test runner.
+
+### Changed
+* **uri:** The URI parser now uses the last value if an option occurs multiple times in the connection string. This matches the MongoDB specification.
+* **uri:** The driver now keeps the correct uppercase and lowercase letters for Unix socket paths.
+
+### Fixed
+* **uri:** The URI parser now splits strings safely to prevent out-of-bounds errors.
+* **uri:** The URI parser now safely isolates changes to `query_params` during the parsing step.
+
 ## 0.11.0 - 2026-07-30
 
 ### Added
