@@ -119,13 +119,12 @@ module Mongo::URI
     end
 
     mech_props_str = options.auth_mechanism_properties
+    mech_props = parse_mechanism_properties(mech_props_str)
 
-    # Inject the default SERVICE_NAME for GSSAPI without restructuring the entire string
-    if mech == "GSSAPI"
-      mech_props = parse_mechanism_properties(mech_props_str)
-      unless mech_props.has_key?("SERVICE_NAME")
-        mech_props_str = mech_props_str ? "#{mech_props_str},SERVICE_NAME:mongodb" : "SERVICE_NAME:mongodb"
-      end
+    # Inject the default SERVICE_NAME for GSSAPI without restructuring the entire string if it wasn't mutated
+    if mech == "GSSAPI" && !mech_props.has_key?("SERVICE_NAME")
+      mech_props["SERVICE_NAME"] = "mongodb"
+      mech_props_str = mech_props_str ? "#{mech_props_str},SERVICE_NAME:mongodb" : "SERVICE_NAME:mongodb"
     end
 
     username = parsed_uri.user
@@ -139,7 +138,7 @@ module Mongo::URI
       mechanism_properties: mech_props_str
     )
 
-    validate_credentials(credentials)
+    validate_credentials(credentials, mech_props)
 
     raise Mongo::Error.new("directConnection=true cannot be provided with multiple seeds") if options.direct_connection && seeds.size > 1
 
@@ -161,16 +160,20 @@ module Mongo::URI
     end
   end
 
-  private def validate_credentials(cred : Mongo::Credentials)
+  private def validate_credentials(cred : Mongo::Credentials, props : Hash(String, String))
     mech = cred.mechanism
     return unless mech
-
-    props = parse_mechanism_properties(cred.mechanism_properties)
 
     case mech.upcase
     when "GSSAPI"
       raise Mongo::Error.new("GSSAPI requires a username") if cred.username.nil? || cred.username.try(&.empty?)
       raise Mongo::Error.new("GSSAPI requires authSource to be $external") if cred.source && cred.source != "$external"
+      if canon = props["CANONICALIZE_HOST_NAME"]?
+        # BUGFIX: Ensure canon is upcased before validating
+        unless ["TRUE", "FALSE", "NONE", "FORWARD", "FORWARDANDREVERSE"].includes?(canon.upcase)
+          raise Mongo::Error.new("Invalid CANONICALIZE_HOST_NAME: #{canon}")
+        end
+      end
     when "MONGODB-X509"
       raise Mongo::Error.new("MONGODB-X509 does not support passwords") if cred.password
       raise Mongo::Error.new("MONGODB-X509 requires authSource to be $external") if cred.source && cred.source != "$external"
@@ -179,14 +182,12 @@ module Mongo::URI
     when "SCRAM-SHA-1", "SCRAM-SHA-256"
       raise Mongo::Error.new("#{mech} requires a username") if cred.username.nil? || cred.username.try(&.empty?)
     when "MONGODB-AWS"
-      if cred.username && cred.password.nil?
-        raise Mongo::Error.new("MONGODB-AWS requires password if username is provided")
+      # 2025-09-30 Spec Update: AWS credentials & properties must not be provided in the URI.
+      if cred.username || cred.password
+        raise Mongo::Error.new("MONGODB-AWS credentials cannot be provided in the URI")
       end
-      if cred.username.nil? && cred.password
-        raise Mongo::Error.new("MONGODB-AWS cannot have password without username")
-      end
-      if cred.username.nil? && props.has_key?("AWS_SESSION_TOKEN")
-        raise Mongo::Error.new("MONGODB-AWS cannot have AWS_SESSION_TOKEN without username")
+      if !props.empty?
+        raise Mongo::Error.new("MONGODB-AWS authentication properties cannot be provided in the URI")
       end
     when "MONGODB-OIDC"
       raise Mongo::Error.new("MONGODB-OIDC does not support passwords") if cred.password
