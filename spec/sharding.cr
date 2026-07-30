@@ -7,17 +7,17 @@ module Mongo::SpecSharding
     if split = ENV["CI_SHARD"]?
       part, total = split.split('/').map(&.to_i)
 
-      # 1. Sort files by size, descending (Longest Processing Time first heuristic)
-      files.sort_by! { |file| -File.size(file) }
+      # 1. Compute size once per file, then sort by it descending (LPT heuristic).
+      # This avoids mutating the original `files` array and halves `stat` syscalls.
+      sized_files = files.map { |file| {file, File.size(file).to_i64} }
+      sized_files.sort_by! { |_, size| -size }
 
       # 2. Track the accumulated "cost" (bytes) and assigned files for each shard
       shard_costs = Array(Int64).new(total, 0_i64)
       shard_files = Array(Array(String)).new(total) { [] of String }
 
       # 3. Greedy bin-packing: assign each file to the currently "lightest" shard
-      files.each do |file|
-        cost = File.size(file).to_i64
-
+      sized_files.each do |file, cost|
         min_shard = 0
         min_cost = shard_costs[0]
 
