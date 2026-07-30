@@ -1,21 +1,12 @@
 require "./spec_helper"
+require "./sharding"
 
 describe "SDAM Legacy Tests" do
+  # Gather all JSON files and sort them deterministically
   files = Dir.glob("spec/tests/legacy/server-discovery-and-monitoring/**/*.json").sort
 
-  # Shuffle deterministically here too, as in spec/unified_runner_spec.cr
-  files.shuffle!(Random.new(42))
-
-  # Use the custom ENV var to shard these tests across CI runners
-  if split = ENV["CI_SHARD"]?
-    part, total = split.split('/').map(&.to_i)
-
-    filtered_files = [] of String
-    files.each_with_index do |file, index|
-      filtered_files << file if index % total == part
-    end
-    files = filtered_files
-  end
+  # Dynamically filter the files using our cost-aware bin-packing algorithm
+  files = Mongo::SpecSharding.filter(files)
 
   files.each do |file|
     it "executes: #{file}" do

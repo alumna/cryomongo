@@ -1,5 +1,6 @@
 require "./spec_helper"
 require "./unified/runner"
+require "./sharding"
 
 describe "Unified Test Runner" do
   it "bootstraps the environment successfully" do
@@ -15,25 +16,11 @@ describe "Unified Test Runner" do
     client.close
   end
 
-  # Gather all JSON files
+  # Gather all JSON files and sort them deterministically
   files = Dir.glob("spec/tests/unified/**/*.json").sort
 
-  # Shuffle the files deterministically using a fixed seed.
-  # This evenly distributes slow and fast tests across all shards,
-  # because otherwise the first chunk takes a lot more time.
-  files.shuffle!(Random.new(42))
-
-  # Use a custom ENV var to bypass Crystal's native SPEC_SPLIT magic.
-  # This guarantees predictable, file-based sharding.
-  if split = ENV["CI_SHARD"]?
-    part, total = split.split('/').map(&.to_i)
-
-    filtered_files = [] of String
-    files.each_with_index do |file, index|
-      filtered_files << file if index % total == part
-    end
-    files = filtered_files
-  end
+  # Dynamically filter the files using our cost-aware bin-packing algorithm
+  files = Mongo::SpecSharding.filter(files)
 
   # Recursively generate a test for every JSON file in our current shard
   files.each do |file|
