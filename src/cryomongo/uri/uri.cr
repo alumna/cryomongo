@@ -118,6 +118,16 @@ module Mongo::URI
       default_source ||= "admin"
     end
 
+    mech_props_str = options.auth_mechanism_properties
+
+    # Inject the default SERVICE_NAME for GSSAPI without restructuring the entire string
+    if mech == "GSSAPI"
+      mech_props = parse_mechanism_properties(mech_props_str)
+      unless mech_props.has_key?("SERVICE_NAME")
+        mech_props_str = mech_props_str ? "#{mech_props_str},SERVICE_NAME:mongodb" : "SERVICE_NAME:mongodb"
+      end
+    end
+
     username = parsed_uri.user
     password = parsed_uri.password
 
@@ -126,7 +136,7 @@ module Mongo::URI
       password: password ? ::URI.decode(password) : nil,
       source: options.auth_source || default_source || "",
       mechanism: options.auth_mechanism,
-      mechanism_properties: options.auth_mechanism_properties
+      mechanism_properties: mech_props_str
     )
 
     validate_credentials(credentials)
@@ -135,20 +145,27 @@ module Mongo::URI
 
     {seeds, options, credentials, default_auth_db}
   rescue e : ::URI::Error | ArgumentError | IndexError | Socket::Error
-    # Catching expected parsing/network exceptions and wrapping them, instead of swallowing NilAssertionErrors.
+    # Catching expected parsing/network exceptions and wrapping them
     raise Mongo::Error.new("Invalid uri: #{uri}, #{e.message}", cause: e)
+  end
+
+  private def parse_mechanism_properties(props_str : String?) : Hash(String, String)
+    return {} of String => String unless props_str
+
+    props_str.split(',').reject(&.empty?).to_h do |pair|
+      parts = pair.split(':', 2)
+      if parts.size != 2
+        raise Mongo::Error.new("Malformed authMechanismProperties: expected 'key:value', got '#{pair}'")
+      end
+      {parts[0].upcase, parts[1]}
+    end
   end
 
   private def validate_credentials(cred : Mongo::Credentials)
     mech = cred.mechanism
     return unless mech
 
-    props = cred.mechanism_properties.try { |p|
-      p.split(',').reject(&.empty?).to_h do |pair|
-        k, v = pair.split(':', 2)
-        {k.upcase, v}
-      end
-    } || {} of String => String
+    props = parse_mechanism_properties(cred.mechanism_properties)
 
     case mech.upcase
     when "GSSAPI"

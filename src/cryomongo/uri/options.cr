@@ -118,30 +118,29 @@ struct Mongo::Options
           option = raw.fetch_all({{option_name}}).last?
 
           unless option.nil? || option.empty?
-            # We overwrite unless the value hasn't changed.
-            # (Note: this cannot differentiate between a default and a user explicitly providing the default,
-            # but it is perfectly adequate for driver initialization).
             unless @{{ivar.name.id}} != {{default_value}}
               begin
-                {% if types.includes? Bool %}
+                {% if types.includes?(Bool) %}
                   if option == "true"
                     @{{ivar.name.id}} = true
                   elsif option == "false"
                     @{{ivar.name.id}} = false
                   end
-                {% elsif types.includes? Int32 %}
+                {% elsif types.includes?(Int32) && types.includes?(String) %}
+                  # Fix: Gracefully handles 'w' which can be either Int32 (e.g. 1) or String (e.g. "majority")
+                  @{{ivar.name.id}} = option.to_i32? || option
+                {% elsif types.includes?(Int32) %}
                   @{{ivar.name.id}} = option.to_i32
-                {% elsif types.includes? Int64 %}
+                {% elsif types.includes?(Int64) %}
                   @{{ivar.name.id}} = option.to_i64
-                {% elsif types.includes? Time::Span %}
+                {% elsif types.includes?(Time::Span) %}
                   @{{ivar.name.id}} = option.to_i32.milliseconds
-                {% elsif types.includes? String %}
+                {% elsif types.includes?(String) %}
                   @{{ivar.name.id}} = option
-                {% elsif types.includes? Array %}
+                {% elsif types.includes?(Array) %}
                   @{{ivar.name.id}} = raw.fetch_all({{option_name}})
                 {% end %}
               rescue e : ArgumentError | TypeCastError
-                # Raise immediately so users know their URI contains malformed integers/values
                 raise Mongo::Error.new("Option '#{{{option_name}}}' has invalid value: '#{option}'", cause: e)
               end
             end
