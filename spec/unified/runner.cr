@@ -12,6 +12,8 @@ module Mongo::Unified
     @internal_client : Mongo::Client
     @skip_test : Bool = false
 
+    property fail_point_active : Bool = false
+
     def initialize(file_path : String)
       json_data = File.read(file_path)
       @test_file = TestFile.from_json(json_data)
@@ -23,6 +25,8 @@ module Mongo::Unified
     end
 
     private def disable_fail_points
+      return unless @fail_point_active == true
+
       ["failCommand", "onPrimaryTransactionalWrite"].each do |fp|
         begin
           @internal_client["admin"].command(
@@ -33,6 +37,8 @@ module Mongo::Unified
         rescue
         end
       end
+
+      @fail_point_active = false
     end
 
     private def parse_transaction_options(opts : JSON::Any?) : Mongo::Session::TransactionOptions?

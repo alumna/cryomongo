@@ -18,7 +18,9 @@ module Mongo::Unified::Dispatcher
 
     begin
       case op.name
-      when "failPoint"                                then execute_fail_point(args, registry)
+      when "failPoint"
+        runner.fail_point_active = true
+        execute_fail_point(args, registry)
       when "createEntities"                           then execute_create_entities(args, runner)
       when "assertSessionPinned"                      then execute_assert_session_pinned(args, registry)
       when "assertSessionUnpinned"                    then execute_assert_session_unpinned(args, registry)
