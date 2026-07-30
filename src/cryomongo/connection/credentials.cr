@@ -2,6 +2,6 @@
 record Mongo::Credentials,
   username : String? = nil,
   password : String? = nil,
-  source : String? = "admin",
+  source : String = "",
   mechanism : String? = nil,
   mechanism_properties : String? = nil

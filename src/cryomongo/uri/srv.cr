@@ -6,23 +6,26 @@ class Mongo::SRV
   end
 
   def resolve
-    hostname, domainname = @url.split(".", 2)
-    if !domainname.includes?('.')
-      raise Mongo::Error.new("Top Level Domain is missing: #{domainname}")
-    end
+    parts = @url.split(".", 2)
+    raise Mongo::Error.new("Top Level Domain is missing: #{@url}") if parts.size < 2
+    hostname, domainname = parts
 
     srv_records = [] of DNS::Resource::SRV
     txt_record : DNS::Resource::TXT? = nil
 
-    DNS.query "_mongodb._tcp.#{hostname}.#{domainname}", [DNS::RecordType::SRV] do |answer|
+    # DNS shard executes sequentially by default when a block is provided.
+    DNS.query("_mongodb._tcp.#{hostname}.#{domainname}", [DNS::RecordType::SRV]) do |answer|
       srv_record = answer.resource.as(DNS::Resource::SRV)
-      if srv_record.target.split(".", 2)[1] != domainname
+
+      # Safe extraction and case-insensitive comparison, ignoring trailing FQDN dots.
+      target_parts = srv_record.target.downcase.rstrip('.').split(".", 2)
+      if target_parts.size < 2 || target_parts[1] != domainname.downcase.rstrip('.')
         raise Mongo::Error.new("SRV record has an invalid domain name: #{srv_record.target}")
       end
       srv_records << srv_record
     end
 
-    DNS.query "#{hostname}.#{domainname}", [DNS::RecordType::TXT] do |answer|
+    DNS.query("#{hostname}.#{domainname}", [DNS::RecordType::TXT]) do |answer|
       txt_record = answer.resource.as(DNS::Resource::TXT)
 
       number_of_txt_records = txt_record.text_data.size

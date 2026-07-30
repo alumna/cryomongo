@@ -1,4 +1,5 @@
 require "http"
+require "uri"
 
 # A set of options used to configure the driver.
 #
@@ -76,10 +77,13 @@ struct Mongo::Options
   getter w : (Int32 | String)? = nil
   # The maximum amount of time a fiber can wait for a connection to become available
   getter wait_queue_timeout : Time::Span? = nil
-  # Default write concern "wtimeout" field for the client
+  # Default write concern "w_timeout" field for the client
   getter w_timeout : Time::Span? = nil
   # Specifies the level of compression when using zlib to compress wire protocol messages; -1 signifies the default level, 0 signifies no compression, 1 signifies the fastest speed, and 9 signifies the best compression
   getter zlib_compression_level : Int32? = nil
+
+  # The requested Server API version and strictness options.
+  property server_api : ServerApi? = nil
 
   # Use custom dns resolver.
   # Non-standard.
@@ -87,58 +91,61 @@ struct Mongo::Options
   # By default, the Cloudflare public DNS is used. (`1.1.1.1`)
   getter dns_resolver : DNS::Resolver? = nil
 
-  getter! raw : HTTP::Params
+  getter! raw : ::URI::Params
 
-  def mix_with_query_params(options_hash : HTTP::Params)
-    @raw = HTTP::Params.parse HTTP::Params.build { |form|
-      options_hash.each { |key, value|
-        form.add key.downcase, value
-      }
-    }
+  def mix_with_query_params(options_hash : ::URI::Params)
+    params = ::URI::Params.new
+    options_hash.each do |key, value|
+      params.add(key.downcase, value)
+    end
+    @raw = params
 
     validate(raw)
 
     {% begin %}
       {% for ivar in @type.instance_vars %}
-        {% default_value = ivar.default_value %}
-        {% types = ivar.type.union_types %}
+        {% if ivar.name.stringify != "raw" && ivar.name.stringify != "dns_resolver" && ivar.name.stringify != "server_api" %}
+          {% default_value = ivar.default_value %}
+          {% types = ivar.type.union_types %}
 
-        {% if types.includes? Time::Span %}
-          {% option_name = ivar.name.gsub(/_/, "").stringify + "ms" %}
-        {% else %}
-          {% option_name = ivar.name.gsub(/_/, "").stringify %}
-        {% end %}
-        option = raw[{{option_name}}]?
+          {% if types.includes? Time::Span %}
+            {% option_name = ivar.name.gsub(/_/, "").stringify + "ms" %}
+          {% else %}
+            {% option_name = ivar.name.gsub(/_/, "").stringify %}
+          {% end %}
 
-        unless option.nil? || option.empty?
-          unless @{{ivar.name.id}} != {{default_value}}
-            begin
-              {% if types.includes? Bool %}
-                if option == "true"
-                  @{{ivar.name.id}} = true
-                elsif option == "false"
-                  @{{ivar.name.id}} = false
-                end
-              {% elsif types.includes? Int32 %}
-                @{{ivar.name.id}} = option.to_i32
-              {% elsif types.includes? Int64 %}
-                @{{ivar.name.id}} = option.to_i64
-              {% elsif types.includes? Time::Span %}
-                @{{ivar.name.id}} = option.to_i32.milliseconds
-              {% elsif types.includes? String %}
-                @{{ivar.name.id}} = option
-              {% elsif types.includes? Array %}
-                @{{ivar.name.id}} = raw.fetch_all({{option_name}})
-              {% end %}
-            rescue e
-              {% if types.includes? String %}
-                @{{ivar.name.id}} = option
-              {% else %}
-                ::Mongo::Log.warn { %(option "#{{{option_name}}}" has invalid value: "#{option}".) }
-              {% end %}
+          # MongoDB spec requires that the last occurrence of an option takes precedence
+          option = raw.fetch_all({{option_name}}).last?
+
+          unless option.nil? || option.empty?
+            unless @{{ivar.name.id}} != {{default_value}}
+              begin
+                {% if types.includes?(Bool) %}
+                  if option == "true"
+                    @{{ivar.name.id}} = true
+                  elsif option == "false"
+                    @{{ivar.name.id}} = false
+                  end
+                {% elsif types.includes?(Int32) && types.includes?(String) %}
+                  # Fix: Gracefully handles 'w' which can be either Int32 (e.g. 1) or String (e.g. "majority")
+                  @{{ivar.name.id}} = option.to_i32? || option
+                {% elsif types.includes?(Int32) %}
+                  @{{ivar.name.id}} = option.to_i32
+                {% elsif types.includes?(Int64) %}
+                  @{{ivar.name.id}} = option.to_i64
+                {% elsif types.includes?(Time::Span) %}
+                  @{{ivar.name.id}} = option.to_i32.milliseconds
+                {% elsif types.includes?(String) %}
+                  @{{ivar.name.id}} = option
+                {% elsif types.includes?(Array) %}
+                  @{{ivar.name.id}} = raw.fetch_all({{option_name}})
+                {% end %}
+              rescue e : ArgumentError | TypeCastError
+                raise Mongo::Error.new("Option '#{{{option_name}}}' has invalid value: '#{option}'", cause: e)
+              end
             end
           end
-        end
+        {% end %}
       {% end %}
     {% end %}
   end

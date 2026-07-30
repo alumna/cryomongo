@@ -81,6 +81,17 @@ struct Mongo::Connection
       body["saslSupportedMechs"] = "#{source}.#{@credentials.username}"
     end
 
+    # Apply Server API parameters
+    if api = @options.server_api
+      body["apiVersion"] = api.version
+      unless api.strict.nil?
+        body["apiStrict"] = api.strict.as(Bool)
+      end
+      unless api.deprecation_errors.nil?
+        body["apiDeprecationErrors"] = api.deprecation_errors.as(Bool)
+      end
+    end
+
     request = Messages::OpMsg.new(body)
 
     response = uninitialized Mongo::Messages::OpMsg
@@ -91,7 +102,8 @@ struct Mongo::Connection
 
     if error = response.error?
       # Fallback to legacy isMaster if 'hello' command is not found (Mongo < 4.4)
-      if !legacy && error.is_a?(Mongo::Error::Command) && error.code == 59
+      # The Versioned API spec mandates NOT using legacy commands if an API is requested.
+      if !legacy && error.is_a?(Mongo::Error::Command) && error.code == 59 && @options.server_api.nil?
         return handshake(send_metadata: send_metadata, appname: appname, legacy: true)
       end
       raise error
@@ -140,6 +152,10 @@ struct Mongo::Connection
     when .scram_sha1?, .scram_sha256?
       scram = Mongo::Auth::Scram.new(mechanism, @credentials)
       scram.authenticate(self)
+    when .mongodb_x509?
+      Mongo::Auth::X509.authenticate(self, @credentials)
+    when .plain?
+      Mongo::Auth::Plain.authenticate(self, @credentials)
     else
       raise Mongo::Error.new "Authentication mechanism not supported: #{mechanism}"
     end

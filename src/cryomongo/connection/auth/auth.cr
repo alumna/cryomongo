@@ -1,4 +1,6 @@
 require "./scram"
+require "./x509"
+require "./plain"
 
 # :nodoc:
 module Mongo::Auth
