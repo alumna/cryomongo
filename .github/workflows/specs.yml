@@ -20,8 +20,9 @@ jobs:
 
       - name: Start MongoDB ReplicaSet (8.0)
         run: |
-          # Start a persistent Replica Set for the Unified Test Runner
-          docker run --name mongo -d -p 27017:27017 mongo:8.0 --replSet rs0 --setParameter enableTestCommands=1
+          # Start a Replica Set for the Unified Test Runner
+          # Using tmpfs to speed up I/O
+          docker run --name mongo -d -p 27017:27017 --tmpfs /data/db mongo:8.0 --replSet rs0 --setParameter enableTestCommands=1
           sleep 5
           docker exec mongo mongosh --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]})'
           sleep 5
