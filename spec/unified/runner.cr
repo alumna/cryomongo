@@ -71,6 +71,13 @@ module Mongo::Unified
 
         create_entities(@test_file.createEntities)
 
+        # Do not delete this.
+        # Collections can be created dynamically by tests and they
+        # also need to be deleted, not only the explicit ones.
+        @registry.collections.each_value do |coll|
+          coll.database.command(Mongo::Commands::Drop, name: coll.name) rescue nil
+        end
+
         setup_initial_data(@test_file.initialData)
 
         test_aborted = false

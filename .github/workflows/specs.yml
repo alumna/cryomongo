@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [0, 1, 2, 3] # This creates 4 concurrent jobs
+        part: [0, 1, 2, 3, 5] # This creates 4 concurrent jobs
     runs-on: ubuntu-24.04
     name: Mongodb tests (Shard ${{ matrix.part }})
     steps:
@@ -36,4 +36,4 @@ jobs:
 
       - name: Run Specs
         # Pass the matrix part into our custom sharding logic!
-        run: SPEC_SPLIT="${{ matrix.part }}%4" crystal spec
+        run: CI_SHARD="${{ matrix.part }}/5" crystal spec

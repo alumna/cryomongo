@@ -15,9 +15,23 @@ describe "Unified Test Runner" do
     client.close
   end
 
-  # Recursively generate a test for every JSON file — let `crystal spec`'s
-  # built-in SPEC_SPLIT handle sharding, don't filter manually here.
-  Dir.glob("spec/tests/unified/**/*.json").sort.each do |file|
+  # Gather all JSON files
+  files = Dir.glob("spec/tests/unified/**/*.json").sort
+
+  # Use a custom ENV var to bypass Crystal's native SPEC_SPLIT magic.
+  # This guarantees predictable, file-based sharding.
+  if split = ENV["CI_SHARD"]?
+    part, total = split.split('/').map(&.to_i)
+
+    filtered_files = [] of String
+    files.each_with_index do |file, index|
+      filtered_files << file if index % total == part
+    end
+    files = filtered_files
+  end
+
+  # Recursively generate a test for every JSON file in our current shard
+  files.each do |file|
     it "executes: #{file}" do
       runner = Mongo::Unified::Runner.new(file)
       runner.run
