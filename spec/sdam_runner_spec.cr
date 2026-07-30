@@ -1,7 +1,20 @@
 require "./spec_helper"
 
 describe "SDAM Legacy Tests" do
-  Dir.glob("spec/tests/legacy/server-discovery-and-monitoring/**/*.json").sort.each do |file|
+  files = Dir.glob("spec/tests/legacy/server-discovery-and-monitoring/**/*.json").sort
+
+  # Use the custom ENV var to shard these tests across CI runners
+  if split = ENV["CI_SHARD"]?
+    part, total = split.split('/').map(&.to_i)
+
+    filtered_files = [] of String
+    files.each_with_index do |file, index|
+      filtered_files << file if index % total == part
+    end
+    files = filtered_files
+  end
+
+  files.each do |file|
     it "executes: #{file}" do
       json_data = File.read(file)
       test = JSON.parse(json_data)
