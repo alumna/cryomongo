@@ -27,6 +27,7 @@ module Mongo::Unified
     property id : String?
     property uriOptions : JSON::Any?
     property observeEvents : Array(String)?
+    property serverApi : JSON::Any?
 
     property client : String?
     property databaseName : String?

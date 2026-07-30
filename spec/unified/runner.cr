@@ -186,7 +186,16 @@ module Mongo::Unified
               uri += query_parts.join("&")
             end
 
-            client = Mongo::Client.new(uri)
+            options = Mongo::Options.new
+            if server_api_json = req.serverApi
+              options.server_api = Mongo::ServerApi.new(
+                version: server_api_json["version"].as_s,
+                strict: server_api_json["strict"]?.try(&.as_bool),
+                deprecation_errors: server_api_json["deprecationErrors"]?.try(&.as_bool)
+              )
+            end
+
+            client = Mongo::Client.new(uri, options: options)
             @registry.clients[client_id] = client
             @registry.command_started_events[client_id] = [] of Mongo::Monitoring::Commands::CommandStartedEvent
 

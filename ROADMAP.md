@@ -30,7 +30,8 @@ This roadmap defines the implementation checklist against the official MongoDB d
 - [ ] cursors
 
 ## Features (Progressive Enhancements)
-- [ ] auth (SCRAM-SHA-1/256, mongodb-aws, mongodb-oidc, x509)
+- [x] auth (SCRAM-SHA-1/256, x509, plain implemented)
+- [ ] auth (mongodb-aws, mongodb-oidc pending)
 - [x] transactions (Core & Convenient API)
 - [x] causal-consistency & sessions
 - [ ] change-streams
@@ -38,7 +39,7 @@ This roadmap defines the implementation checklist against the official MongoDB d
 - [ ] gridfs
 - [ ] client-side-operations-timeout
 - [ ] client-side-encryption
-- [ ] versioned-api
+- [x] versioned-api
 
 ## Testing & Meta
 - [x] unified-test-format

@@ -242,6 +242,18 @@ class Mongo::Client
 
     body = (yield body) || body
 
+    # Apply Server API parameters (Versioned API)
+    if api = @options.server_api
+      api_options = {apiVersion: api.version}
+      unless api.strict.nil?
+        api_options = api_options.merge({apiStrict: api.strict.as(Bool)})
+      end
+      unless api.deprecation_errors.nil?
+        api_options = api_options.merge({apiDeprecationErrors: api.deprecation_errors.as(Bool)})
+      end
+      body = body.copy_with(api_options)
+    end
+
     # Create the OP_MSG message to send.
     op_msg = Messages::OpMsg.new(body, flag_bits: flag_bits)
     sequences.try &.each { |key, documents|
