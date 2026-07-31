@@ -22,18 +22,26 @@ On a technical level, the current update already includes:
 
 ### Roadmap & Checklist
 
-The update roadmap is actively being worked on. Below is the current progress against the official specifications:
+The driver is in **beta** state. The core foundation is built, and we are actively hardening it for a `v1.0.0` release. 
 
-- [x] **Unified Test Format** (`unified-test-format.md`): new runner for Unified Test Format (UTF) specifications.
-- [x] **CRUD Operations** (`crud.md`): 100% compliant.
-- [x] **Retryable Writes** (`retryable-writes.md`): 100% compliant.
-- [x] **Retryable Reads** (`retryable-reads.md`): 100% compliant.
-- [x] **Transactions** (`transactions.md` & `transactions-convenient-api.md`): 100% compliant.
-- [x] **Sessions & Causal Consistency** (`causal-consistency.md`): 100% compliant.
-- [x] **Server Discovery and Monitoring (SDAM)**: 100% compliant (both Unified and Legacy).
-- [x] **Versioned API** (`versioned-api.md`): 100% compliant.
-- [x] **Authentication - Basic** (`auth.md`): Basic authentication is ready (SCRAM, X509, and PLAIN).
-- [ ] **Authentication - Advanced** (`auth.md`): AWS and OIDC are pending. Up next.
+**✓ Phase 1: Core Foundation (Completed)**
+- **BSON 8.0:** Zero-allocation, native Decimal128, and Vector support.
+- **Unified Test Format (UTF):** Custom spec runner built and routing correctly.
+- **Core Specs 100% Compliant:** CRUD, Retryable Reads/Writes, Sessions, Causal Consistency, and Transactions.
+- **SDAM:** 100% compliant with legacy Server Discovery and Monitoring state-machine tests.
+- **Basic Auth:** SCRAM-SHA-1/256, X509, and PLAIN.
+
+**► Phase 2: Hardening & Crystal 1.21 Concurrency (In Progress)**
+- **Strict Compliance:** Wiring up remaining spec tests (Change Streams, GridFS) to the UTF runner and implementing manual "Prose Tests" (e.g., exponential backoff, SDAM RTT).
+- **Security & Stability:** Command log redaction (PII hiding) and deterministic cursor cleanup.
+- **Concurrency:** Optimizing the Connection Pool and locks for Crystal 1.21's new Parallel Execution Contexts.
+
+**○ Phase 3: Cloud & Enterprise Features (Planned)**
+- **Atlas Readiness:** SRV Polling and Load Balancer specifications.
+- **Advanced Auth:** `MONGODB-AWS` and `MONGODB-OIDC`.
+- **Encryption:** Client-Side Field Level Encryption (CSFLE / Queryable Encryption).
+
+*For a detailed breakdown of the specifications, see [ROADMAP.md](ROADMAP.md).*
 
 #### Cryomongo is a high-performance MongoDB driver written in pure Crystal. (i.e. no C dependencies needed.)
 
