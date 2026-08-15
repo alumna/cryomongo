@@ -224,7 +224,7 @@ class Mongo::Client
         raise Mongo::Error.new("Unacknowledged writes are incompatible with sessions.") unless session.implicit?
       end
 
-      body["lsid"] = session.session_id
+      body["lsid"] = session.session_id unless unacknowledged
 
       if topology.supports_cluster_time?
         cluster_time = gossip_cluster_time(session)
@@ -232,11 +232,34 @@ class Mongo::Client
       end
 
       if session.is_transaction? && server_description.supports_retryable_writes?
-        if session.transitions_from.try(&.starting?)
+        if session.transitions_from.try(&.starting?) || session.apply_transaction_read_concern?
           body["startTransaction"] = true
         end
         body["txnNumber"] = session.txn_number
         body["autocommit"] = false
+      end
+
+      unless command.is_a?(Commands::EndSessions) || command.is_a?(Commands::Hello)
+        if session.options.snapshot && !body["readConcern"]?
+          body["readConcern"] = ReadConcern.new(level: "snapshot", at_cluster_time: session.snapshot_time)
+        elsif session.is_transaction? && body["startTransaction"]? == true && !body["readConcern"]?
+          if concern = session.current_transaction_options.read_concern
+            body["readConcern"] = concern
+          end
+        end
+        if session.is_transaction? && body["startTransaction"]? == true
+          session.apply_transaction_read_concern = false
+        end
+      end
+
+      if !session.is_transaction? && session.options.causal_consistency
+        if (operation_time = session.operation_time) && !body["readConcern"]?
+          is_read = command.responds_to?(:read_command?) && command.read_command?(**args)
+          is_write = command.responds_to?(:write_command?) && command.write_command?(**args)
+          if is_read || is_write
+            body["readConcern"] = ReadConcern.new(after_cluster_time: operation_time)
+          end
+        end
       end
     end
 
@@ -285,14 +308,16 @@ class Mongo::Client
 
     # If the write is unacknowledged - early return.
     if unacknowledged
-      @commands_observable.broadcast(Monitoring::Commands::CommandSucceededEvent.new(
-        command_name: command_name,
-        request_id: request_id,
-        operation_id: operation_id,
-        address: address,
-        duration: duration_start.elapsed,
-        reply: BSON.new({ok: 1})
-      ))
+      if @commands_observable.has_subscribers?
+        @commands_observable.broadcast(Monitoring::Commands::CommandSucceededEvent.new(
+          command_name: command_name,
+          request_id: request_id,
+          operation_id: operation_id,
+          address: address,
+          duration: duration_start.elapsed,
+          reply: BSON.new({ok: 1})
+        ))
+      end
 
       return nil
     end
@@ -307,7 +332,7 @@ class Mongo::Client
         if error = op_msg.error?
           @commands_observable.broadcast(Monitoring::Commands::CommandFailedEvent.new(
             command_name: command_name,
-            request_id: message.header.request_id.to_i64,
+            request_id: message.header.response_to.to_i64,
             operation_id: operation_id,
             address: address,
             duration: duration,
@@ -317,7 +342,7 @@ class Mongo::Client
         else
           @commands_observable.broadcast(Monitoring::Commands::CommandSucceededEvent.new(
             command_name: command_name,
-            request_id: message.header.request_id.to_i64,
+            request_id: message.header.response_to.to_i64,
             operation_id: operation_id,
             address: address,
             duration: duration,
@@ -362,6 +387,7 @@ class Mongo::Client
 
     # Parse and return the body as a custom Result type.
     result = command.result(op_msg.body)
+    session.last_operation_server = server_description
     result
   rescue error
     if error.is_a?(NetworkError)
@@ -377,6 +403,10 @@ class Mongo::Client
       }
       session.try &.dirty = true
       error = Error::Network.new(error)
+      # Only retryable writes (retryWrites enabled) get RetryableWriteError on a network error.
+      if @options.retry_writes && command.is_a?(Commands::WriteCommand) && command.write_command?(**args) && command.responds_to?(:retryable?) && command.retryable?(**args, session: session)
+        error.add_error_label("RetryableWriteError")
+      end
     end
 
     if error.is_a?(Mongo::Error::Command)
@@ -411,14 +441,21 @@ class Mongo::Client
     raise error
   ensure
     release_connection(connection) if connection
-    if result.is_a? Cursor
-      # Bind the Cursor to the same server for its lifetime.
-      result.server_description = server_description
-      # Bind the session
-      result.session = session
-    else
-      # End the session if implicit
+    unless keeps_implicit_session?(result)
       session.try &.end if session.try(&.implicit?)
+    end
+  end
+
+  private def keeps_implicit_session?(result) : Bool
+    case result
+    when Commands::Common::QueryResult
+      result.cursor.id != 0
+    when Commands::GetMore::Result
+      result.cursor.id != 0
+    when Cursor
+      true
+    else
+      false
     end
   end
 end

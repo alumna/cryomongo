@@ -85,8 +85,8 @@ class Mongo::Collection
   #
   # NOTE: [for more details, please check the official documentation](https://docs.mongodb.com/manual/reference/command/listIndexes/).
   def list_indexes(session : Session::ClientSession? = nil) : Mongo::Cursor?
-    result = self.command(Commands::ListIndexes, session: session) { |result|
-      Cursor.new(@database.client, result, session: session)
+    result = self.command(Commands::ListIndexes, session: session, options: NamedTuple.new) { |result, cmd_session|
+      bind_cursor(Cursor.new(@database.client, result, session: cmd_session), cmd_session)
     }
     raise Mongo::Error.new("Command failed to return a result") unless result
     result

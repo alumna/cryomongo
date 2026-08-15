@@ -1,6 +1,7 @@
 require "./database"
 require "./error"
 require "pipe"
+require "wait_group"
 require "./gridfs/*"
 
 # GridFS is a specification for storing and retrieving files that exceed the BSON-document size limit of 16 MB.
@@ -60,39 +61,7 @@ module Mongo::GridFS
       check_indexes(bucket, chunks)
 
       reader, writer = Pipe.create(capacity: chunk_size)
-
-      spawn do
-        index = 0
-        length = 0_i64
-        buffer = Bytes.new(chunk_size)
-        loop do
-          read_bytes = fill_slice(reader, buffer.to_slice)
-          break if read_bytes == 0
-          data = buffer.to_slice[0, read_bytes]
-          chunks.insert_one({
-            files_id: id,
-            n:        index,
-            data:     data,
-          }, write_concern: write_concern)
-          length += read_bytes
-          index += 1_i64
-          break if read_bytes < chunk_size
-        rescue IO::EOFError
-          break
-        end
-
-        bucket.insert_one({
-          _id:        id,
-          length:     length,
-          chunkSize:  chunk_size,
-          uploadDate: Time.utc,
-          filename:   filename,
-          metadata:   metadata,
-        }, write_concern: write_concern)
-      ensure
-        reader.close
-      end
-
+      spawn { consume_upload(reader, id, filename, chunk_size, metadata) }
       writer
     end
 
@@ -105,7 +74,6 @@ module Mongo::GridFS
     # gridfs.open_upload_stream(filename: "file.txt", chunk_size_bytes: 1024, metadata: {hello: "world"}) { |io|
     #   io << "some text"
     # }
-    # sleep 1
     # ```
     def open_upload_stream(
       filename : String,
@@ -116,12 +84,59 @@ module Mongo::GridFS
       &block
     ) forall FileID
       id ||= BSON::ObjectId.new
-      stream = open_upload_stream(filename, id: id, chunk_size_bytes: chunk_size_bytes, metadata: metadata)
-      yield stream
-      stream.flush
-      Fiber.yield
-      stream.close
+      chunk_size : Int32 = chunk_size_bytes || @chunk_size_bytes
+
+      check_indexes(bucket, chunks)
+
+      reader, writer = Pipe.create(capacity: chunk_size)
+      wg = WaitGroup.new
+      wg.add(1)
+      spawn do
+        consume_upload(reader, id, filename, chunk_size, metadata)
+      ensure
+        wg.done
+      end
+
+      begin
+        yield writer
+        writer.flush
+      ensure
+        writer.close
+        wg.wait
+      end
       id
+    end
+
+    private def consume_upload(reader, id, filename, chunk_size, metadata)
+      index = 0
+      length = 0_i64
+      buffer = Bytes.new(chunk_size)
+      loop do
+        read_bytes = fill_slice(reader, buffer.to_slice)
+        break if read_bytes == 0
+        data = buffer.to_slice[0, read_bytes]
+        chunks.insert_one({
+          files_id: id,
+          n:        index,
+          data:     data,
+        }, write_concern: write_concern)
+        length += read_bytes
+        index += 1_i64
+        break if read_bytes < chunk_size
+      rescue IO::EOFError
+        break
+      end
+
+      bucket.insert_one({
+        _id:        id,
+        length:     length,
+        chunkSize:  chunk_size,
+        uploadDate: Time.utc,
+        filename:   filename,
+        metadata:   metadata,
+      }, write_concern: write_concern)
+    ensure
+      reader.close
     end
 
     # Uploads a user file to a GridFS bucket.
@@ -348,10 +363,10 @@ module Mongo::GridFS
         filter,
         allow_disk_use: allow_disk_use,
         batch_size: batch_size,
-        limit: batch_size,
-        max_time_ms: batch_size,
-        no_cursor_timeout: batch_size,
-        skip: batch_size,
+        limit: limit,
+        max_time_ms: max_time_ms,
+        no_cursor_timeout: no_cursor_timeout,
+        skip: skip,
         sort: sort,
         read_concern: read_concern,
         read_preference: read_preference
@@ -448,7 +463,10 @@ module Mongo::GridFS
       end
 
       def chunk_count(file : File(FileID)) : Int64 forall FileID
-        (file.length / file.chunk_size).ceil.to_i64
+        return 0_i64 if file.length == 0
+        count = file.length // file.chunk_size
+        count += 1 if file.length % file.chunk_size != 0
+        count
       end
 
       def get_chunk(id : FileID, n : Int64) forall FileID

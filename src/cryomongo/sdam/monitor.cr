@@ -1,4 +1,5 @@
 require "socket"
+require "wait_group"
 
 # :nodoc:
 module Mongo::SDAM
@@ -11,6 +12,7 @@ module Mongo::SDAM
     @connection : Mongo::Connection? = nil
     @closed : Bool = false
     @scan_started : Bool = false
+    @done = WaitGroup.new
 
     def initialize(
       @client : Mongo::Client,
@@ -42,31 +44,36 @@ module Mongo::SDAM
     def scan
       return if @scan_started
       @scan_started = true
-      loop do
-        break if @closed
-        # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#multi-threaded-or-asynchronous-monitoring
-        before_cooldown = Time.utc + @client.min_heartbeat_frequency
-        server_to_check = @topology.servers.find(&.address.== @server_description.address)
+      @done.add(1)
+      begin
+        loop do
+          break if @closed
+          # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#multi-threaded-or-asynchronous-monitoring
+          before_cooldown = Time.utc + @client.min_heartbeat_frequency
+          server_to_check = @topology.servers.find(&.address.== @server_description.address)
 
-        break if server_to_check.nil? || @closed
+          break if server_to_check.nil? || @closed
 
-        unless (new_description = check(server_to_check)).nil?
-          @topology.update(server_to_check, new_description)
+          unless (new_description = check(server_to_check)).nil?
+            @topology.update(server_to_check, new_description)
+          end
+
+          select
+          when resume_scan.receive
+            # Immediate scan requested
+            sleep(before_cooldown - Time.utc) if Time.utc < before_cooldown
+          when timeout @heartbeat_frequency
+          end
+        rescue e
+          Mongo::Log.error { "Monitoring error: #{e}" }
+          Mongo::Log.debug { e.backtrace.join("\n") }
+          # Monitoring error
         end
-
-        select
-        when resume_scan.receive
-          # Immediate scan requested
-          sleep(before_cooldown - Time.utc) if Time.utc < before_cooldown
-        when timeout @heartbeat_frequency
-        end
-      rescue e
-        Mongo::Log.error { "Monitoring error: #{e}" }
-        Mongo::Log.debug { e.backtrace.join("\n") }
-        # Monitoring error
+      ensure
+        close_connection(@server_description)
+        @client.stop_monitoring(@server_description)
+        @done.done
       end
-      close_connection(@server_description)
-      @client.stop_monitoring(@server_description)
     end
 
     def request_immediate_scan
@@ -102,7 +109,7 @@ module Mongo::SDAM
     def close
       @closed = true
       request_immediate_scan
-      Fiber.yield
+      @done.wait
     end
   end
 end

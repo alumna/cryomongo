@@ -65,7 +65,11 @@ module Mongo::Session
     getter options : Options
 
     protected getter? implicit : Bool = true
-    protected delegate :dirty, :dirty=, :txn_number, :session_id, to: @server_session
+    protected delegate :dirty, :dirty=, :txn_number, to: @server_session
+
+    def session_id
+      @server_session.session_id
+    end
 
     protected def initialize(@client : Mongo::Client, @implicit = true, **options : **U) forall U
       {% begin %}
@@ -130,9 +134,9 @@ module Mongo::Session
     end
 
     protected def increment_txn_number
-      # @lock.synchronize {
-      @server_session.txn_number += 1
-      # }
+      @lock.synchronize {
+        @server_session.txn_number += 1
+      }
     end
   end
 

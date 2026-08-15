@@ -113,8 +113,10 @@ module Mongo::ChangeStream
 
     def next : BSON | Iterator::Stop
       element = super
-      if element.is_a?(BSON) && @batch.empty?
-        @resume_token ||= element["_id"]?.try &.as(BSON)
+      if element.is_a?(BSON)
+        if token = element["_id"]?.try &.as?(BSON)
+          @resume_token = token
+        end
       end
       element
     rescue e : Mongo::Error::Command

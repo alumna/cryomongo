@@ -13,3 +13,8 @@ test*.sh
 
 /data
 /specifications*
+/local
+
+# Temporary
+FIXES.md
+scripts/

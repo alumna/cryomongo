@@ -79,55 +79,69 @@ class Mongo::Bulk
   end
 
   # Execute the bulk operations stored in this `Bulk` instance.
-  def execute(write_concern : WriteConcern? = nil, bypass_document_validation : Bool? = nil)
+  def execute(write_concern : WriteConcern? = nil, bypass_document_validation : Bool? = nil, comment = nil)
     _, not_executed = @executed.compare_and_set(0_u8, 1_u8)
     raise Mongo::Bulk::Error.new "Cannot execute a bulk operation more than once" unless not_executed
 
     options = {
-      write_concern: write_concern,
+      write_concern:              write_concern,
+      bypass_document_validation: bypass_document_validation,
+      comment:                    comment,
     }
 
-    if bypass_document_validation
-      options.merge({bypass_document_validation: bypass_document_validation})
-    end
-
-    models = @models
+    indexed_models = @models.map_with_index { |model, index| {index, model} }
     unless @ordered
-      # Reorder based on the operation type
-      models.sort!
+      # Reorder by wire-command family for fewer round-trips, but keep original indices.
+      indexed_models.sort_by! { |_, model| command_family(model) }
     end
-    # Group by operation type.
-    group_type = nil
+    # Group consecutive models that share a wire command (insert / update / delete).
+    group_family = nil
     group = [] of BSON
+    group_indices = [] of Int32
     group_bytesize = 0
-    index_offset = 0
     operation_id = 0_i64
     results = WriteResult.new
 
-    models.each { |model|
-      if model.class != group_type
-        index_offset = process_group(group_type, group, results, index_offset, options, operation_id)
+    indexed_models.each { |original_index, model|
+      family = command_family(model)
+      if family != group_family
+        process_group(group_family, group, group_indices, results, options, operation_id)
         return results if early_return?(results)
-        group_type = model.class
+        group_family = family
         group_bytesize = 0
       end
 
       bson = format_bson(model)
 
-      if group_bytesize + bson.size >= @max_bson_object_size || group.size >= @max_bson_object_size
-        index_offset = process_group(group_type, group, results, index_offset, options, operation_id)
+      if group_bytesize + bson.size >= @max_bson_object_size || group.size >= @max_write_batch_size
+        process_group(group_family, group, group_indices, results, options, operation_id)
         return results if early_return?(results)
         group_bytesize = 0
       end
 
       group << bson
+      group_indices << original_index
       group_bytesize += bson.size
       operation_id += 1_i64
     }
 
-    process_group(group_type, group, results, index_offset, options, operation_id)
+    process_group(group_family, group, group_indices, results, options, operation_id)
 
     results
+  end
+
+  # Same wire command can carry mixed models (updateOne + replaceOne, deleteOne + deleteMany).
+  private def command_family(model : WriteModel) : Symbol
+    case model
+    when InsertOne
+      :insert
+    when DeleteOne, DeleteMany
+      :delete
+    when ReplaceOne, UpdateOne, UpdateMany
+      :update
+    else
+      raise Mongo::Bulk::Error.new "Invalid Operation"
+    end
   end
 
   private def format_bson(model : WriteModel) : BSON
@@ -163,6 +177,7 @@ class Mongo::Bulk
         hint:      model.hint,
         collation: model.collation,
         upsert:    model.upsert,
+        sort:      model.sort,
       }) { |_, value|
         value.nil?
       }
@@ -176,6 +191,7 @@ class Mongo::Bulk
         collation:     model.collation,
         upsert:        model.upsert,
         array_filters: model.array_filters,
+        sort:          model.sort,
       }) { |_, value|
         value.nil?
       }
@@ -197,40 +213,34 @@ class Mongo::Bulk
     end.as(BSON)
   end
 
-  private def process_group(type, group : Array(BSON), results, index_offset, options, operation_id) : Int32
-    return 0 if group.size < 1
+  private def process_group(family, group : Array(BSON), group_indices : Array(Int32), results, options, operation_id)
+    return if group.size < 1
 
     options = options.merge({
       ordered: @ordered,
     })
 
     result = nil
-    if type == InsertOne
+    case family
+    when :insert
       result = @collection.command(Commands::Insert, documents: group, options: options, session: @session, operation_id: operation_id)
-    elsif type == DeleteOne
+    when :delete
       result = @collection.command(Commands::Delete, deletes: group, options: options, session: @session, operation_id: operation_id)
-    elsif type == DeleteMany
-      result = @collection.command(Commands::Delete, deletes: group, options: options, session: @session, operation_id: operation_id)
-    elsif type == ReplaceOne
-      result = @collection.command(Commands::Update, updates: group, options: options, session: @session, operation_id: operation_id)
-    elsif type == UpdateOne
-      result = @collection.command(Commands::Update, updates: group, options: options, session: @session, operation_id: operation_id)
-    elsif type == UpdateMany
+    when :update
       result = @collection.command(Commands::Update, updates: group, options: options, session: @session, operation_id: operation_id)
     else
       raise Mongo::Bulk::Error.new "Invalid Operation"
     end
 
     if result
-      merge_results(results, result, index_offset)
+      merge_results(results, result, group_indices)
     end
 
-    index_offset += group.size
     group.clear
-    index_offset
+    group_indices.clear
   end
 
-  private def merge_results(results, result, index_offset)
+  private def merge_results(results, result, group_indices : Array(Int32))
     case result
     when Commands::Common::InsertResult
       result.n.try { |n| results.n_inserted += n }
@@ -245,8 +255,9 @@ class Mongo::Bulk
       result.n_modified.try { |n| results.n_modified += n }
       if upserted = result.upserted
         upserted.each { |upsert|
+          original = group_indices[upsert.index]? || upsert.index
           results.upserted << Commands::Common::Upserted.new(
-            upsert.index + index_offset,
+            original,
             upsert._id
           )
         }
@@ -255,8 +266,9 @@ class Mongo::Bulk
 
     if write_errors = result.write_errors
       write_errors.each { |write_error|
+        original = group_indices[write_error.index]? || write_error.index
         results.write_errors << Commands::Common::WriteError.new(
-          write_error.index + index_offset,
+          original,
           write_error.code,
           write_error.errmsg
         )

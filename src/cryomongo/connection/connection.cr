@@ -122,7 +122,7 @@ struct Mongo::Connection
     # see: https://github.com/mongodb/specifications/blob/master/source/server-selection/server-selection.rst#calculation-of-average-round-trip-times
     if old_rtt
       alpha = 0.2
-      (0.2 * round_trip_time.milliseconds + (1 - alpha) * old_rtt.milliseconds).milliseconds
+      (0.2 * round_trip_time.total_milliseconds + (1 - alpha) * old_rtt.total_milliseconds).milliseconds
     else
       round_trip_time
     end

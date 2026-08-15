@@ -147,7 +147,7 @@ class Mongo::Client
       Log.warn { "Error while trying to close session pool. #{e}" }
     end
 
-    @monitors.each do |monitor|
+    @monitors.dup.each do |monitor|
       monitor.close
     rescue e
       Log.warn { "Error while trying to close monitor fiber. #{e}" }
@@ -330,7 +330,7 @@ class Mongo::Client
             initial_pool_size: @options.min_pool_size,
             max_pool_size: @options.max_pool_size,
             max_idle_pool_size: @options.max_pool_size,
-            checkout_timeout: @options.wait_queue_timeout.try(&.seconds.to_f64) || 5.0
+            checkout_timeout: @options.wait_queue_timeout.try(&.total_seconds) || 5.0
           ) do
             connection = Mongo::Connection.new(server_description, @credentials, @options, is_monitor: false)
             result, round_trip_time = connection.handshake(send_metadata: true, appname: @options.appname)

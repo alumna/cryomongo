@@ -100,26 +100,33 @@ module Mongo
     protected def self.mix_read_concern(command, args, read_concern : ReadConcern?, *, session : Session::ClientSession)
       options = args["options"]?
 
-      if options && session.options.snapshot
+      if session.options.snapshot
         # Snapshot session logic: all operations in a snapshot session must include readConcern: { level: "snapshot", atClusterTime: ... }
-        existing_concern = options["read_concern"]?.try { |c| c.as?(ReadConcern) } || read_concern
-        level = existing_concern.try(&.level) || "snapshot"
-        snapshot_concern = ReadConcern.new(
-          level: level,
-          at_cluster_time: session.snapshot_time
-        )
-        args.merge({
-          options: options.merge({
-            read_concern: snapshot_concern,
-          }),
-        })
-      elsif options && session.is_transaction?
-        if options["read_concern"]?
+        # Only mix when the command already has an options tuple so we do not change the **args NamedTuple shape.
+        if options
+          existing_concern = options["read_concern"]?.try { |c| c.as?(ReadConcern) } || read_concern
+          level = existing_concern.try(&.level) || "snapshot"
+          snapshot_concern = ReadConcern.new(
+            level: level,
+            at_cluster_time: session.snapshot_time
+          )
+          args.merge({
+            options: options.merge({
+              read_concern: snapshot_concern,
+            }),
+          })
+        else
+          args
+        end
+      elsif session.is_transaction?
+        if options && options["read_concern"]? && !session.apply_transaction_read_concern?
           raise Error::Transaction.new("Cannot set read concern after starting a transaction.")
         end
 
-        if session.transitions_from.try &.starting?
-          concern = options["read_concern"]? || session.current_transaction_options.read_concern
+        if session.apply_transaction_read_concern? || session.transitions_from.try(&.starting?) || session.transaction_state.starting?
+          existing = options.try { |opts| opts["read_concern"]?.try { |c| c.as?(ReadConcern) } }
+          # Transaction spec: only transaction options (not collection/client) supply read concern.
+          concern = existing || session.current_transaction_options.read_concern
           if session.options.causal_consistency
             # Drivers MUST add readConcern.afterClusterTime to the command that starts a transaction in a causally consistent session -- even if the command is a write.
             # https://github.com/mongodb/specifications/blob/master/source/transactions/transactions.rst#interaction-with-causal-consistency
@@ -129,17 +136,21 @@ module Mongo
             end
           end
 
-          args.merge({
-            options: options.merge({
-              read_concern: concern,
-            }),
-          })
+          if options
+            args.merge({
+              options: options.merge({
+                read_concern: concern,
+              }),
+            })
+          else
+            args
+          end
         else
           args
         end
       elsif options
-        is_read = command.is_a?(Commands::ReadCommand) && command.read_command?(**args)
-        is_write = command.is_a?(Commands::WriteCommand) && command.write_command?(**args)
+        is_read = command.responds_to?(:read_command?) && command.read_command?(**args)
+        is_write = command.responds_to?(:write_command?) && command.write_command?(**args)
 
         concern = options["read_concern"]?.try { |c| c.as?(ReadConcern) } || read_concern
         after_cluster_time = session.operation_time if session.options.causal_consistency

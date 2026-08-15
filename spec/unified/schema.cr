@@ -8,6 +8,7 @@ module Mongo::Unified
     property topologies : Array(String)?
     property auth : Bool?
     property serverless : String?
+    property serverParameters : JSON::Any?
   end
 
   struct CollectionData
@@ -27,6 +28,7 @@ module Mongo::Unified
     property id : String?
     property uriOptions : JSON::Any?
     property observeEvents : Array(String)?
+    property ignoreCommandMonitoringEvents : Array(String)?
     property serverApi : JSON::Any?
 
     property client : String?
@@ -51,6 +53,7 @@ module Mongo::Unified
     property expectError : ExpectedError?
     property expectResult : JSON::Any?
     property saveResultAsEntity : String?
+    property ignoreResultAndError : Bool?
   end
 
   struct ExpectedError

@@ -15,8 +15,18 @@ module Mongo::Commands::Insert
       insert: collection,
       "$db":  database,
     }, sequences: {
-      documents: documents.map { |elt| BSON.new(elt) },
+      documents: documents.map { |elt|
+        doc = BSON.new(elt)
+        doc["_id"] = BSON::ObjectId.new unless doc.has_key?("_id")
+        doc
+      },
     }, options: options)
+  end
+
+  def retryable?(**args)
+    # insertOne and insertMany are both retryable as a single insert command
+    # (same txnNumber). Client-generated _id makes the retry safe.
+    true unless prevent_retry(args)
   end
 
   # Transforms the server result.

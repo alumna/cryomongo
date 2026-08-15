@@ -36,11 +36,11 @@ module Mongo
       @case_level = nil,
       @case_first = nil,
       @strength = nil,
-      numeric_ordering = nil,
-      alternate = nil,
-      max_variable = nil,
-      backwards = nil,
-      normalization = nil
+      @numeric_ordering = nil,
+      @alternate = nil,
+      @max_variable = nil,
+      @backwards = nil,
+      @normalization = nil
     )
     end
   end

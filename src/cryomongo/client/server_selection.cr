@@ -73,6 +73,8 @@ class Mongo::Client
       end
     when .sharded?
       self.topology.servers.select &.type.mongos?
+    when .load_balanced?
+      self.topology.servers.select &.type.load_balancer?
     end
   end
 

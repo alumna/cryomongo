@@ -199,6 +199,7 @@ module Mongo
 
     def initialize(error : BSON, *, @error_labels = Set(String).new, topology_version : BSON? = nil)
       @code = error["code"]?.try(&.as(Int).to_i32) || 0
+      @code_name = error["codeName"]?.try(&.as(String))
       @message = error["errmsg"]?.try(&.as(String)) || ""
       @details = error["errInfo"]?.try &.as(BSON)
       @topology_version = topology_version || error["topologyVersion"]?.try(&.as(BSON))

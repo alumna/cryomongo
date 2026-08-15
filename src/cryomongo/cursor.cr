@@ -20,6 +20,7 @@ class Mongo::Cursor
   @tailable : Bool = false
   @counter : Int32
   @limit : Int32? = nil
+  @comment : BSON::Value? = nil
 
   protected property server_description : SDAM::ServerDescription? = nil
   protected property session : Session::ClientSession?
@@ -35,6 +36,7 @@ class Mongo::Cursor
     @await_time_ms : Int64? = nil,
     @tailable : Bool = false,
     @session : Session::ClientSession? = nil,
+    @comment = nil,
   )
     @counter = @batch.size
     @database, @collection = namespace.split(".", 2)
@@ -49,6 +51,7 @@ class Mongo::Cursor
     @await_time_ms : Int64? = nil,
     @tailable : Bool = false,
     @session : Session::ClientSession? = nil,
+    @comment = nil,
   )
     @cursor_id = result.cursor.id
     @batch = result.cursor.first_batch
@@ -82,13 +85,14 @@ class Mongo::Cursor
   # Close the cursor and frees underlying resources.
   def close
     unless exhausted?
-      if (session = @session) && session.implicit?
-        session.end
-      end
       self.kill
     end
   rescue e
     # Ignore - client might be dead
+  ensure
+    if (session = @session) && session.implicit?
+      session.end
+    end
   end
 
   private def kill
@@ -114,6 +118,7 @@ class Mongo::Cursor
       cursor_id: @cursor_id,
       batch_size: batch_size,
       max_time_ms: @await_time_ms,
+      comment: @comment,
       server_description: @server_description,
       session: @session
     )

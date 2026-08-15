@@ -13,11 +13,11 @@ module Mongo::Commands::ListIndexes
   extend self
 
   # Returns a pair of OP_MSG body and sequences associated with the command and arguments.
-  def command(database : String, collection : Collection::CollectionKey)
+  def command(database : String, collection : Collection::CollectionKey, options = nil)
     Commands.make({
       listIndexes: collection,
       "$db":       database,
-    })
+    }, options)
   end
 
   # Transforms the server result.

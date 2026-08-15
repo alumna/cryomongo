@@ -6,7 +6,14 @@ module Mongo::Unified
     property buckets = Hash(String, Mongo::GridFS::Bucket).new
     property sessions = Hash(String, Mongo::Session::ClientSession).new
     property entities = Hash(String, BSON::Value).new
-    property command_started_events = Hash(String, Array(Mongo::Monitoring::Commands::CommandStartedEvent)).new
+    property command_events = Hash(String, Array(Mongo::Monitoring::Commands::Event)).new
+
+    def command_started_events
+      command_events.transform_values { |events|
+        events.select(Mongo::Monitoring::Commands::CommandStartedEvent)
+      }
+    end
+    property ignored_command_events = Hash(String, Array(String)).new
     property threads = Hash(String, Channel(Exception?)).new
 
     def close_all
