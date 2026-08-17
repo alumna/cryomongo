@@ -6,6 +6,7 @@ require "../commands"
 # NOTE: [for more details, please check the official MongoDB documentation](https://docs.mongodb.com/manual/reference/command/listDatabases/).
 module Mongo::Commands::ListDatabases
   extend ReadCommand
+  extend MayUseSecondary
   extend Retryable
   extend self
 

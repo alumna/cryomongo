@@ -6,20 +6,23 @@ class Mongo::Client
     read_preference : ReadPreference,
     server_description : SDAM::ServerDescription? = nil,
     operation_id : Int64? = nil,
+    end_implicit_session : Bool = true,
     **args,
   )
+    # getMore must stay on the originating server. Keep a caller pin on retry.
+    provided_server = server_description
     server_description ||= server_selection(command, args, read_preference)
 
     if !topology.supports_sessions? || !server_description.supports_retryable_reads?
       connection = get_connection(server_description)
       session.pin(server_description)
-      return execute_command(command, session, read_preference, server_description, connection, operation_id, **args)
+      return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, **args)
     end
 
     begin
       connection = get_connection(server_description)
       session.pin(server_description)
-      return execute_command(command, session, read_preference, server_description, connection, operation_id, **args)
+      return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, **args)
     rescue error : NetworkError
       error = Error::Network.new(error)
       original_error = error
@@ -34,7 +37,7 @@ class Mongo::Client
     end
 
     begin
-      server_description = session.server_description || server_selection(command, args, read_preference)
+      server_description = provided_server || session.server_description || server_selection(command, args, read_preference)
       connection = get_connection(server_description)
       session.pin(server_description)
     rescue
@@ -48,7 +51,7 @@ class Mongo::Client
     end
 
     begin
-      execute_command(command, session, read_preference, server_description, connection, operation_id, **args)
+      execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, **args)
     rescue error : Mongo::Error
       raise error
     end

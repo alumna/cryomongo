@@ -45,8 +45,8 @@ class Mongo::Database
       read_concern: read_concern || @read_concern,
       read_preference: read_preference || @read_preference,
       session: session,
-    ) { |result|
-      yield result
+    ) { |result, cmd_session|
+      yield result, cmd_session
     }
   end
 
@@ -95,22 +95,31 @@ class Mongo::Database
     read_concern : ReadConcern? = nil,
     collation : Collation? = nil,
     hint : (String | H)? = nil,
-    comment : String? = nil,
+    comment = nil,
     write_concern : WriteConcern? = nil,
+    read_preference : ReadPreference? = nil,
     session : Session::ClientSession? = nil,
   ) : Mongo::Cursor? forall H
+    hint_value = if hint.nil?
+                   nil
+                 elsif hint.is_a?(String)
+                   hint
+                 else
+                   BSON.new(hint)
+                 end
     self.command(Commands::Aggregate, collection: 1, pipeline: pipeline, session: session, options: {
       allow_disk_use:             allow_disk_use,
-      cursor:                     batch_size.try { {batch_size: batch_size} },
+      cursor:                     batch_size.try { {batchSize: batch_size} },
       bypass_document_validation: bypass_document_validation,
       read_concern:               read_concern,
       collation:                  collation,
-      hint:                       hint.is_a?(String) ? hint : BSON.new(hint),
+      hint:                       hint_value,
       comment:                    comment,
       max_time_ms:                max_time_ms,
       write_concern:              write_concern,
-    }).try { |result|
-      Cursor.new(@client, result, batch_size: batch_size, session: session)
+      read_preference:            read_preference,
+    }) { |result, cmd_session|
+      bind_cursor(Cursor.new(@client, result, batch_size: batch_size, session: cmd_session, comment: comment), cmd_session)
     }
   end
 
@@ -130,11 +139,17 @@ class Mongo::Database
       filter:                 filter,
       name_only:              name_only,
       authorized_collections: authorized_collections,
-    })
+    }) { |query_result, cmd_session|
+      bind_cursor(Cursor.new(@client, query_result, session: cmd_session), cmd_session)
+    }
 
     raise Mongo::Error.new("Command ListCollections failed to return a result") unless result
+    result
+  end
 
-    Cursor.new(@client, result, session: session)
+  # :nodoc:
+  protected def bind_cursor(cursor : Cursor, session : Session::ClientSession?) : Cursor
+    cursor.bind(session)
   end
 
   # Returns a `Mongo::GridFS` instance configured with the arguments provided.

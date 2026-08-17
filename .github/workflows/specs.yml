@@ -8,20 +8,28 @@ on:
 
 jobs:
   tests:
-    strategy:
-      fail-fast: false
-      matrix:
-        part: [0, 1, 2, 3, 4] # This creates 4 concurrent jobs
+    # Use the matrix strategy when needing to split/shard the tests
+    # to reduce the total execution time by running tests in parallel
+
+    #strategy:
+    #  fail-fast: false
+    #  matrix:
+    #    part: [0, 1, 2, 3, 4] # This creates 5 concurrent jobs (0/5 … 4/5)
+
     runs-on: ubuntu-24.04
-    name: Mongodb tests (Shard ${{ matrix.part }})
+    name: MongoDB 8.0 replica set
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
       - name: Start MongoDB ReplicaSet (8.0)
         run: |
-          # Start a persistent Replica Set for the Unified Test Runner (Using tmpfs for I/O speed)
-          docker run --name mongo -d -p 27017:27017 --tmpfs /data/db mongo:8.0 --replSet rs0 --setParameter enableTestCommands=1
+          # One-node replica set. Same topology as local scripts/mongo-rs.sh.
+          docker run --name mongo -d -p 27017:27017 --tmpfs /data/db mongo:8.0 \
+            --replSet rs0 \
+            --setParameter enableTestCommands=1 \
+            --setParameter acceptApiVersion2=1 \
+            --setParameter transactionLifetimeLimitSeconds=20
           sleep 5
           docker exec mongo mongosh --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]})'
           sleep 5
@@ -35,5 +43,11 @@ jobs:
         run: shards install
 
       - name: Run Specs
-        # Pass the matrix part into our custom sharding logic!
-        run: CI_SHARD="${{ matrix.part }}/5" crystal spec
+        # The full suite is about 6–7 minutes. Do not set CI_SHARD.
+        # spec/sharding.cr still honors CI_SHARD="N/M" if the suite grows
+        # and you add a matrix again.
+        run: crystal spec
+
+        # SHARDED TEST EXECUTION
+        # Pass the matrix part into the custom sharding logic
+        # run: CI_SHARD="${{ matrix.part }}/5" crystal spec

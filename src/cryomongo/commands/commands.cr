@@ -116,6 +116,7 @@ module Mongo::Commands
       property first_batch : Array(BSON)
       property id : Int64
       property ns : String
+      property post_batch_resume_token : BSON?
     }
 
     # Upserted bson sub-document.
@@ -136,6 +137,8 @@ module Mongo::Commands
       property n : Int32?
       property write_errors : Array(WriteError)?
       property write_concern_error : WriteConcernError?
+      # Client-side only. The server does not return inserted ids.
+      property inserted_ids : Array(BSON::Value)? = nil
     }
 
     # In response to delete commands.

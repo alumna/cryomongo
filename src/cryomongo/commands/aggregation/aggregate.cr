@@ -42,7 +42,9 @@ module Mongo::Commands::Aggregate
   end
 
   def may_use_secondary?(**args)
-    !write_command?(**args)
+    # MongoDB 5.0+ honors the user's read preference for $out / $merge.
+    # This driver targets 8.0, so write aggregations may use secondaries.
+    true
   end
 
   def retryable?(**args)

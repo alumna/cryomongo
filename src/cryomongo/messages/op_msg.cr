@@ -11,7 +11,7 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
   enum Flags : Int32
     ChecksumPresent
     MoreToCome
-    ExhaustAllowed  = 16
+    ExhaustAllowed  = 1 << 16
   end
 
   getter flag_bits : Flags

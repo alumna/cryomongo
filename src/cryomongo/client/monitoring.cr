@@ -48,7 +48,7 @@ class Mongo::Client
 
   protected def stop_monitoring(server_description : SDAM::ServerDescription)
     @topology_lock.synchronize {
-      @monitors.reject!(server_description)
+      @monitors.reject! { |monitor| monitor.server_description.address == server_description.address }
     }
   end
 end

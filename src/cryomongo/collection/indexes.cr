@@ -47,9 +47,12 @@ class Mongo::Collection
         BSON.new({key: keys}).append(options)
       else
         index_model = Index::Model.new(item["keys"], Index::Options.new(**item["options"]))
-        index_model.options.name ||= String.build do |io|
+        # Options is a struct. Mutating a getter copy would drop the generated name.
+        options = index_model.options
+        options.name ||= String.build do |io|
           index_model.keys.join(io, "_") { |(k, v), io| io << k << '_' << v }
         end
+        index_model.options = options
         BSON.new({key: index_model.keys}).append(index_model.options.to_bson)
       end
     }
@@ -85,8 +88,8 @@ class Mongo::Collection
   #
   # NOTE: [for more details, please check the official documentation](https://docs.mongodb.com/manual/reference/command/listIndexes/).
   def list_indexes(session : Session::ClientSession? = nil) : Mongo::Cursor?
-    result = self.command(Commands::ListIndexes, session: session) { |result|
-      Cursor.new(@database.client, result, session: session)
+    result = self.command(Commands::ListIndexes, session: session, options: NamedTuple.new) { |result, cmd_session|
+      bind_cursor(Cursor.new(@database.client, result, session: cmd_session), cmd_session)
     }
     raise Mongo::Error.new("Command failed to return a result") unless result
     result

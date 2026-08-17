@@ -65,7 +65,11 @@ module Mongo::Session
     getter options : Options
 
     protected getter? implicit : Bool = true
-    protected delegate :dirty, :dirty=, :txn_number, :session_id, to: @server_session
+    protected delegate :dirty, :dirty=, :txn_number, to: @server_session
+
+    def session_id
+      @server_session.session_id
+    end
 
     protected def initialize(@client : Mongo::Client, @implicit = true, **options : **U) forall U
       {% begin %}
@@ -100,9 +104,11 @@ module Mongo::Session
     #
     # NOTE: this method is a no-op if the provider cluster time is less than the current cluster time.
     def advance_cluster_time(cluster_time : ClusterTime)
-      self_cluster_time = @cluster_time
-      if !self_cluster_time || self_cluster_time < cluster_time
-        @cluster_time = cluster_time
+      @lock.synchronize do
+        self_cluster_time = @cluster_time
+        if !self_cluster_time || self_cluster_time < cluster_time
+          @cluster_time = cluster_time
+        end
       end
     end
 
@@ -110,9 +116,11 @@ module Mongo::Session
     #
     # NOTE: this method is a no-op if the provider operation time is less than the current operation time.
     def advance_operation_time(operation_time : BSON::Timestamp)
-      self_operation_time = @operation_time
-      if !self_operation_time || self_operation_time < operation_time
-        @operation_time = operation_time
+      @lock.synchronize do
+        self_operation_time = @operation_time
+        if !self_operation_time || self_operation_time < operation_time
+          @operation_time = operation_time
+        end
       end
     end
 
@@ -130,15 +138,21 @@ module Mongo::Session
     end
 
     protected def increment_txn_number
-      # @lock.synchronize {
-      @server_session.txn_number += 1
-      # }
+      @lock.synchronize {
+        @server_session.txn_number += 1
+      }
+    end
+
+    # Spec: update lastUse when this session is about to send a command.
+    protected def mark_used
+      @server_session.use
     end
   end
 
   private class ServerSession
     getter session_id : SessionId
-    getter last_use : Time? = nil
+    # Idle time is elapsed time. Wall clock jumps must not expire a live session.
+    getter last_use : Time::Instant? = nil
     property dirty : Bool = false
     property txn_number : Int64 = 0
 
@@ -148,11 +162,12 @@ module Mongo::Session
     end
 
     def use
-      @last_use = Time.utc
+      @last_use = Time.instant
     end
 
     def stale?(logical_timeout : Time::Span)
-      @last_use.try { |use| use + logical_timeout <= Time.utc + 1.minute }
+      # Spec: idle if unused for (logicalSessionTimeoutMinutes - 1 minute).
+      @last_use.try { |use| use.elapsed >= logical_timeout - 1.minute }
     end
   end
 

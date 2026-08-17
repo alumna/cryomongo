@@ -75,8 +75,7 @@ class Mongo::SDAM::TopologyDescription
       @set_name = options.replica_set
     end
 
-    # Safely handle uninitialized raw HTTP params during cloning
-    if options.raw?.try(&.["loadbalanced"]?) == "true"
+    if options.load_balanced
       @type = :load_balanced
       @servers.each { |s| s.type = :load_balancer }
     end

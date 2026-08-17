@@ -16,7 +16,9 @@ class Mongo::Client
     **args,
     &block
   )
-    # Create an implicit session
+    # Create an implicit session only when the caller did not pass one.
+    # The caller (bulk, change stream, cursor) owns ending a session it created.
+    owns_session = session.nil?
     session ||= Session::ClientSession.new(self)
 
     result = begin
@@ -31,6 +33,7 @@ class Mongo::Client
             server_description: server_description,
             session: session,
             operation_id: operation_id,
+            end_implicit_session: owns_session,
           )
         }
       else
@@ -43,6 +46,7 @@ class Mongo::Client
           server_description: server_description,
           session: session,
           operation_id: operation_id,
+          end_implicit_session: owns_session,
         )
       end
     end
@@ -83,6 +87,7 @@ class Mongo::Client
     server_description : SDAM::ServerDescription? = nil,
     session : Session::ClientSession? = nil,
     operation_id : Int64? = nil,
+    end_implicit_session : Bool = true,
     **args,
   )
     # Mix collection/database/client/options read and write concerns considering the precedence rules.
@@ -120,6 +125,7 @@ class Mongo::Client
         read_preference,
         server_description,
         operation_id,
+        end_implicit_session,
         **args
       )
     elsif retryable_command && @options.retry_reads && command.is_a?(Commands::ReadCommand) && command.read_command?
@@ -129,6 +135,7 @@ class Mongo::Client
         read_preference,
         server_description,
         operation_id,
+        end_implicit_session,
         **args
       )
     else
@@ -149,6 +156,7 @@ class Mongo::Client
         server_description,
         connection,
         operation_id,
+        end_implicit_session,
         **args
       )
     end
@@ -161,9 +169,10 @@ class Mongo::Client
     server_description : SDAM::ServerDescription,
     connection : Mongo::Connection,
     operation_id : Int64? = nil,
+    end_implicit_session : Bool = true,
     **args,
   )
-    execute_command(command, session, read_preference, server_description, connection, operation_id, **args) { }
+    execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, **args) { }
   end
 
   private def execute_command(
@@ -173,6 +182,7 @@ class Mongo::Client
     server_description : SDAM::ServerDescription,
     connection : Mongo::Connection,
     operation_id : Int64? = nil,
+    end_implicit_session : Bool = true,
     **args,
     &
   )
@@ -218,13 +228,14 @@ class Mongo::Client
     flag_bits = unacknowledged ? Messages::OpMsg::Flags::MoreToCome : Messages::OpMsg::Flags::None
 
     # Apply session rules.
+    session.mark_used
     if topology.supports_sessions?
       if unacknowledged
         # Sessions are not compatible with unacknowledged writes
         raise Mongo::Error.new("Unacknowledged writes are incompatible with sessions.") unless session.implicit?
       end
 
-      body["lsid"] = session.session_id
+      body["lsid"] = session.session_id unless unacknowledged
 
       if topology.supports_cluster_time?
         cluster_time = gossip_cluster_time(session)
@@ -232,11 +243,34 @@ class Mongo::Client
       end
 
       if session.is_transaction? && server_description.supports_retryable_writes?
-        if session.transitions_from.try(&.starting?)
+        if session.transitions_from.try(&.starting?) || session.apply_transaction_read_concern?
           body["startTransaction"] = true
         end
         body["txnNumber"] = session.txn_number
         body["autocommit"] = false
+      end
+
+      unless command.is_a?(Commands::EndSessions) || command.is_a?(Commands::Hello)
+        if session.options.snapshot && !body["readConcern"]?
+          body["readConcern"] = ReadConcern.new(level: "snapshot", at_cluster_time: session.snapshot_time)
+        elsif session.is_transaction? && body["startTransaction"]? == true && !body["readConcern"]?
+          if concern = session.current_transaction_options.read_concern
+            body["readConcern"] = concern
+          end
+        end
+        if session.is_transaction? && body["startTransaction"]? == true
+          session.apply_transaction_read_concern = false
+        end
+      end
+
+      if !session.is_transaction? && session.options.causal_consistency
+        if (operation_time = session.operation_time) && !body["readConcern"]?
+          is_read = command.responds_to?(:read_command?) && command.read_command?(**args)
+          is_write = command.responds_to?(:write_command?) && command.write_command?(**args)
+          if is_read || is_write
+            body["readConcern"] = ReadConcern.new(after_cluster_time: operation_time)
+          end
+        end
       end
     end
 
@@ -285,14 +319,16 @@ class Mongo::Client
 
     # If the write is unacknowledged - early return.
     if unacknowledged
-      @commands_observable.broadcast(Monitoring::Commands::CommandSucceededEvent.new(
-        command_name: command_name,
-        request_id: request_id,
-        operation_id: operation_id,
-        address: address,
-        duration: duration_start.elapsed,
-        reply: BSON.new({ok: 1})
-      ))
+      if @commands_observable.has_subscribers?
+        @commands_observable.broadcast(Monitoring::Commands::CommandSucceededEvent.new(
+          command_name: command_name,
+          request_id: request_id,
+          operation_id: operation_id,
+          address: address,
+          duration: duration_start.elapsed,
+          reply: BSON.new({ok: 1})
+        ))
+      end
 
       return nil
     end
@@ -307,7 +343,7 @@ class Mongo::Client
         if error = op_msg.error?
           @commands_observable.broadcast(Monitoring::Commands::CommandFailedEvent.new(
             command_name: command_name,
-            request_id: message.header.request_id.to_i64,
+            request_id: message.header.response_to.to_i64,
             operation_id: operation_id,
             address: address,
             duration: duration,
@@ -317,7 +353,7 @@ class Mongo::Client
         else
           @commands_observable.broadcast(Monitoring::Commands::CommandSucceededEvent.new(
             command_name: command_name,
-            request_id: message.header.request_id.to_i64,
+            request_id: message.header.response_to.to_i64,
             operation_id: operation_id,
             address: address,
             duration: duration,
@@ -332,7 +368,9 @@ class Mongo::Client
 
     # Update the stored cluster time.
     if cluster_time = base_result.cluster_time
-      @cluster_time = cluster_time if !@cluster_time || @cluster_time.try &.< cluster_time
+      @cluster_time_lock.synchronize do
+        @cluster_time = cluster_time if !@cluster_time || @cluster_time.try &.< cluster_time
+      end
       session.advance_cluster_time(cluster_time) if session
     end
 
@@ -362,6 +400,7 @@ class Mongo::Client
 
     # Parse and return the body as a custom Result type.
     result = command.result(op_msg.body)
+    session.last_operation_server = server_description
     result
   rescue error
     if error.is_a?(NetworkError)
@@ -377,22 +416,17 @@ class Mongo::Client
       }
       session.try &.dirty = true
       error = Error::Network.new(error)
+      # Only retryable writes (retryWrites enabled) get RetryableWriteError on a network error.
+      if @options.retry_writes && command.is_a?(Commands::WriteCommand) && command.write_command?(**args) && command.responds_to?(:retryable?) && command.retryable?(**args, session: session)
+        error.add_error_label("RetryableWriteError")
+      end
     end
 
     if error.is_a?(Mongo::Error::Command)
       Mongo::Log.error { "Command error: #{error}" }
       # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#not-master-and-node-is-recovering
       if error.state_change?
-        server_description.try { |desc|
-          description = SDAM::ServerDescription.new(desc.address)
-          description.min_wire_version = desc.min_wire_version
-          description.max_wire_version = desc.max_wire_version
-          description.error = error.message
-          description.last_update_time = desc.last_update_time
-          topology.update(desc, description)
-          close_connection_pool(desc) if error.shutdown?
-          @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
-        }
+        apply_state_change_error(server_description, error)
       end
     end
 
@@ -411,14 +445,42 @@ class Mongo::Client
     raise error
   ensure
     release_connection(connection) if connection
-    if result.is_a? Cursor
-      # Bind the Cursor to the same server for its lifetime.
-      result.server_description = server_description
-      # Bind the session
-      result.session = session
-    else
-      # End the session if implicit
+    if end_implicit_session && !keeps_implicit_session?(result)
       session.try &.end if session.try(&.implicit?)
+    end
+  end
+
+  # Mark the server Unknown after a not-master / recovering error, unless the
+  # error's topologyVersion is older than the description we already have.
+  private def apply_state_change_error(server_description : SDAM::ServerDescription?, error : Mongo::Error::Command) : Nil
+    desc = server_description
+    return unless desc
+
+    if topology.is_stale_error_topology_version?(desc.topology_version, error.topology_version)
+      return
+    end
+
+    description = SDAM::ServerDescription.new(desc.address)
+    description.min_wire_version = desc.min_wire_version
+    description.max_wire_version = desc.max_wire_version
+    description.error = error.message
+    description.last_update_time = desc.last_update_time
+    description.topology_version = error.topology_version
+    topology.update(desc, description)
+    close_connection_pool(desc) if error.shutdown?
+    @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
+  end
+
+  private def keeps_implicit_session?(result) : Bool
+    case result
+    when Commands::Common::QueryResult
+      result.cursor.id != 0
+    when Commands::GetMore::Result
+      result.cursor.id != 0
+    when Cursor
+      true
+    else
+      false
     end
   end
 end

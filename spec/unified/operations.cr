@@ -1,3 +1,5 @@
+require "./parse"
+
 module Mongo::Unified::Operations
   struct RawCommand
     include Mongo::Commands::Command
@@ -214,6 +216,7 @@ module Mongo::Unified::Operations
     id = json_to_bson_value(args["id"])
     stream = IO::Memory.new
     target.as(Mongo::GridFS::Bucket).download_to_stream(id, stream)
+    stream.rewind.to_slice
   end
 
   private def execute_download_by_name(args, target)
@@ -221,18 +224,24 @@ module Mongo::Unified::Operations
     filename = args["filename"].as_s
     stream = IO::Memory.new
     target.as(Mongo::GridFS::Bucket).download_to_stream_by_name(filename, stream)
+    stream.rewind.to_slice
   end
 
   private def execute_create_collection(args, target, session)
     raise "Missing arguments" unless args
     coll_name = args["collection"].as_s
-    target.as(Mongo::Database).command(Mongo::Commands::Create, name: coll_name, session: session)
+    view_on = args["viewOn"]?.try(&.as_s)
+    pipeline = args["pipeline"]?.try(&.as_a).try { |stages| stages.map { |s| BSON.from_json(s.to_json) } }
+    target.as(Mongo::Database).command(Mongo::Commands::Create, name: coll_name, session: session, options: {
+      view_on:  view_on,
+      pipeline: pipeline,
+    })
   end
 
   private def execute_drop_collection(args, target, session)
     raise "Missing arguments" unless args
     coll_name = args["collection"].as_s
-    target.as(Mongo::Database).command(Mongo::Commands::Drop, name: coll_name, session: session) rescue nil
+    target.as(Mongo::Database).command(Mongo::Commands::Drop, name: coll_name, session: session, options: NamedTuple.new) rescue nil
   end
 
   private def execute_create_index(args, target, session)
@@ -269,7 +278,11 @@ module Mongo::Unified::Operations
   private def execute_insert_one(args, target, session)
     raise "Missing arguments" unless args
     doc = BSON.from_json(args["document"].to_json)
-    target.as(Mongo::Collection).insert_one(doc, session: session)
+    doc["_id"] = BSON::ObjectId.new unless doc.has_key?("_id")
+    comment = args["comment"]?
+    bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
+    target.as(Mongo::Collection).insert_one(doc, comment: comment.try { |c| json_to_bson_value(c) }, bypass_document_validation: bypass, session: session)
+    {"insertedId" => doc["_id"]}
   end
 
   private def execute_insert_many(args, target, session)
@@ -277,7 +290,16 @@ module Mongo::Unified::Operations
     docs = args["documents"].as_a.map { |d| BSON.from_json(d.to_json) }
     ordered = args["ordered"]?.try(&.as_bool)
     ordered = true if ordered.nil?
-    target.as(Mongo::Collection).insert_many(docs, ordered: ordered, session: session)
+    comment = args["comment"]?.try { |c| json_to_bson_value(c) }
+    bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
+    target.as(Mongo::Collection).insert_many(docs, ordered: ordered, comment: comment, bypass_document_validation: bypass, session: session)
+    inserted_ids = {} of String => BSON::Value
+    docs.each_with_index do |doc, index|
+      if id = doc["_id"]?
+        inserted_ids[index.to_s] = id
+      end
+    end
+    {"insertedCount" => docs.size, "insertedIds" => inserted_ids}
   end
 
   private def execute_update_one(args, target, session)
@@ -288,7 +310,11 @@ module Mongo::Unified::Operations
     array_filters = args["arrayFilters"]?.try { |af| af.as_a.map { |f| BSON.from_json(f.to_json) } }
     collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
     hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-    target.as(Mongo::Collection).update_one(filter, update, upsert: upsert, array_filters: array_filters, collation: collation, hint: hint, session: session)
+    comment = args["comment"]?.try { |c| json_to_bson_value(c) }
+    sort = args["sort"]?.try { |s| BSON.from_json(s.to_json) }
+    bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
+    result = target.as(Mongo::Collection).update_one(filter, update, upsert: upsert, array_filters: array_filters, collation: collation, hint: hint, comment: comment, sort: sort, bypass_document_validation: bypass, session: session)
+    utf_update_result(result)
   end
 
   private def execute_update_many(args, target, session)
@@ -299,7 +325,10 @@ module Mongo::Unified::Operations
     array_filters = args["arrayFilters"]?.try { |af| af.as_a.map { |f| BSON.from_json(f.to_json) } }
     collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
     hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-    target.as(Mongo::Collection).update_many(filter, update, upsert: upsert, array_filters: array_filters, collation: collation, hint: hint, session: session)
+    comment = args["comment"]?.try { |c| json_to_bson_value(c) }
+    bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
+    result = target.as(Mongo::Collection).update_many(filter, update, upsert: upsert, array_filters: array_filters, collation: collation, hint: hint, comment: comment, bypass_document_validation: bypass, session: session)
+    utf_update_result(result)
   end
 
   private def execute_replace_one(args, target, session)
@@ -309,7 +338,11 @@ module Mongo::Unified::Operations
     upsert = args["upsert"]?.try(&.as_bool) || false
     collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
     hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-    target.as(Mongo::Collection).replace_one(filter, replacement, upsert: upsert, collation: collation, hint: hint, session: session)
+    comment = args["comment"]?.try { |c| json_to_bson_value(c) }
+    sort = args["sort"]?.try { |s| BSON.from_json(s.to_json) }
+    bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
+    result = target.as(Mongo::Collection).replace_one(filter, replacement, upsert: upsert, collation: collation, hint: hint, comment: comment, sort: sort, bypass_document_validation: bypass, session: session)
+    utf_update_result(result)
   end
 
   private def execute_delete_one(args, target, session)
@@ -317,7 +350,9 @@ module Mongo::Unified::Operations
     filter = BSON.from_json(args["filter"].to_json)
     collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
     hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-    target.as(Mongo::Collection).delete_one(filter, collation: collation, hint: hint, session: session)
+    comment = args["comment"]?.try { |c| json_to_bson_value(c) }
+    result = target.as(Mongo::Collection).delete_one(filter, collation: collation, hint: hint, comment: comment, session: session)
+    {"deletedCount" => result.try(&.n) || 0}
   end
 
   private def execute_delete_many(args, target, session)
@@ -325,7 +360,9 @@ module Mongo::Unified::Operations
     filter = BSON.from_json(args["filter"].to_json)
     collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
     hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-    target.as(Mongo::Collection).delete_many(filter, collation: collation, hint: hint, session: session)
+    comment = args["comment"]?.try { |c| json_to_bson_value(c) }
+    result = target.as(Mongo::Collection).delete_many(filter, collation: collation, hint: hint, comment: comment, session: session)
+    {"deletedCount" => result.try(&.n) || 0}
   end
 
   private def execute_find(args, target, session)
@@ -344,7 +381,8 @@ module Mongo::Unified::Operations
       allow_disk_use = args["allowDiskUse"]?.try(&.as_bool)
       max_time_ms = args["maxTimeMS"]?.try(&.as_i64)
     end
-    target.as(Mongo::Collection).find(filter, sort: sort, skip: skip, limit: limit, batch_size: batch_size, collation: collation, hint: hint, allow_disk_use: allow_disk_use, max_time_ms: max_time_ms, session: session).to_a
+    comment = args.try(&.["comment"]?).try { |c| json_to_bson_value(c) }
+    target.as(Mongo::Collection).find(filter, sort: sort, skip: skip, limit: limit, batch_size: batch_size, collation: collation, hint: hint, allow_disk_use: allow_disk_use, max_time_ms: max_time_ms, comment: comment, session: session).to_a
   end
 
   private def execute_find_one(args, target, session)
@@ -412,11 +450,13 @@ module Mongo::Unified::Operations
     collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
     batch_size = args["batchSize"]?.try(&.as_i)
     max_time_ms = args["maxTimeMS"]?.try(&.as_i64)
+    comment = args["comment"]?.try { |c| json_to_bson_value(c) }
+    bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
 
     cursor = if target.is_a?(Mongo::Database)
-               target.aggregate(pipeline, allow_disk_use: allow_disk_use, collation: collation, batch_size: batch_size, max_time_ms: max_time_ms, session: session)
+               target.aggregate(pipeline, allow_disk_use: allow_disk_use, collation: collation, batch_size: batch_size, max_time_ms: max_time_ms, comment: comment, bypass_document_validation: bypass, session: session)
              else
-               target.as(Mongo::Collection).aggregate(pipeline, allow_disk_use: allow_disk_use, collation: collation, batch_size: batch_size, max_time_ms: max_time_ms, session: session)
+               target.as(Mongo::Collection).aggregate(pipeline, allow_disk_use: allow_disk_use, collation: collation, batch_size: batch_size, max_time_ms: max_time_ms, comment: comment, bypass_document_validation: bypass, session: session)
              end
     cursor ? cursor.to_a : [] of BSON
   end
@@ -431,11 +471,14 @@ module Mongo::Unified::Operations
       skip = args["skip"]?.try(&.as_i)
       limit = args["limit"]?.try(&.as_i)
     end
-    target.as(Mongo::Collection).count_documents(filter, collation: collation, skip: skip, limit: limit, session: session)
+    comment = args.try(&.["comment"]?).try { |c| json_to_bson_value(c) }
+    target.as(Mongo::Collection).count_documents(filter, collation: collation, skip: skip, limit: limit, comment: comment, session: session)
   end
 
   private def execute_estimated_document_count(args, target, session)
-    target.as(Mongo::Collection).estimated_document_count(session: session)
+    max_time_ms = args.try(&.["maxTimeMS"]?).try(&.as_i64)
+    comment = args.try(&.["comment"]?).try { |c| json_to_bson_value(c) }
+    target.as(Mongo::Collection).estimated_document_count(max_time_ms: max_time_ms, comment: comment, session: session)
   end
 
   private def execute_distinct(args, target, session)
@@ -443,7 +486,9 @@ module Mongo::Unified::Operations
     key = args["fieldName"].as_s
     filter = args["filter"]? ? BSON.from_json(args["filter"].to_json) : nil
     collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-    target.as(Mongo::Collection).distinct(key, filter: filter, collation: collation, session: session)
+    hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+    comment = args["comment"]?.try { |c| json_to_bson_value(c) }
+    target.as(Mongo::Collection).distinct(key, filter: filter, collation: collation, hint: hint, comment: comment, session: session)
   end
 
   private def execute_find_one_and_delete(args, target, session)
@@ -453,7 +498,9 @@ module Mongo::Unified::Operations
     collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
     hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
     max_time_ms = args["maxTimeMS"]?.try(&.as_i64)
-    target.as(Mongo::Collection).find_one_and_delete(filter, sort: sort, collation: collation, hint: hint, max_time_ms: max_time_ms, session: session)
+    comment = args["comment"]?.try { |c| json_to_bson_value(c) }
+    bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
+    target.as(Mongo::Collection).find_one_and_delete(filter, sort: sort, collation: collation, hint: hint, max_time_ms: max_time_ms, comment: comment, bypass_document_validation: bypass, session: session)
   end
 
   private def execute_find_one_and_replace(args, target, session)
@@ -466,7 +513,9 @@ module Mongo::Unified::Operations
     collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
     hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
     max_time_ms = args["maxTimeMS"]?.try(&.as_i64)
-    target.as(Mongo::Collection).find_one_and_replace(filter, replacement, sort: sort, upsert: upsert, new: new_doc, collation: collation, hint: hint, max_time_ms: max_time_ms, session: session)
+    comment = args["comment"]?.try { |c| json_to_bson_value(c) }
+    bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
+    target.as(Mongo::Collection).find_one_and_replace(filter, replacement, sort: sort, upsert: upsert, new: new_doc, collation: collation, hint: hint, max_time_ms: max_time_ms, comment: comment, bypass_document_validation: bypass, session: session)
   end
 
   private def execute_find_one_and_update(args, target, session)
@@ -480,7 +529,9 @@ module Mongo::Unified::Operations
     collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
     hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
     max_time_ms = args["maxTimeMS"]?.try(&.as_i64)
-    target.as(Mongo::Collection).find_one_and_update(filter, update, sort: sort, upsert: upsert, new: new_doc, array_filters: array_filters, collation: collation, hint: hint, max_time_ms: max_time_ms, session: session)
+    comment = args["comment"]?.try { |c| json_to_bson_value(c) }
+    bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
+    target.as(Mongo::Collection).find_one_and_update(filter, update, sort: sort, upsert: upsert, new: new_doc, array_filters: array_filters, collation: collation, hint: hint, max_time_ms: max_time_ms, comment: comment, bypass_document_validation: bypass, session: session)
   end
 
   private def execute_bulk_write(args, target, session)
@@ -499,7 +550,8 @@ module Mongo::Unified::Operations
         collation = req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
         hint = req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
         arrayFilters = req_args["arrayFilters"]?.try { |af| af.as_a.map { |f_el| BSON.from_json(f_el.to_json) } }
-        Mongo::Bulk::UpdateOne.new(f, u, upsert: upsert, collation: collation, hint: hint, array_filters: arrayFilters).as(Mongo::Bulk::WriteModel)
+        sort = req_args["sort"]?.try { |s| BSON.from_json(s.to_json) }
+        Mongo::Bulk::UpdateOne.new(f, u, upsert: upsert, collation: collation, hint: hint, array_filters: arrayFilters, sort: sort).as(Mongo::Bulk::WriteModel)
       elsif req["updateMany"]?
         req_args = req["updateMany"]
         f = BSON.from_json(req_args["filter"].to_json)
@@ -516,7 +568,8 @@ module Mongo::Unified::Operations
         upsert = req_args["upsert"]?.try(&.as_bool)
         collation = req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
         hint = req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-        Mongo::Bulk::ReplaceOne.new(f, r, upsert: upsert, collation: collation, hint: hint).as(Mongo::Bulk::WriteModel)
+        sort = req_args["sort"]?.try { |s| BSON.from_json(s.to_json) }
+        Mongo::Bulk::ReplaceOne.new(f, r, upsert: upsert, collation: collation, hint: hint, sort: sort).as(Mongo::Bulk::WriteModel)
       elsif req["deleteOne"]?
         req_args = req["deleteOne"]
         f = BSON.from_json(req_args["filter"].to_json)
@@ -535,14 +588,36 @@ module Mongo::Unified::Operations
     end
     ordered = args["ordered"]?.try(&.as_bool)
     ordered = true if ordered.nil?
+    comment = args["comment"]?.try { |c| json_to_bson_value(c) }
+    bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
 
-    target.as(Mongo::Collection).bulk_write(requests, ordered: ordered, session: session)
+    result = target.as(Mongo::Collection).bulk_write(requests, ordered: ordered, comment: comment, bypass_document_validation: bypass, session: session)
+    {
+      "insertedCount" => result.n_inserted,
+      "matchedCount"  => result.n_matched,
+      "modifiedCount" => result.n_modified,
+      "deletedCount"  => result.n_removed,
+      "upsertedCount" => result.n_upserted,
+      "upsertedIds"   => result.upserted.each_with_object({} of String => BSON::Value) { |u, h| h[u.index.to_s] = u._id },
+    }
+  end
+
+  private def utf_update_result(result)
+    upserted = result.try(&.upserted)
+    upserted_count = upserted.try(&.size) || 0
+    matched = (result.try(&.n) || 0) - upserted_count
+    {
+      "matchedCount"  => matched,
+      "modifiedCount" => result.try(&.n_modified) || 0,
+      "upsertedCount" => upserted_count,
+      "upsertedId"    => upserted.try(&.first?).try(&._id),
+    }
   end
 
   private def execute_start_transaction(args, target)
-    rc = args.try(&.["readConcern"]?).try { |v| Mongo::ReadConcern.from_bson(BSON.from_json(v.to_json)) }
-    wc = args.try(&.["writeConcern"]?).try { |v| Mongo::WriteConcern.from_bson(BSON.from_json(v.to_json)) }
-    rp = args.try(&.["readPreference"]?).try { |v| Mongo::ReadPreference.from_bson(BSON.from_json(v.to_json)) }
+    rc = args.try(&.["readConcern"]?).try { |v| Parse.read_concern(v) }
+    wc = args.try(&.["writeConcern"]?).try { |v| Parse.write_concern(v) }
+    rp = args.try(&.["readPreference"]?).try { |v| Parse.read_preference(v) }
     max_commit_time_ms = args.try(&.["maxCommitTimeMS"]?).try(&.as_i64)
 
     if target && target.is_a?(Mongo::Session::ClientSession)
@@ -557,14 +632,14 @@ module Mongo::Unified::Operations
 
   private def execute_commit_transaction(args, target)
     if target && target.is_a?(Mongo::Session::ClientSession)
-      wc = args.try(&.["writeConcern"]?).try { |v| Mongo::WriteConcern.from_bson(BSON.from_json(v.to_json)) }
+      wc = args.try(&.["writeConcern"]?).try { |v| Parse.write_concern(v) }
       target.commit_transaction(write_concern: wc)
     end
   end
 
   private def execute_abort_transaction(args, target)
     if target && target.is_a?(Mongo::Session::ClientSession)
-      wc = args.try(&.["writeConcern"]?).try { |v| Mongo::WriteConcern.from_bson(BSON.from_json(v.to_json)) }
+      wc = args.try(&.["writeConcern"]?).try { |v| Parse.write_concern(v) }
       target.abort_transaction(write_concern: wc)
     end
   end
@@ -577,9 +652,9 @@ module Mongo::Unified::Operations
 
   private def execute_with_transaction(args, target, registry, internal_client, runner)
     if args && (callback_ops = args["callback"]?.try(&.as_a))
-      rc = args["readConcern"]?.try { |v| Mongo::ReadConcern.from_bson(BSON.from_json(v.to_json)) }
-      wc = args["writeConcern"]?.try { |v| Mongo::WriteConcern.from_bson(BSON.from_json(v.to_json)) }
-      rp = args["readPreference"]?.try { |v| Mongo::ReadPreference.from_bson(BSON.from_json(v.to_json)) }
+      rc = args["readConcern"]?.try { |v| Parse.read_concern(v) }
+      wc = args["writeConcern"]?.try { |v| Parse.write_concern(v) }
+      rp = args["readPreference"]?.try { |v| Parse.read_preference(v) }
       max_commit_time_ms = args["maxCommitTimeMS"]?.try(&.as_i64)
 
       if target && target.is_a?(Mongo::Session::ClientSession)
@@ -591,7 +666,7 @@ module Mongo::Unified::Operations
         ) do
           callback_ops.each do |cb_op|
             op_obj = Operation.from_json(cb_op.to_json)
-            execute(op_obj, registry, internal_client, runner)
+            execute(op_obj, registry, internal_client, runner, raise_operation_errors: true)
           end
         end
       end

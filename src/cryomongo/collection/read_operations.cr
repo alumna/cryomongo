@@ -11,25 +11,32 @@ class Mongo::Collection
     bypass_document_validation : Bool? = nil,
     collation : Collation? = nil,
     hint : (String | H)? = nil,
-    comment : String? = nil,
+    comment = nil,
     read_concern : ReadConcern? = nil,
     write_concern : WriteConcern? = nil,
     read_preference : ReadPreference? = nil,
     session : Session::ClientSession? = nil,
   ) : Mongo::Cursor? forall H
+    hint_value = if hint.nil?
+                   nil
+                 elsif hint.is_a?(String)
+                   hint
+                 else
+                   BSON.new(hint)
+                 end
     self.command(Commands::Aggregate, pipeline: pipeline, session: session, options: {
       allow_disk_use:             allow_disk_use,
       cursor:                     batch_size.try { {batchSize: batch_size} },
       bypass_document_validation: bypass_document_validation,
       collation:                  collation,
-      hint:                       hint.is_a?(String) ? hint : BSON.new(hint),
+      hint:                       hint_value,
       comment:                    comment,
       max_time_ms:                max_time_ms,
       read_concern:               read_concern,
       write_concern:              write_concern,
       read_preference:            read_preference,
-    }) { |result|
-      Cursor.new(@database.client, result, batch_size: batch_size, session: session)
+    }) { |result, cmd_session|
+      bind_cursor(Cursor.new(@database.client, result, batch_size: batch_size, session: cmd_session, comment: comment), cmd_session)
     }
   end
 
@@ -47,37 +54,64 @@ class Mongo::Collection
     hint : (String | H)? = nil,
     max_time_ms : Int64? = nil,
     read_preference : ReadPreference? = nil,
+    comment = nil,
     session : Session::ClientSession? = nil,
-  ) : Int32 forall H
+  ) : Int64 forall H
     pipeline = !filter || filter.empty? ? [BSON.new({"$match": BSON.new})] : [BSON.new({"$match": BSON.new(filter)})]
     skip.try { pipeline << BSON.new({"$skip": skip}) }
     limit.try { pipeline << BSON.new({"$limit": limit}) }
     pipeline << BSON.new({"$group": {"_id": 1, "n": {"$sum": 1}}})
+    hint_value = if hint.nil?
+                   nil
+                 elsif hint.is_a?(String)
+                   hint
+                 else
+                   BSON.new(hint)
+                 end
     cursor = self.command(Commands::Aggregate, pipeline: pipeline, session: session, options: {
       collation:       collation,
-      hint:            hint.is_a?(String) ? hint : BSON.new(hint),
+      hint:            hint_value,
       max_time_ms:     max_time_ms,
       read_preference: read_preference,
-    }) { |result|
-      Cursor.new(@database.client, result, limit: limit, session: session)
+      comment:         comment,
+    }) { |result, cmd_session|
+      bind_cursor(Cursor.new(@database.client, result, limit: limit, session: cmd_session), cmd_session)
     }
-    if (item = cursor.try(&.next)).is_a? BSON
-      item["n"].as(Int32)
-    else
-      0
+    begin
+      if (item = cursor.try(&.next)).is_a? BSON
+        bson_count(item["n"])
+      else
+        0_i64
+      end
+    ensure
+      cursor.try(&.close)
     end
   end
 
   # Gets an estimate of the count of documents in a collection using collection metadata.
   #
   # See: [the specification document](https://github.com/mongodb/specifications/blob/master/source/crud/crud.rst#count-api-details).
-  def estimated_document_count(*, max_time_ms : Int64? = nil, read_preference : ReadPreference? = nil, session : Session::ClientSession? = nil) : Int32
+  def estimated_document_count(*, max_time_ms : Int64? = nil, read_preference : ReadPreference? = nil, comment = nil, session : Session::ClientSession? = nil) : Int64
     result = self.command(Commands::Count, session: session, options: {
       max_time_ms:     max_time_ms,
       read_preference: read_preference,
+      comment:         comment,
     })
     raise Mongo::Error.new("Command failed to return a result") unless result
-    result["n"].as(Int32)
+    bson_count(result["n"])
+  end
+
+  private def bson_count(value) : Int64
+    case value
+    when Int32
+      value.to_i64
+    when Int64
+      value
+    when Float64
+      value.to_i64
+    else
+      0_i64
+    end
   end
 
   # Finds the distinct values for a specified field across a single collection.
@@ -93,13 +127,24 @@ class Mongo::Collection
     read_concern : ReadConcern? = nil,
     collation : Collation? = nil,
     read_preference : ReadPreference? = nil,
+    hint : (String | H)? = nil,
+    comment = nil,
     session : Session::ClientSession? = nil,
-  ) : Array
+  ) : Array forall H
+    hint_value = if hint.nil?
+                   nil
+                 elsif hint.is_a?(String)
+                   hint
+                 else
+                   BSON.new(hint)
+                 end
     result = self.command(Commands::Distinct, key: key, session: session, options: {
       query:           filter,
       read_concern:    read_concern,
       collation:       collation,
       read_preference: read_preference,
+      hint:            hint_value,
+      comment:         comment,
     })
     raise Mongo::Error.new("Command failed to return a result") unless result
     result.values.each.map(&.[1]).to_a
@@ -119,7 +164,7 @@ class Mongo::Collection
     limit : Int32? = nil,
     batch_size : Int32? = nil,
     single_batch : Bool? = nil,
-    comment : String? = nil,
+    comment = nil,
     max_time_ms : Int64? = nil,
     read_concern : ReadConcern? = nil,
     max = nil,
@@ -136,13 +181,19 @@ class Mongo::Collection
     read_preference : ReadPreference? = nil,
     session : Session::ClientSession? = nil,
   ) : Mongo::Cursor forall H
+    sent_batch_size = batch_size
+    if (bs = batch_size) && (lim = limit) && bs == lim && bs >= 0
+      # CRUD spec: when batchSize == limit, send limit+1 so the server closes the cursor.
+      sent_batch_size = bs + 1
+    end
+
     result = self.command(Commands::Find, filter: filter, session: session, options: {
       sort:                  sort.try { BSON.new(sort) },
       projection:            projection.try { BSON.new(projection) },
-      hint:                  hint.is_a?(String) ? hint : BSON.new(hint),
+      hint:                  hint.nil? ? nil : (hint.is_a?(String) ? hint : BSON.new(hint)),
       skip:                  skip,
       limit:                 limit,
-      batch_size:            batch_size,
+      batch_size:            sent_batch_size,
       single_batch:          single_batch,
       comment:               comment,
       max_time_ms:           max_time_ms,
@@ -159,16 +210,17 @@ class Mongo::Collection
       allow_disk_use:        allow_disk_use,
       collation:             collation,
       read_preference:       read_preference,
-    }) { |result|
-      Cursor.new(
+    }) { |result, cmd_session|
+      bind_cursor(Cursor.new(
         @database.client,
         result,
         await_time_ms: tailable && await_data ? max_time_ms : nil,
         tailable: tailable || false,
         batch_size: batch_size,
         limit: limit,
-        session: session
-      )
+        session: cmd_session,
+        comment: comment
+      ), cmd_session)
     }
     raise Mongo::Error.new("Command failed to return a result") unless result
     result
@@ -184,7 +236,7 @@ class Mongo::Collection
     projection = nil,
     hint : (String | H)? = nil,
     skip : Int32? = nil,
-    comment : String? = nil,
+    comment = nil,
     max_time_ms : Int64? = nil,
     read_concern : ReadConcern? = nil,
     max = nil,
@@ -202,12 +254,9 @@ class Mongo::Collection
       filter: filter,
       limit: 1,
       single_batch: true,
-      batch_size: 1,
-      tailable: false,
-      await_data: false,
       sort: sort.try { BSON.new(sort) },
       projection: projection.try { BSON.new(projection) },
-      hint: hint.is_a?(String) ? hint : BSON.new(hint),
+      hint: hint,
       skip: skip,
       comment: comment,
       max_time_ms: max_time_ms,
@@ -224,6 +273,7 @@ class Mongo::Collection
       session: session
     )
     element = cursor.try &.next
+    cursor.try &.close
     return element if element.is_a? BSON
     nil
   end

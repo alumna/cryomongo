@@ -2,16 +2,19 @@ class Mongo::Collection
   private def check_find_and_modify_result!(result)
     return nil if result.nil?
 
-    if last_error_object = result["last_error_object"]?
+    if last_error_object = result["lastErrorObject"]? || result["last_error_object"]?
       last_error_object = last_error_object.as(BSON)
-      code = last_error_object["code"]?
-      code_name = last_error_object["codeName"]?.try &.as(String)
-      msg = last_error_object["errmsg"]?.try &.as(String)
-      labels = last_error_object["errorLabels"]?.try { |l|
-        Array(String).from_bson(l)
-      } || [] of String
-      details = last_error_object["errInfo"]?.try &.as(BSON)
-      raise Mongo::Error::Command.new(code, code_name, msg, details, error_labels: Set(String).new(labels))
+      # Success replies still include lastErrorObject ({n, updatedExisting}).
+      if last_error_object["errmsg"]? || last_error_object["code"]?
+        code = last_error_object["code"]?
+        code_name = last_error_object["codeName"]?.try &.as(String)
+        msg = last_error_object["errmsg"]?.try &.as(String)
+        labels = last_error_object["errorLabels"]?.try { |l|
+          Array(String).from_bson(l)
+        } || [] of String
+        details = last_error_object["errInfo"]?.try(&.as(BSON))
+        raise Mongo::Error::Command.new(code, code_name, msg, details, error_labels: Set(String).new(labels))
+      end
     end
 
     result["value"]?.try &.as(BSON)
@@ -30,6 +33,7 @@ class Mongo::Collection
     collation : Collation? = nil,
     hint : (String | H)? = nil,
     max_time_ms : Int64? = nil,
+    comment = nil,
     session : Session::ClientSession? = nil,
   ) : BSON? forall H
     result = self.command(Commands::FindAndModify, filter: filter, session: session, options: {
@@ -41,6 +45,7 @@ class Mongo::Collection
       collation:                  collation,
       hint:                       hint,
       max_time_ms:                max_time_ms,
+      comment:                    comment,
     })
     check_find_and_modify_result!(result)
   end
@@ -63,6 +68,7 @@ class Mongo::Collection
     array_filters = nil,
     hint : (String | H)? = nil,
     max_time_ms : Int64? = nil,
+    comment = nil,
     session : Session::ClientSession? = nil,
   ) : BSON? forall H
     replacement = self.class.validate_replacement!(replacement)
@@ -78,6 +84,7 @@ class Mongo::Collection
       array_filters:              array_filters,
       hint:                       hint,
       max_time_ms:                max_time_ms,
+      comment:                    comment,
     })
     check_find_and_modify_result!(result)
   end
@@ -100,6 +107,7 @@ class Mongo::Collection
     array_filters = nil,
     hint : (String | H)? = nil,
     max_time_ms : Int64? = nil,
+    comment = nil,
     session : Session::ClientSession? = nil,
   ) : BSON? forall H
     update = self.class.validate_update!(update)
@@ -115,6 +123,7 @@ class Mongo::Collection
       array_filters:              array_filters,
       hint:                       hint,
       max_time_ms:                max_time_ms,
+      comment:                    comment,
     })
     check_find_and_modify_result!(result)
   end

@@ -14,6 +14,8 @@ class Mongo::Connection::Pool(T)
   @max_idle_pool_size : Int32
   # seconds to wait before timeout while doing a checkout
   @checkout_timeout : Float64
+  # close an idle connection after this time (maxIdleTimeMS)
+  @max_idle_time : Time::Span?
 
   # Pool state
 
@@ -25,6 +27,8 @@ class Mongo::Connection::Pool(T)
   @inflight : Int32
   # indicates if the pool has been cleared
   @closed : Bool = false
+  # last time each idle connection was released (keyed by socket object_id)
+  @idle_since = Hash(UInt64, Time::Instant).new
 
   # Sync state
 
@@ -34,6 +38,7 @@ class Mongo::Connection::Pool(T)
   @mutex : Sync::Mutex
 
   def initialize(@initial_pool_size = 1, @max_pool_size = 0, @max_idle_pool_size = 1, @checkout_timeout = 5.0,
+                 @max_idle_time : Time::Span? = nil,
                  &@factory : -> T)
     @availability_channel = Channel(Nil).new
     @inflight = 0
@@ -50,6 +55,7 @@ class Mongo::Connection::Pool(T)
       @total.each &.close
       @total.clear
       @idle.clear
+      @idle_since.clear
     end
   end
 
@@ -92,9 +98,17 @@ class Mongo::Connection::Pool(T)
                    else
                      pick_available
                    end
+
+        if resource && idle_too_long?(resource)
+          discard(resource)
+          resource = nil
+        end
       end
 
-      @idle.delete resource
+      if resource
+        @idle.delete resource
+        forget_idle_time(resource)
+      end
 
       resource
     end
@@ -127,7 +141,12 @@ class Mongo::Connection::Pool(T)
       candidates.each do |ref|
         resource = ref.value
         if resource && is_available?(resource)
+          if idle_too_long?(resource)
+            discard(resource)
+            next
+          end
           @idle.delete resource
+          forget_idle_time(resource)
           resource.before_checkout
           return {resource, true}
         end
@@ -143,11 +162,13 @@ class Mongo::Connection::Pool(T)
       if @closed
         resource.close
         @total.delete(resource)
+        forget_idle_time(resource)
         return
       end
 
       if can_increase_idle_pool
         @idle << resource
+        mark_idle(resource)
         if resource.responds_to?(:after_release)
           resource.after_release
         end
@@ -160,6 +181,7 @@ class Mongo::Connection::Pool(T)
       else
         resource.close
         @total.delete(resource)
+        forget_idle_time(resource)
       end
     end
   end
@@ -182,13 +204,45 @@ class Mongo::Connection::Pool(T)
   def delete(resource : T)
     @total.delete(resource)
     @idle.delete(resource)
+    forget_idle_time(resource)
   end
 
   private def build_resource : T
     resource = @factory.call
     @total << resource
     @idle << resource
+    mark_idle(resource)
     resource
+  end
+
+  # Connection is a struct. The socket object is the stable identity.
+  private def idle_key(resource : T) : UInt64
+    resource.socket.object_id
+  end
+
+  private def mark_idle(resource : T)
+    @idle_since[idle_key(resource)] = Time.instant
+  end
+
+  private def forget_idle_time(resource : T)
+    @idle_since.delete(idle_key(resource))
+  end
+
+  private def idle_too_long?(resource : T) : Bool
+    max = @max_idle_time
+    return false unless max
+    if since = @idle_since[idle_key(resource)]?
+      since.elapsed > max
+    else
+      false
+    end
+  end
+
+  private def discard(resource : T)
+    @idle.delete(resource)
+    @total.delete(resource)
+    forget_idle_time(resource)
+    resource.close
   end
 
   private def can_increase_pool?

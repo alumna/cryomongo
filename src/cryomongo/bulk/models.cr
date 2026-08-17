@@ -44,8 +44,9 @@ class Mongo::Bulk
     getter collation : Collation?
     getter hint : (String | BSON)?
     getter upsert : Bool?
+    getter sort : BSON?
 
-    def initialize(filter, replacement, @collation = nil, @hint = nil, @upsert = nil)
+    def initialize(filter, replacement, @collation = nil, @hint = nil, @upsert = nil, @sort = nil)
       @filter = BSON.new(filter)
       @replacement = BSON.new(replacement)
     end
@@ -59,8 +60,9 @@ class Mongo::Bulk
     getter collation : Collation?
     getter hint : (String | BSON)?
     getter upsert : Bool?
+    getter sort : BSON?
 
-    def initialize(filter, update, @array_filters = nil, @collation = nil, @hint = nil, @upsert = nil)
+    def initialize(filter, update, @array_filters = nil, @collation = nil, @hint = nil, @upsert = nil, @sort = nil)
       @filter = BSON.new(filter)
       @update = update
     end

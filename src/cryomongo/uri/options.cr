@@ -49,8 +49,11 @@ struct Mongo::Options
   getter retry_writes : Bool? = true
   # A timeout in milliseconds to block for server selection before raising an error
   property server_selection_timeout : Time::Span = 30.seconds
-  # Scan the topology only once after a server selection failure instead of repeatedly until the server selection times out
-  property server_selection_try_once : Bool = true
+  # Scan the topology only once after a server selection failure instead of repeatedly until the server selection times out.
+  # Default is false (multi-threaded / concurrent clients). Crystal fibers are concurrent.
+  property server_selection_try_once : Bool = false
+  # Connect as a load-balanced deployment. Typed so callers do not have to read `raw`.
+  getter load_balanced : Bool? = nil
   # Amount of time spent attempting to send or receive on a socket before timing out; note that this only applies to application operations, not SDAM
   getter socket_timeout : Time::Span? = nil
   # Alias of "tls"; required to ensure that Atlas connection strings continue to work
@@ -121,10 +124,14 @@ struct Mongo::Options
             unless @{{ivar.name.id}} != {{default_value}}
               begin
                 {% if types.includes?(Bool) %}
-                  if option == "true"
+                  # Spec: boolean URI values are case-insensitive. Other values are errors.
+                  downcased = option.downcase
+                  if downcased == "true"
                     @{{ivar.name.id}} = true
-                  elsif option == "false"
+                  elsif downcased == "false"
                     @{{ivar.name.id}} = false
+                  else
+                    raise Mongo::Error.new("Option '#{{{option_name}}}' has invalid boolean value: '#{option}'")
                   end
                 {% elsif types.includes?(Int32) && types.includes?(String) %}
                   # Fix: Gracefully handles 'w' which can be either Int32 (e.g. 1) or String (e.g. "majority")

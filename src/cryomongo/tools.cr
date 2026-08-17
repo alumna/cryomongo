@@ -25,14 +25,13 @@ module Mongo::Tools
       def initialize(**args)
         {% for ivar in @type.instance_vars %}
           {% default_value = ivar.default_value %}
-          {% if ivar.type.nilable? %}
-            @{{ivar.id}} = args["{{ivar.id}}"]? {% if ivar.has_default_value? %}|| {{ default_value }}{% end %}
+          {% if ivar.has_default_value? %}
+            %value{ivar} = args["{{ivar.id}}"]?
+            @{{ivar.id}} = %value{ivar}.nil? ? {{ default_value }} : %value{ivar}
+          {% elsif ivar.type.nilable? %}
+            @{{ivar.id}} = args["{{ivar.id}}"]?
           {% else %}
-            {% if ivar.has_default_value? %}
-              @{{ivar.id}} = args["{{ivar.id}}"]? || {{ default_value }}
-            {% else %}
-              @{{ivar.id}} = args["{{ivar.id}}"]
-            {% end %}
+            @{{ivar.id}} = args["{{ivar.id}}"]
           {% end %}
         {% end %}
       end

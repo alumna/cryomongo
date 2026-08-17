@@ -53,8 +53,8 @@ class Mongo::Collection
       read_concern: read_concern || @read_concern,
       read_preference: read_preference || @read_preference,
       session: session
-    ) { |result|
-      yield result
+    ) { |result, cmd_session|
+      yield result, cmd_session
     }
   end
 
@@ -75,6 +75,11 @@ class Mongo::Collection
       read_preference: read_preference,
       session: session,
     ) { |result| result }
+  end
+
+  # :nodoc:
+  protected def bind_cursor(cursor : Cursor, session : Session::ClientSession?) : Cursor
+    cursor.bind(session)
   end
 
   # Returns a `ChangeStream::Cursor` watching a specific collection.

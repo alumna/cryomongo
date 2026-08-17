@@ -35,8 +35,13 @@ module Mongo::Session
     getter transitions_from : TransactionState? = nil
     # Options for the current transaction.
     getter current_transaction_options = TransactionOptions.new
+    # True until the first command of the current transaction is assembled (readConcern belongs there).
+    property? apply_transaction_read_concern : Bool = false
     # Server description if the session is pinned to a specific mongos.
     getter server_description : SDAM::ServerDescription? = nil
+    # Server that executed the most recent command. Used to pin cursors; not the same as transaction mongos pin.
+    # :nodoc:
+    property last_operation_server : SDAM::ServerDescription? = nil
     # The recoveryToken field enables the driver to recover a sharded transaction's outcome on a new mongos when the original mongos is no longer available.
     property recovery_token : BSON? = nil
 
@@ -84,6 +89,9 @@ module Mongo::Session
 
       state_transition(:start) {
         increment_txn_number
+        @apply_transaction_read_concern = true
+        # A previous empty start+commit must not skip commitTransaction on this attempt.
+        @empty_commit = false
         self.unpin
       }
     end
@@ -211,7 +219,7 @@ module Mongo::Session
           Commands::CommitTransaction,
           session: self,
           options: {
-            write_concern:  write_concern,
+            write_concern:  write_concern || current_transaction_options.write_concern,
             max_time_ms:    current_transaction_options.max_commit_time_ms,
             recovery_token: recovery_token,
           }
@@ -240,7 +248,7 @@ module Mongo::Session
           Commands::AbortTransaction,
           session: self,
           options: {
-            write_concern:  write_concern,
+            write_concern:  write_concern || current_transaction_options.write_concern,
             recovery_token: recovery_token,
           }
         ) unless @transitions_from.try &.starting?

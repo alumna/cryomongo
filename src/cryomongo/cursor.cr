@@ -18,8 +18,12 @@ class Mongo::Cursor
   @database : String
   @collection : Collection::CollectionKey
   @tailable : Bool = false
-  @counter : Int32
+  # Documents already returned to the caller. Used to honor `limit`.
+  @yielded : Int32 = 0
+  # Index into @batch. Avoid Array#shift? (O(n) per document).
+  @batch_index : Int32 = 0
   @limit : Int32? = nil
+  @comment : BSON::Value? = nil
 
   protected property server_description : SDAM::ServerDescription? = nil
   protected property session : Session::ClientSession?
@@ -35,8 +39,8 @@ class Mongo::Cursor
     @await_time_ms : Int64? = nil,
     @tailable : Bool = false,
     @session : Session::ClientSession? = nil,
+    @comment = nil,
   )
-    @counter = @batch.size
     @database, @collection = namespace.split(".", 2)
   end
 
@@ -49,63 +53,136 @@ class Mongo::Cursor
     @await_time_ms : Int64? = nil,
     @tailable : Bool = false,
     @session : Session::ClientSession? = nil,
+    @comment = nil,
   )
     @cursor_id = result.cursor.id
     @batch = result.cursor.first_batch
-    @counter = @batch.size
     @database, @collection = result.cursor.ns.split(".", 2)
   end
 
+  # Copy the session and originating server onto this cursor.
+  # getMore and killCursors must use the same lsid and the same server.
+  protected def bind(session : Session::ClientSession?) : self
+    @session = session
+    @server_description = session.try(&.last_operation_server)
+    self
+  end
+
+  # The server has closed the cursor, or the caller has already received `limit` documents.
+  # An open cursor with leftover documents still needs killCursors.
   # :nodoc:
   def exhausted?
-    @cursor_id == 0 || @limit.try { |limit| limit <= @counter }
+    @cursor_id == 0
   end
 
   def next
-    element = @batch.shift?
+    loop do
+      if (limit = @limit) && @yielded >= limit
+        return Iterator::Stop::INSTANCE
+      end
 
-    if @tailable && !element
+      if element = next_from_batch
+        @yielded += 1
+        return element
+      end
+
+      # Tailable / awaitData / change streams stay open on an empty getMore.
+      # Only a closed cursor (id 0) means the iteration is over.
+      return Iterator::Stop::INSTANCE if @cursor_id == 0
+
       fetch_more
-      element = @batch.shift?
+
+      # Non-tailable: an empty getMore means the result is exhausted.
+      # Tailable / change streams stay open and wait again.
+      if !@tailable && batch_empty?
+        return Iterator::Stop::INSTANCE
+      end
+    end
+  end
+
+  # One getMore at most. Returns `nil` when the batch is empty and the cursor is
+  # still open (normal for tailable and change-stream cursors).
+  def try_next : BSON?
+    return nil if (limit = @limit) && @yielded >= limit
+
+    if element = next_from_batch
+      @yielded += 1
+      return element
     end
 
-    return element if element
+    return nil if @cursor_id == 0
 
-    if @cursor_id == 0 || (@tailable && !element)
-      Iterator::Stop::INSTANCE
-    else
-      fetch_more
-      self.next
+    fetch_more
+
+    if element = next_from_batch
+      @yielded += 1
+      return element
     end
+
+    nil
   end
 
   # Close the cursor and frees underlying resources.
   def close
     unless exhausted?
-      if (session = @session) && session.implicit?
-        session.end
-      end
       self.kill
     end
   rescue e
     # Ignore - client might be dead
+  ensure
+    end_implicit_session
   end
 
-  private def kill
+  # Kill the cursor on the pinned server only. Errors are ignored (resume path).
+  protected def kill_quietly
+    return if @cursor_id == 0
+    self.kill
+  rescue
+    @cursor_id = 0_i64
+    @batch = [] of BSON
+    @batch_index = 0
+  end
+
+  private def next_from_batch : BSON?
+    return nil if @batch_index >= @batch.size
+    element = @batch[@batch_index]
+    @batch_index += 1
+    element
+  end
+
+  private def batch_empty? : Bool
+    @batch_index >= @batch.size
+  end
+
+  # True after the caller has taken the last document in the current batch.
+  # Change streams use this for the last-document PBRT rule.
+  protected def batch_consumed? : Bool
+    @batch_index >= @batch.size
+  end
+
+  protected def kill
+    return if @cursor_id == 0
     @client.command(
       Commands::KillCursors,
       database: @database,
       collection: @collection,
       cursor_ids: [@cursor_id],
-      server_description: @server_description
+      server_description: @server_description,
+      session: @session
     )
     @cursor_id = 0_i64
+  end
+
+  protected def end_implicit_session
+    if (session = @session) && session.implicit?
+      session.end
+    end
   end
 
   protected def fetch_more
     return if @cursor_id == 0
 
-    batch_size = @limit.try { |limit| Math.max(limit - @counter, 1) } || @batch_size
+    batch_size = next_batch_size
 
     reply = @client.command(
       Commands::GetMore,
@@ -114,6 +191,7 @@ class Mongo::Cursor
       cursor_id: @cursor_id,
       batch_size: batch_size,
       max_time_ms: @await_time_ms,
+      comment: @comment,
       server_description: @server_description,
       session: @session
     )
@@ -122,13 +200,30 @@ class Mongo::Cursor
 
     @cursor_id = reply.cursor.id
     @batch = reply.cursor.next_batch
-    @counter += @batch.size
+    @batch_index = 0
 
     if (session = @session) && exhausted? && session.implicit?
       session.end
     end
 
     reply
+  end
+
+  # Prefer the original batchSize. 0 means "default" (omit on getMore).
+  # When a limit remains, never ask for more documents than the caller still wants.
+  private def next_batch_size : Int32?
+    if (limit = @limit)
+      remaining = limit - @yielded
+      return nil if remaining <= 0
+      if (bs = @batch_size) && bs > 0 && bs < remaining
+        bs
+      else
+        remaining
+      end
+    else
+      bs = @batch_size
+      (bs && bs > 0) ? bs : nil
+    end
   end
 
   # Will convert the elements to the `T` type while iterating the `Cursor`.
@@ -149,7 +244,8 @@ class Mongo::Cursor
     {% end %}
   end
 
-  # Clean up the underlying resource when garbage collected.
+  # Last-resort cleanup. finalize can run on a GC thread and must not be
+  # the only way to send killCursors. Call `#close` (or iterate to the end).
   def finalize
     close
   end

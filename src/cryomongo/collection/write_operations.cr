@@ -4,10 +4,10 @@ class Mongo::Collection
   # An error will be raised if the *requests* parameter is empty.
   #
   # NOTE: [for more details, please check the official specifications document](https://github.com/mongodb/specifications/blob/master/source/driver-bulk-update.rst).
-  def bulk_write(requests : Array(Bulk::WriteModel), *, ordered : Bool, bypass_document_validation : Bool? = nil, session : Session::ClientSession? = nil) : Bulk::WriteResult
+  def bulk_write(requests : Array(Bulk::WriteModel), *, ordered : Bool, bypass_document_validation : Bool? = nil, comment = nil, session : Session::ClientSession? = nil) : Bulk::WriteResult
     raise Mongo::Bulk::Error.new "Tried to execute an empty bulk" unless requests.size > 0
     bulk = Mongo::Bulk.new(self, ordered, requests, session: session)
-    bulk.execute(bypass_document_validation: bypass_document_validation)
+    bulk.execute(bypass_document_validation: bypass_document_validation, comment: comment)
   end
 
   # Create a `Mongo::Bulk` instance.
@@ -18,12 +18,18 @@ class Mongo::Collection
   # Inserts the provided document. If the document is missing an identifier, it will be generated.
   #
   # NOTE: [for more details, please check the official documentation](https://docs.mongodb.com/manual/reference/command/insert/).
-  def insert_one(document, *, write_concern : WriteConcern? = nil, bypass_document_validation : Bool? = nil, session : Session::ClientSession? = nil) : Commands::Common::InsertResult?
-    self.command(Commands::Insert, documents: [document], session: session, options: {
+  def insert_one(document, *, write_concern : WriteConcern? = nil, bypass_document_validation : Bool? = nil, comment = nil, session : Session::ClientSession? = nil) : Commands::Common::InsertResult?
+    docs = Commands::Insert.with_ids([document])
+    result = self.command(Commands::Insert, documents: docs, session: session, options: {
       write_concern:              write_concern,
       bypass_document_validation: bypass_document_validation,
       ordered:                    true,
+      comment:                    comment,
     })
+    result.try { |r|
+      r.inserted_ids = docs.map { |doc| doc["_id"] }
+      r
+    }
   end
 
   # Inserts the provided document. If any documents are missing an identifier, they will be generated.
@@ -32,17 +38,24 @@ class Mongo::Collection
   def insert_many(
     documents : Array,
     *,
-    ordered : Bool? = nil,
+    ordered : Bool? = true,
     write_concern : WriteConcern? = nil,
     bypass_document_validation : Bool? = nil,
+    comment = nil,
     session : Session::ClientSession? = nil,
   ) : Commands::Common::InsertResult?
     raise Mongo::Error.new "Tried to insert an empty document array" unless documents.size > 0
-    self.command(Commands::Insert, documents: documents, session: session, options: {
+    docs = Commands::Insert.with_ids(documents)
+    result = self.command(Commands::Insert, documents: docs, session: session, options: {
       ordered:                    ordered,
       write_concern:              write_concern,
       bypass_document_validation: bypass_document_validation,
+      comment:                    comment,
     })
+    result.try { |r|
+      r.inserted_ids = docs.map { |doc| doc["_id"] }
+      r
+    }
   end
 
   # Deletes one document.
@@ -53,8 +66,9 @@ class Mongo::Collection
     *,
     collation : Collation? = nil,
     hint : (String | H)? = nil,
-    ordered : Bool? = nil,
+    ordered : Bool? = true,
     write_concern : WriteConcern? = nil,
+    comment = nil,
     session : Session::ClientSession? = nil,
   ) : Commands::Common::DeleteResult? forall H
     delete = Tools.merge_bson({
@@ -67,6 +81,7 @@ class Mongo::Collection
     self.command(Commands::Delete, deletes: [delete], session: session, options: {
       ordered:       ordered,
       write_concern: write_concern,
+      comment:       comment,
     })
   end
 
@@ -78,8 +93,9 @@ class Mongo::Collection
     *,
     collation : Collation? = nil,
     hint : (String | H)? = nil,
-    ordered : Bool? = nil,
+    ordered : Bool? = true,
     write_concern : WriteConcern? = nil,
+    comment = nil,
     session : Session::ClientSession? = nil,
   ) : Commands::Common::DeleteResult? forall H
     delete = Tools.merge_bson({
@@ -92,6 +108,7 @@ class Mongo::Collection
     self.command(Commands::Delete, deletes: [delete], session: session, options: {
       ordered:       ordered,
       write_concern: write_concern,
+      comment:       comment,
     })
   end
 
@@ -132,9 +149,11 @@ class Mongo::Collection
     upsert : Bool = false,
     collation : Collation? = nil,
     hint : (String | H)? = nil,
-    ordered : Bool? = nil,
+    ordered : Bool? = true,
     write_concern : WriteConcern? = nil,
     bypass_document_validation : Bool? = nil,
+    comment = nil,
+    sort = nil,
     session : Session::ClientSession? = nil,
   ) : Commands::Common::UpdateResult? forall H
     updates = [
@@ -146,12 +165,14 @@ class Mongo::Collection
       }, {
         collation: collation,
         hint:      hint,
+        sort:      sort,
       }),
     ]
     self.command(Commands::Update, updates: updates, session: session, options: {
       ordered:                    ordered,
       write_concern:              write_concern,
       bypass_document_validation: bypass_document_validation,
+      comment:                    comment,
     })
   end
 
@@ -166,9 +187,11 @@ class Mongo::Collection
     array_filters = nil,
     collation : Collation? = nil,
     hint : (String | H)? = nil,
-    ordered : Bool? = nil,
+    ordered : Bool? = true,
     write_concern : WriteConcern? = nil,
     bypass_document_validation : Bool? = nil,
+    comment = nil,
+    sort = nil,
     session : Session::ClientSession? = nil,
   ) : Commands::Common::UpdateResult? forall H
     updates = [
@@ -181,12 +204,14 @@ class Mongo::Collection
         array_filters: array_filters,
         collation:     collation,
         hint:          hint,
+        sort:          sort,
       }),
     ]
     self.command(Commands::Update, updates: updates, session: session, options: {
       ordered:                    ordered,
       write_concern:              write_concern,
       bypass_document_validation: bypass_document_validation,
+      comment:                    comment,
     })
   end
 
@@ -201,9 +226,10 @@ class Mongo::Collection
     array_filters = nil,
     collation : Collation? = nil,
     hint : (String | H)? = nil,
-    ordered : Bool? = nil,
+    ordered : Bool? = true,
     write_concern : WriteConcern? = nil,
     bypass_document_validation : Bool? = nil,
+    comment = nil,
     session : Session::ClientSession? = nil,
   ) : Commands::Common::UpdateResult? forall H
     updates = [
@@ -222,6 +248,7 @@ class Mongo::Collection
       ordered:                    ordered,
       write_concern:              write_concern,
       bypass_document_validation: bypass_document_validation,
+      comment:                    comment,
     })
   end
 end

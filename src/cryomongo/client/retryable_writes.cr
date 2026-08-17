@@ -6,6 +6,7 @@ class Mongo::Client
     read_preference : ReadPreference,
     server_description : SDAM::ServerDescription? = nil,
     operation_id : Int64? = nil,
+    end_implicit_session : Bool = true,
     **args,
   )
     server_description ||= server_selection(command, args, read_preference)
@@ -13,7 +14,7 @@ class Mongo::Client
     if !topology.supports_sessions? || !server_description.supports_retryable_writes?
       connection = get_connection(server_description)
       session.pin(server_description)
-      return execute_command(command, session, read_preference, server_description, connection, operation_id, **args)
+      return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, **args)
     end
 
     session.increment_txn_number unless session.is_transaction?
@@ -21,7 +22,7 @@ class Mongo::Client
     begin
       connection = get_connection(server_description)
       session.pin(server_description)
-      return execute_command(command, session, read_preference, server_description, connection, operation_id, **args) { |body|
+      return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, **args) { |body|
         if topology.supports_sessions?
           # txnNumber has been added to the body earlier if this is a transaction
           body["txnNumber"] = session.txn_number unless session.is_transaction?
@@ -67,7 +68,7 @@ class Mongo::Client
     end
 
     begin
-      execute_command(command, session, read_preference, server_description, connection, operation_id, **args) { |body|
+      execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, **args) { |body|
         if topology.supports_sessions?
           # txnNumber has been added to the body earlier if this is a transaction
           body["txnNumber"] = session.txn_number unless session.is_transaction?

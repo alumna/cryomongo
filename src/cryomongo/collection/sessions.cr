@@ -3,7 +3,11 @@ class Mongo::Collection
     def initialize(@collection : Collection, @session : Session::ClientSession); end
 
     macro method_missing(call)
-      @collection.{{call.name.id}}({% for arg in call.args %}{{arg}},{% end %}session: @session)
+      @collection.{{call.name.id}}(
+        {% for arg in call.args %}{{arg}},{% end %}
+        {% for narg in call.named_args %}{{narg.name.id}}: {{narg.value}},{% end %}
+        session: @session
+      )
     end
   end
 

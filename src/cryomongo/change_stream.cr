@@ -80,13 +80,22 @@ module Mongo::ChangeStream
       read_preference: ReadPreference?,
       collection: Collection::CollectionKey,
       database: String)
+    # postBatchResumeToken from the current aggregate/getMore batch.
+    @batch_pbrt : BSON? = nil
+    # operationTime saved from an empty first aggregate with no user resume token.
+    @saved_operation_time : BSON::Timestamp? = nil
+    # True after at least one change document has been returned.
+    @seen_document : Bool = false
+    # Timestamp used only while resuming (original aggregate operationTime).
+    @resume_start_at : BSON::Timestamp? = nil
 
     # :nodoc:
     def initialize(@client : Mongo::Client, @session : Session::ClientSession? = nil, @limit : Int32? = nil, **@options)
       @await_time_ms = options["max_time_ms"]?
       @tailable = true
-      @counter = 0
+      @yielded = 0
       @session = @session || Session::ClientSession.new(@client)
+      @resume_token = options["start_after"]? || options["resume_after"]?
 
       @cursor_id = 0
       @batch_size = options["batch_size"]?
@@ -95,11 +104,7 @@ module Mongo::ChangeStream
       @collection = options["collection"]
 
       result = init(**@options)
-      raise Mongo::Error.new("Change stream initialization failed") unless result
-
-      @cursor_id = result.cursor.id
-      @batch = result.cursor.first_batch
-      @database, @collection = result.cursor.ns.split(".", 2)
+      apply_init_result(result)
     end
 
     # Will convert the elements to the `Mongo::ChangeStream::Document(T)` type while iterating the `Cursor`.
@@ -112,42 +117,122 @@ module Mongo::ChangeStream
     end
 
     def next : BSON | Iterator::Stop
-      element = super
-      if element.is_a?(BSON) && @batch.empty?
-        @resume_token ||= element["_id"]?.try &.as(BSON)
+      loop do
+        begin
+          element = super
+          apply_document_token(element) if element.is_a?(BSON)
+          return element
+        rescue e : Mongo::Error
+          raise e unless resumable?(e)
+          resume_after_error
+        end
       end
-      element
-    rescue e : Mongo::Error::Command
-      # see: https://github.com/mongodb/specifications/blob/master/source/change-streams/change-streams.rst#resume-process
-      if e.resumable?
-        self.close
+    end
 
-        result = if resume_token
-                   init(**@options.merge({
-                     resume_after:            resume_token,
-                     start_after:             nil,
-                     start_at_operation_time: nil,
-                   }))
-                 else
-                   init(**@options)
-                 end
-        raise Mongo::Error.new("Change stream resumption failed") unless result
-
-        @cursor_id = result.cursor.id
-        @batch = result.cursor.first_batch
-        @database, @collection = result.cursor.ns.split(".", 2)
-        self.next
-      else
-        raise e
+    # One getMore at most. Does not block waiting for a later change after an
+    # empty batch. Use this to read the latest resume token while idle.
+    def try_next : BSON?
+      loop do
+        begin
+          element = super
+          apply_document_token(element) if element
+          return element
+        rescue e : Mongo::Error
+          raise e unless resumable?(e)
+          resume_after_error
+        end
       end
     end
 
     protected def fetch_more
       reply = super
       if reply
-        @resume_token = reply.cursor.post_batch_resume_token
+        if token = reply.cursor.post_batch_resume_token
+          @batch_pbrt = token
+          # Empty batch: cache PBRT so idle streams can still resume.
+          @resume_token = token if @batch.empty?
+        end
       end
       reply
+    end
+
+    private def apply_init_result(result : Commands::Common::QueryResult?)
+      raise Mongo::Error.new("Change stream initialization failed") unless result
+
+      @cursor_id = result.cursor.id
+      @batch = result.cursor.first_batch
+      @batch_index = 0
+      @database, @collection = result.cursor.ns.split(".", 2)
+      @server_description = @session.try(&.last_operation_server)
+      @batch_pbrt = result.cursor.post_batch_resume_token
+
+      if token = @batch_pbrt
+        @resume_token = token if @batch.empty?
+      elsif @batch.empty? &&
+            @options["start_at_operation_time"]?.nil? &&
+            @options["resume_after"]?.nil? &&
+            @options["start_after"]?.nil?
+        @saved_operation_time = result.operation_time
+      end
+    end
+
+    private def apply_document_token(element : BSON)
+      # After the last document in the batch, prefer the postBatchResumeToken.
+      if batch_consumed? && (pbrt = @batch_pbrt)
+        @resume_token = pbrt
+      elsif token = element["_id"]?.try &.as?(BSON)
+        @resume_token = token
+      else
+        close
+        raise Mongo::Error.new("Cannot provide resume functionality when the resume token is missing")
+      end
+      @seen_document = true
+    end
+
+    # see: https://github.com/mongodb/specifications/blob/master/source/change-streams/change-streams.md#resumable-error
+    private def resumable?(error : Mongo::Error) : Bool
+      # Aggregate errors are not resumable. Only getMore (and client/network) errors are.
+      case error
+      when Error::Command
+        return true if error.code == 43 # CursorNotFound is always resumable
+        wire_version = @server_description.try(&.max_wire_version) || 0
+        if wire_version >= 9
+          error.has_error_label?("ResumableChangeStreamError")
+        else
+          error.resumable?
+        end
+      else
+        # Any non-server error (network, client, server selection) is resumable.
+        !error.is_a?(Error::Server)
+      end
+    end
+
+    private def resume_after_error
+      # Kill only on the pinned server. Never end the session. Spec: same lsid.
+      kill_quietly
+      @server_description = nil
+      @resume_start_at = nil
+
+      result = if token = @resume_token
+                 use_start_after = !@options["start_after"]?.nil? && !@seen_document
+                 init(**@options.merge({
+                   resume_after:            use_start_after ? nil : token,
+                   start_after:             use_start_after ? token : nil,
+                   start_at_operation_time: nil,
+                 }))
+               elsif saved = @saved_operation_time
+                 @resume_start_at = saved
+                 init(**@options.merge({
+                   resume_after:            nil,
+                   start_after:             nil,
+                   start_at_operation_time: nil,
+                 }))
+               else
+                 init(**@options)
+               end
+
+      @resume_start_at = nil
+      apply_init_result(result)
     end
 
     private def init(
@@ -164,14 +249,20 @@ module Mongo::ChangeStream
       collection : Collection::CollectionKey = nil,
       database : String = nil,
     )
+      start_at = @resume_start_at || start_at_operation_time.try { |time|
+        BSON::Timestamp.new(time.to_unix.to_u32, 1_u32)
+      }
+
       full_pipeline = self.make_pipeline(
         pipeline: pipeline,
         full_document: full_document,
         resume_after: resume_after,
         start_after: start_after,
-        start_at_operation_time: start_at_operation_time
+        start_at_operation_time: start_at
       )
 
+      # Aggregate honors cursor.batchSize, not top-level batchSize.
+      # maxAwaitTimeMS belongs on getMore only (@await_time_ms).
       @client.command(
         Commands::Aggregate,
         pipeline: full_pipeline,
@@ -181,9 +272,8 @@ module Mongo::ChangeStream
         read_preference: read_preference,
         session: @session,
         options: {
-          max_time_ms: max_time_ms,
-          batch_size:  batch_size,
-          collation:   collation,
+          cursor:    batch_size.try { {batchSize: batch_size} },
+          collation: collation,
         }
       )
     end
@@ -192,7 +282,7 @@ module Mongo::ChangeStream
       change_stream_stage = Tools.merge_bson(NamedTuple.new, {
         full_document:           full_document,
         resume_after:            resume_after,
-        start_at_operation_time: start_at_operation_time.try { |time| BSON::Timestamp.new(time.to_unix.to_u32, 1_u32) },
+        start_at_operation_time: start_at_operation_time,
         start_after:             start_after,
         allChangesForCluster:    (@options["database"]? == "admin") || nil,
       })

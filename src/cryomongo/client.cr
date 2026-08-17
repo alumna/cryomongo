@@ -39,6 +39,7 @@ class Mongo::Client
   @monitoring_enabled : Bool
 
   @topology_lock = Sync::Mutex.new(:reentrant)
+  @cluster_time_lock = Sync::Mutex.new
   @connection_pool_lock = Sync::Mutex.new
   @pool_locks = Hash(String, Sync::Mutex).new
   @pools : Hash(String, Mongo::Connection::Pool(Mongo::Connection)) = Hash(String, Mongo::Connection::Pool(Mongo::Connection)).new
@@ -46,7 +47,9 @@ class Mongo::Client
   @monitors : Array(SDAM::Monitor) = Array(SDAM::Monitor).new
   @socket_check_interval : Time::Span = 5.seconds
   @last_scan : Time = Time::UNIX_EPOCH
-  @topology_update = Channel(Bool).new
+  # Capacity 1 so a topology change that happens just before server selection
+  # waits is not lost (unbuffered send would take the else branch and drop).
+  @topology_update = Channel(Bool).new(1)
   @commands_observable = Monitoring::Observable(Monitoring::Commands::Event).new
   @sdam_observable = Monitoring::Observable(Monitoring::SDAM::Event).new
 
@@ -72,7 +75,7 @@ class Mongo::Client
     @monitoring_enabled = start_monitoring
 
     if (w = @options.w) || (w_timeout = @options.w_timeout) || (journal = @options.journal)
-      @write_concern = WriteConcern.new(w: w, w_timeout: w_timeout.try &.milliseconds.to_i64, j: journal)
+      @write_concern = WriteConcern.new(w: w, w_timeout: w_timeout.try(&.total_milliseconds.to_i64), j: journal)
     end
 
     if read_concern_level = @options.read_concern_level
@@ -117,7 +120,7 @@ class Mongo::Client
 
     # The spec mandates LoadBalanced topology starts with Unknown servers, emits the
     # ServerOpeningEvent, and then transitions them to LoadBalancer automatically.
-    if @options.raw?.try(&.["loadbalanced"]?) == "true"
+    if @options.load_balanced
       previous_topology = new_topology.clone
 
       new_topology.servers.dup.each do |server|
@@ -134,6 +137,13 @@ class Mongo::Client
 
   # Frees all the resources associated with a client.
   def close
+    # End sessions while pools are still open. EndSessions needs a socket.
+    begin
+      @session_pool.close(self)
+    rescue e
+      Log.warn { "Error while trying to close session pool. #{e}" }
+    end
+
     pools_to_close = @connection_pool_lock.synchronize { @pools.values.dup }
     pools_to_close.each do |pool|
       pool.close
@@ -141,13 +151,7 @@ class Mongo::Client
       Log.warn { "Error while trying to close connection pool. #{e}" }
     end
 
-    begin
-      @session_pool.close(self)
-    rescue e
-      Log.warn { "Error while trying to close session pool. #{e}" }
-    end
-
-    @monitors.each do |monitor|
+    @monitors.dup.each do |monitor|
       monitor.close
     rescue e
       Log.warn { "Error while trying to close monitor fiber. #{e}" }
@@ -330,7 +334,8 @@ class Mongo::Client
             initial_pool_size: @options.min_pool_size,
             max_pool_size: @options.max_pool_size,
             max_idle_pool_size: @options.max_pool_size,
-            checkout_timeout: @options.wait_queue_timeout.try(&.seconds.to_f64) || 5.0
+            checkout_timeout: @options.wait_queue_timeout.try(&.total_seconds) || 5.0,
+            max_idle_time: @options.max_idle_time
           ) do
             connection = Mongo::Connection.new(server_description, @credentials, @options, is_monitor: false)
             result, round_trip_time = connection.handshake(send_metadata: true, appname: @options.appname)
@@ -368,12 +373,10 @@ class Mongo::Client
   end
 
   protected def on_topology_update
-    loop do
-      select
-      when @topology_update.send true
-      else
-        break
-      end
+    select
+    when @topology_update.send true
+    else
+      # A notification is already waiting for server selection.
     end
 
     @topology_lock.synchronize do
@@ -388,8 +391,10 @@ class Mongo::Client
 
   private def gossip_cluster_time(session : Session::ClientSession? = nil)
     # see: https://github.com/mongodb/specifications/blob/master/source/sessions/driver-sessions.rst#gossipping-the-cluster-time
-    return @cluster_time unless session
-    [session.cluster_time, @cluster_time].compact.max?
+    @cluster_time_lock.synchronize do
+      return @cluster_time unless session
+      [session.cluster_time, @cluster_time].compact.max?
+    end
   end
 
   # :nodoc:

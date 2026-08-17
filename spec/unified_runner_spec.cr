@@ -1,19 +1,31 @@
 require "./spec_helper"
 require "./unified/runner"
+require "./unified/timing"
 require "./sharding"
 
 describe "Unified Test Runner" do
+  Spec.before_suite { Mongo::Unified::Timing.start_suite }
+  Spec.after_suite do
+    Mongo::Unified::Timing.finish_suite
+    Mongo::Unified::Runner.close_shared_client
+  end
+
   it "bootstraps the environment successfully" do
-    client = Mongo::Client.new(ENV["MONGODB_URI"])
-    response = client.command(Mongo::Commands::Ping)
-
-    if response
-      response.ok.should eq(1.0)
-    else
-      fail "Expected a response, but got nil"
+    uri = ENV["MONGODB_URI"]
+    separator = uri.includes?("?") ? "&" : "?"
+    client = Mongo::Client.new("#{uri}#{separator}serverSelectionTimeoutMS=3000")
+    begin
+      response = client.command(Mongo::Commands::Ping)
+      if response
+        response.ok.should eq(1.0)
+      else
+        fail "Expected a response, but got nil"
+      end
+    rescue e : Mongo::Error::ServerSelection
+      pending! "MongoDB is not reachable as a replica set (#{e.message}). Run: sudo scripts/mongo-rs.sh configure-systemd"
+    ensure
+      client.close
     end
-
-    client.close
   end
 
   # Gather all JSON files and sort them deterministically
@@ -27,6 +39,10 @@ describe "Unified Test Runner" do
     it "executes: #{file}" do
       runner = Mongo::Unified::Runner.new(file)
       runner.run
+    rescue e : Mongo::Unified::Skip
+      pending! e.message || "skipped"
+    rescue e : Mongo::Error::ServerSelection
+      pending! "MongoDB is not reachable as a replica set (#{e.message}). Run: sudo scripts/mongo-rs.sh configure-systemd"
     end
   end
 end
