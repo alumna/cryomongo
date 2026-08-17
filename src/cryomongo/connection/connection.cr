@@ -59,9 +59,13 @@ struct Mongo::Connection
         NO_COMPRESSION,
         NO_SESSION_RESUMPTION_ON_RENEGOTIATION
       ))
-      # Ensure clean_host is passed so OpenSSL uses x509_verify_param_set1_ip_asc
-      # instead of treating the bracketed IP as a DNS hostname.
-      socket = OpenSSL::SSL::Socket::Client.new(socket, context, sync_close: true, hostname: clean_host)
+      # Skip hostname check when the URI asked for that, or when TLS is fully insecure.
+      # Passing nil hostname tells OpenSSL not to match the certificate name.
+      verify_hostname = !(@options.tls_insecure || @options.tls_allow_invalid_hostnames)
+      tls_hostname = verify_hostname ? clean_host : nil
+      # When hostname is set, OpenSSL uses x509_verify_param_set1_ip_asc for IPs
+      # instead of treating a bracketed IP as a DNS name.
+      socket = OpenSSL::SSL::Socket::Client.new(socket, context, sync_close: true, hostname: tls_hostname)
     end
 
     @socket = socket

@@ -220,8 +220,8 @@ ssl_client = Mongo::Client.new uri
 
 **Links**
 
-- [Mongo::Client](https://elbywan.github.io/cryomongo/Mongo/Client.html)
-- [Mongo::Options](https://elbywan.github.io/cryomongo/Mongo/Options.html)
+- [Mongo::Client](docs/Mongo/Client.html)
+- [Mongo::Options](docs/Mongo/Options.html)
 
 ### Authentication
 
@@ -324,8 +324,8 @@ counter = collection.estimated_document_count
 
 **Links**
 
-- [Mongo::Collection](https://elbywan.github.io/cryomongo/Mongo/Collection.html)
-- [Mongo::Database](https://elbywan.github.io/cryomongo/Mongo/Database.html)
+- [Mongo::Collection](docs/Mongo/Collection.html)
+- [Mongo::Database](docs/Mongo/Database.html)
 
 ### Bulk operations
 
@@ -353,7 +353,7 @@ pp bulk.execute(write_concern: Mongo::WriteConcern.new(w: 1))
 
 **Links**
 
-- [Mongo::Bulk](https://elbywan.github.io/cryomongo/Mongo/Bulk.html)
+- [Mongo::Bulk](docs/Mongo/Bulk.html)
 
 ### Indexes
 
@@ -404,7 +404,7 @@ collection.create_indexes([
 
 **Links**
 
-- [Mongo::Collection](https://elbywan.github.io/cryomongo/Mongo/Collection.html)
+- [Mongo::Collection](docs/Mongo/Collection.html)
 
 ### GridFS
 
@@ -444,7 +444,7 @@ gridfs.delete(id)
 
 **Links**
 
-- [Mongo::GridFS::Bucket](https://elbywan.github.io/cryomongo/Mongo/GridFS/Bucket.html)
+- [Mongo::GridFS::Bucket](docs/Mongo/GridFS/Bucket.html)
 
 ### Change streams
 
@@ -485,8 +485,8 @@ sleep
 
 **Links**
 
-- [Mongo::ChangeStream::Cursor](https://elbywan.github.io/cryomongo/Mongo/ChangeStream/Cursor.html)
-- [Mongo::ChangeStream::Document](https://elbywan.github.io/cryomongo/Mongo/ChangeStream/Document.html)
+- [Mongo::ChangeStream::Cursor](docs/Mongo/ChangeStream/Cursor.html)
+- [Mongo::ChangeStream::Document](docs/Mongo/ChangeStream/Document.html)
 
 ## Raw commands
 
@@ -513,10 +513,10 @@ client["database"]["collection"].command(Mongo::Commands::Validate)
 ```
 **Links**
 
-- [Mongo::Commands](https://elbywan.github.io/cryomongo/Mongo/Commands.html)
-- [Mongo::Client#command](https://elbywan.github.io/cryomongo/Mongo/Client.html#command(command,write_concern:WriteConcern?=nil,read_concern:ReadConcern?=nil,read_preference:ReadPreference?=nil,server_description:SDAM::ServerDescription?=nil,session:Session::ClientSession?=nil,operation_id:Int64?=nil,**args)-instance-method)
-- [Mongo::Database#command](https://elbywan.github.io/cryomongo/Mongo/Database.html#command(operation,write_concern:WriteConcern?=nil,read_concern:ReadConcern?=nil,read_preference:ReadPreference?=nil,session:Session::ClientSession?=nil,**args)-instance-method)
-- [Mongo::Collection#command](https://elbywan.github.io/cryomongo/Mongo/Collection.html#command(operation,write_concern:WriteConcern?=nil,read_concern:ReadConcern?=nil,read_preference:ReadPreference?=nil,session:Session::ClientSession?=nil,**args)-instance-method)
+- [Mongo::Commands](docs/Mongo/Commands.html)
+- [Mongo::Client#command](docs/Mongo/Client.html#command(command,write_concern:WriteConcern?=nil,read_concern:ReadConcern?=nil,read_preference:ReadPreference?=nil,server_description:SDAM::ServerDescription?=nil,session:Session::ClientSession?=nil,operation_id:Int64?=nil,**args)-instance-method)
+- [Mongo::Database#command](docs/Mongo/Database.html#command(operation,write_concern:WriteConcern?=nil,read_concern:ReadConcern?=nil,read_preference:ReadPreference?=nil,session:Session::ClientSession?=nil,**args)-instance-method)
+- [Mongo::Collection#command](docs/Mongo/Collection.html#command(operation,write_concern:WriteConcern?=nil,read_concern:ReadConcern?=nil,read_preference:ReadPreference?=nil,session:Session::ClientSession?=nil,**args)-instance-method)
 
 ## Concerns and Preference
 
@@ -547,9 +547,9 @@ collection.find(
 
 **Links**
 
-- [Mongo::ReadConcern](https://elbywan.github.io/cryomongo/Mongo/ReadConcern.html)
-- [Mongo::WriteConcern](https://elbywan.github.io/cryomongo/Mongo/WriteConcern.html)
-- [Mongo::ReadPreference](https://elbywan.github.io/cryomongo/Mongo/ReadPreference.html)
+- [Mongo::ReadConcern](docs/Mongo/ReadConcern.html)
+- [Mongo::WriteConcern](docs/Mongo/WriteConcern.html)
+- [Mongo::ReadPreference](docs/Mongo/ReadPreference.html)
 
 ## Commands and SDAM Monitoring
 
@@ -596,12 +596,12 @@ client.unsubscribe_sdam(sdam_subscription)
 
 **Links**
 
-- [Mongo::Client#subscribe_commands](https://elbywan.github.io/cryomongo/Mongo/Client.html#subscribe_commands(&callback:Monitoring::Commands::Event->Nil):Monitoring::Commands::Event->Nil-instance-method)
-- [Mongo::Client#unsubscribe_commands](https://elbywan.github.io/cryomongo/Mongo/Client.html#unsubscribe_commands(callback:Monitoring::Commands::Event->Nil):Nil-instance-method)
-- [Mongo::Monitoring::Observable](https://elbywan.github.io/cryomongo/Mongo/Monitoring/Observable.html)
-- [Mongo::Monitoring::CommandStartedEvent](https://elbywan.github.io/cryomongo/Mongo/Monitoring/Commands/CommandStartedEvent.html)
-- [Mongo::Monitoring::CommandSucceededEvent](https://elbywan.github.io/cryomongo/Mongo/Monitoring/Commands/CommandSucceededEvent.html)
-- [Mongo::Monitoring::CommandFailedEvent](https://elbywan.github.io/cryomongo/Mongo/Monitoring/Commands/CommandFailedEvent.html)
+- [Mongo::Client#subscribe_commands](docs/Mongo/Client.html#subscribe_commands(&callback:Monitoring::Commands::Event->Nil):Monitoring::Commands::Event->Nil-instance-method)
+- [Mongo::Client#unsubscribe_commands](docs/Mongo/Client.html#unsubscribe_commands(callback:Monitoring::Commands::Event->Nil):Nil-instance-method)
+- [Mongo::Monitoring::Observable](docs/Mongo/Monitoring/Observable.html)
+- [Mongo::Monitoring::CommandStartedEvent](docs/Mongo/Monitoring/Commands/CommandStartedEvent.html)
+- [Mongo::Monitoring::CommandSucceededEvent](docs/Mongo/Monitoring/Commands/CommandSucceededEvent.html)
+- [Mongo::Monitoring::CommandFailedEvent](docs/Mongo/Monitoring/Commands/CommandFailedEvent.html)
 
 ## Causal Consistency
 
@@ -637,9 +637,9 @@ client.close
 
 **Links**
 
-- [Mongo::Session](https://elbywan.github.io/cryomongo/Mongo/Session.html)
-- [Mongo::Client#start_session](https://elbywan.github.io/cryomongo/Mongo/Client.html#start_session(*,causal_consistency:Bool=true):Session::ClientSession-instance-method)
-- [Mongo::Collection#with_session](https://elbywan.github.io/cryomongo/Mongo/Collection.html#with_session(**args,&)-instance-method)
+- [Mongo::Session](docs/Mongo/Session.html)
+- [Mongo::Client#start_session](docs/Mongo/Client.html#start_session(*,causal_consistency:Bool=true):Session::ClientSession-instance-method)
+- [Mongo::Collection#with_session](docs/Mongo/Collection.html#with_session(**args,&)-instance-method)
 
 ## Transactions
 
@@ -708,11 +708,11 @@ end
 
 **Links**
 
-- [Mongo::Session#with_transaction](https://elbywan.github.io/cryomongo/Mongo/Session/ClientSession.html#with_transaction(**options,&)-instance-method)
-- [Mongo::Session#start_transaction](https://elbywan.github.io/cryomongo/Mongo/Session/ClientSession.html#start_transaction(**options)-instance-method)
-- [Mongo::Session#commit_transaction](https://elbywan.github.io/cryomongo/Mongo/Session/ClientSession.html#commit_transaction(*,write_concern:WriteConcern?=nil)-instance-method)
-- [Mongo::Session#abort_transaction](https://elbywan.github.io/cryomongo/Mongo/Session/ClientSession.html#abort_transaction(*,write_concern:WriteConcern?=nil)-instance-method)
-- [Mongo::Session::TransactionOptions](https://elbywan.github.io/cryomongo/Mongo/Session/TransactionOptions.html)
+- [Mongo::Session#with_transaction](docs/Mongo/Session/ClientSession.html#with_transaction(**options,&)-instance-method)
+- [Mongo::Session#start_transaction](docs/Mongo/Session/ClientSession.html#start_transaction(**options)-instance-method)
+- [Mongo::Session#commit_transaction](docs/Mongo/Session/ClientSession.html#commit_transaction(*,write_concern:WriteConcern?=nil)-instance-method)
+- [Mongo::Session#abort_transaction](docs/Mongo/Session/ClientSession.html#abort_transaction(*,write_concern:WriteConcern?=nil)-instance-method)
+- [Mongo::Session::TransactionOptions](docs/Mongo/Session/TransactionOptions.html)
 
 
 ## Testing

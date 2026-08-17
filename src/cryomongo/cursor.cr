@@ -20,6 +20,8 @@ class Mongo::Cursor
   @tailable : Bool = false
   # Documents already returned to the caller. Used to honor `limit`.
   @yielded : Int32 = 0
+  # Index into @batch. Avoid Array#shift? (O(n) per document).
+  @batch_index : Int32 = 0
   @limit : Int32? = nil
   @comment : BSON::Value? = nil
 
@@ -79,7 +81,7 @@ class Mongo::Cursor
         return Iterator::Stop::INSTANCE
       end
 
-      if element = @batch.shift?
+      if element = next_from_batch
         @yielded += 1
         return element
       end
@@ -92,7 +94,7 @@ class Mongo::Cursor
 
       # Non-tailable: an empty getMore means the result is exhausted.
       # Tailable / change streams stay open and wait again.
-      if !@tailable && @batch.empty?
+      if !@tailable && batch_empty?
         return Iterator::Stop::INSTANCE
       end
     end
@@ -103,7 +105,7 @@ class Mongo::Cursor
   def try_next : BSON?
     return nil if (limit = @limit) && @yielded >= limit
 
-    if element = @batch.shift?
+    if element = next_from_batch
       @yielded += 1
       return element
     end
@@ -112,7 +114,7 @@ class Mongo::Cursor
 
     fetch_more
 
-    if element = @batch.shift?
+    if element = next_from_batch
       @yielded += 1
       return element
     end
@@ -138,6 +140,24 @@ class Mongo::Cursor
   rescue
     @cursor_id = 0_i64
     @batch = [] of BSON
+    @batch_index = 0
+  end
+
+  private def next_from_batch : BSON?
+    return nil if @batch_index >= @batch.size
+    element = @batch[@batch_index]
+    @batch_index += 1
+    element
+  end
+
+  private def batch_empty? : Bool
+    @batch_index >= @batch.size
+  end
+
+  # True after the caller has taken the last document in the current batch.
+  # Change streams use this for the last-document PBRT rule.
+  protected def batch_consumed? : Bool
+    @batch_index >= @batch.size
   end
 
   protected def kill
@@ -180,6 +200,7 @@ class Mongo::Cursor
 
     @cursor_id = reply.cursor.id
     @batch = reply.cursor.next_batch
+    @batch_index = 0
 
     if (session = @session) && exhausted? && session.implicit?
       session.end
@@ -223,7 +244,8 @@ class Mongo::Cursor
     {% end %}
   end
 
-  # Clean up the underlying resource when garbage collected.
+  # Last-resort cleanup. finalize can run on a GC thread and must not be
+  # the only way to send killCursors. Call `#close` (or iterate to the end).
   def finalize
     close
   end

@@ -49,7 +49,8 @@ module Mongo::SDAM
         loop do
           break if @closed
           # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#multi-threaded-or-asynchronous-monitoring
-          before_cooldown = Time.utc + @client.min_heartbeat_frequency
+          # Cooldown is elapsed time. Do not use wall clock.
+          before_cooldown = Time.instant + @client.min_heartbeat_frequency
           server_to_check = @topology.servers.find(&.address.== @server_description.address)
 
           break if server_to_check.nil? || @closed
@@ -118,8 +119,8 @@ module Mongo::SDAM
     end
 
     # Sleep until the minHeartbeatFrequency cooldown, but wake if close() runs.
-    private def wait_cooldown(until_time : Time)
-      leftover = until_time - Time.utc
+    private def wait_cooldown(until_time : Time::Instant)
+      leftover = until_time - Time.instant
       return if leftover <= Time::Span.zero || @closed
       select
       when resume_scan.receive

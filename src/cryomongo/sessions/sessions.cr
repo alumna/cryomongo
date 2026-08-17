@@ -142,11 +142,17 @@ module Mongo::Session
         @server_session.txn_number += 1
       }
     end
+
+    # Spec: update lastUse when this session is about to send a command.
+    protected def mark_used
+      @server_session.use
+    end
   end
 
   private class ServerSession
     getter session_id : SessionId
-    getter last_use : Time? = nil
+    # Idle time is elapsed time. Wall clock jumps must not expire a live session.
+    getter last_use : Time::Instant? = nil
     property dirty : Bool = false
     property txn_number : Int64 = 0
 
@@ -156,11 +162,12 @@ module Mongo::Session
     end
 
     def use
-      @last_use = Time.utc
+      @last_use = Time.instant
     end
 
     def stale?(logical_timeout : Time::Span)
-      @last_use.try { |use| use + logical_timeout <= Time.utc + 1.minute }
+      # Spec: idle if unused for (logicalSessionTimeoutMinutes - 1 minute).
+      @last_use.try { |use| use.elapsed >= logical_timeout - 1.minute }
     end
   end
 

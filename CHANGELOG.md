@@ -38,7 +38,7 @@
 ### Added
 * **sdam:** Added full SDAM Publish/Subscribe Event API. The API includes `TopologyOpeningEvent`, `TopologyDescriptionChangedEvent`, `ServerOpeningEvent`, `ServerClosedEvent`, `ServerDescriptionChangedEvent`, and `TopologyClosedEvent`.
 * **sdam:** Added support for `LoadBalanced` topology type. Also added support for `LoadBalancer` server type.
-* **testing:** Created new test runner `spec/sdam_runner_spec.cr`. The runner achieves 100% compliance with MongoDB SDAM legacy test suite.
+* **testing:** Created new test runner `spec/sdam_runner_spec.cr`. The runner checks topology type and set name for the legacy SDAM suite. Event body checks and live pool-generation rules are still incomplete.
 
 ### Changed
 * **performance:** Removed global class-level locks (`@@`) from `Mongo::Client`. Now it uses instance-level locks (`@`). This prevents contention between clients in multi-cluster applications.
@@ -123,7 +123,7 @@
 * **error:** Added error codes `133` and `134` (`ReadConcernMajorityNotAvailableYet`) to `RETRYABLE_READ_CODES`.
 
 ### Changed
-* **commands:** Changed handling of prohibited options during unacknowledged writes. Prohibited options are `hint`, `collation`, `array_filters`, and `bypass_document_validation`. Now driver removes these options. Before, driver raised client error. This follows current specification.
+* **commands:** Unacknowledged writes omit `lsid`. `hint` is still validated on old servers. Other prohibited options are sent as-is. Current UTF tests do not want a client-side raise.
 
 ### Corrected
 * **spec:** Corrected state leaks in Unified Test Runner. Now disables `failCommand` and `onPrimaryTransactionalWrite` fail points between tests. This prevents next tests from failing with `EOFError`.

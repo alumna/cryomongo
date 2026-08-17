@@ -161,6 +161,7 @@ module Mongo::ChangeStream
 
       @cursor_id = result.cursor.id
       @batch = result.cursor.first_batch
+      @batch_index = 0
       @database, @collection = result.cursor.ns.split(".", 2)
       @server_description = @session.try(&.last_operation_server)
       @batch_pbrt = result.cursor.post_batch_resume_token
@@ -176,7 +177,8 @@ module Mongo::ChangeStream
     end
 
     private def apply_document_token(element : BSON)
-      if @batch.empty? && (pbrt = @batch_pbrt)
+      # After the last document in the batch, prefer the postBatchResumeToken.
+      if batch_consumed? && (pbrt = @batch_pbrt)
         @resume_token = pbrt
       elsif token = element["_id"]?.try &.as?(BSON)
         @resume_token = token

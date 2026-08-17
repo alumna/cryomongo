@@ -47,9 +47,12 @@ class Mongo::Collection
         BSON.new({key: keys}).append(options)
       else
         index_model = Index::Model.new(item["keys"], Index::Options.new(**item["options"]))
-        index_model.options.name ||= String.build do |io|
+        # Options is a struct. Mutating a getter copy would drop the generated name.
+        options = index_model.options
+        options.name ||= String.build do |io|
           index_model.keys.join(io, "_") { |(k, v), io| io << k << '_' << v }
         end
+        index_model.options = options
         BSON.new({key: index_model.keys}).append(index_model.options.to_bson)
       end
     }

@@ -120,7 +120,7 @@ class Mongo::Client
 
     # The spec mandates LoadBalanced topology starts with Unknown servers, emits the
     # ServerOpeningEvent, and then transitions them to LoadBalancer automatically.
-    if @options.raw?.try(&.["loadbalanced"]?) == "true"
+    if @options.load_balanced
       previous_topology = new_topology.clone
 
       new_topology.servers.dup.each do |server|
@@ -137,17 +137,18 @@ class Mongo::Client
 
   # Frees all the resources associated with a client.
   def close
+    # End sessions while pools are still open. EndSessions needs a socket.
+    begin
+      @session_pool.close(self)
+    rescue e
+      Log.warn { "Error while trying to close session pool. #{e}" }
+    end
+
     pools_to_close = @connection_pool_lock.synchronize { @pools.values.dup }
     pools_to_close.each do |pool|
       pool.close
     rescue e
       Log.warn { "Error while trying to close connection pool. #{e}" }
-    end
-
-    begin
-      @session_pool.close(self)
-    rescue e
-      Log.warn { "Error while trying to close session pool. #{e}" }
     end
 
     @monitors.dup.each do |monitor|
@@ -333,7 +334,8 @@ class Mongo::Client
             initial_pool_size: @options.min_pool_size,
             max_pool_size: @options.max_pool_size,
             max_idle_pool_size: @options.max_pool_size,
-            checkout_timeout: @options.wait_queue_timeout.try(&.total_seconds) || 5.0
+            checkout_timeout: @options.wait_queue_timeout.try(&.total_seconds) || 5.0,
+            max_idle_time: @options.max_idle_time
           ) do
             connection = Mongo::Connection.new(server_description, @credentials, @options, is_monitor: false)
             result, round_trip_time = connection.handshake(send_metadata: true, appname: @options.appname)

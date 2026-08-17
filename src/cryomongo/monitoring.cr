@@ -28,16 +28,20 @@ module Mongo::Monitoring
   class Observable(T)
     @observable_lock = Sync::Mutex.new
     @subscribers : Set(T -> Nil) = Set(T -> Nil).new
+    # Avoid taking the mutex on every command just to ask if anyone is listening.
+    @subscriber_count = Atomic(Int32).new(0)
 
     def broadcast(event : T)
-      @observable_lock.synchronize {
-        @subscribers.each &.call(event)
-      }
+      # Copy under the lock, then call outside it. A subscriber that talks to
+      # the client must not deadlock on this mutex.
+      subscribers = @observable_lock.synchronize { @subscribers.dup }
+      subscribers.each &.call(event)
     end
 
     def subscribe(&callback : T -> Nil) : T -> Nil
       @observable_lock.synchronize {
         @subscribers.add(callback)
+        @subscriber_count.set(@subscribers.size)
       }
       callback
     end
@@ -45,13 +49,12 @@ module Mongo::Monitoring
     def unsubscribe(callback : T -> Nil) : Nil
       @observable_lock.synchronize {
         @subscribers.delete(callback)
+        @subscriber_count.set(@subscribers.size)
       }
     end
 
     def has_subscribers?
-      @observable_lock.synchronize {
-        !@subscribers.empty?
-      }
+      @subscriber_count.get > 0
     end
   end
 

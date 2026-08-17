@@ -14,7 +14,7 @@ jobs:
     #strategy:
     #  fail-fast: false
     #  matrix:
-    #    part: [0, 1, 2, 3, 4] # This creates 4 concurrent jobs
+    #    part: [0, 1, 2, 3, 4] # This creates 5 concurrent jobs (0/5 … 4/5)
 
     runs-on: ubuntu-24.04
     name: MongoDB 8.0 replica set
@@ -28,7 +28,8 @@ jobs:
           docker run --name mongo -d -p 27017:27017 --tmpfs /data/db mongo:8.0 \
             --replSet rs0 \
             --setParameter enableTestCommands=1 \
-            --setParameter acceptApiVersion2=1
+            --setParameter acceptApiVersion2=1 \
+            --setParameter transactionLifetimeLimitSeconds=20
           sleep 5
           docker exec mongo mongosh --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]})'
           sleep 5

@@ -228,6 +228,7 @@ class Mongo::Client
     flag_bits = unacknowledged ? Messages::OpMsg::Flags::MoreToCome : Messages::OpMsg::Flags::None
 
     # Apply session rules.
+    session.mark_used
     if topology.supports_sessions?
       if unacknowledged
         # Sessions are not compatible with unacknowledged writes
@@ -425,16 +426,7 @@ class Mongo::Client
       Mongo::Log.error { "Command error: #{error}" }
       # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#not-master-and-node-is-recovering
       if error.state_change?
-        server_description.try { |desc|
-          description = SDAM::ServerDescription.new(desc.address)
-          description.min_wire_version = desc.min_wire_version
-          description.max_wire_version = desc.max_wire_version
-          description.error = error.message
-          description.last_update_time = desc.last_update_time
-          topology.update(desc, description)
-          close_connection_pool(desc) if error.shutdown?
-          @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
-        }
+        apply_state_change_error(server_description, error)
       end
     end
 
@@ -456,6 +448,27 @@ class Mongo::Client
     if end_implicit_session && !keeps_implicit_session?(result)
       session.try &.end if session.try(&.implicit?)
     end
+  end
+
+  # Mark the server Unknown after a not-master / recovering error, unless the
+  # error's topologyVersion is older than the description we already have.
+  private def apply_state_change_error(server_description : SDAM::ServerDescription?, error : Mongo::Error::Command) : Nil
+    desc = server_description
+    return unless desc
+
+    if topology.is_stale_error_topology_version?(desc.topology_version, error.topology_version)
+      return
+    end
+
+    description = SDAM::ServerDescription.new(desc.address)
+    description.min_wire_version = desc.min_wire_version
+    description.max_wire_version = desc.max_wire_version
+    description.error = error.message
+    description.last_update_time = desc.last_update_time
+    description.topology_version = error.topology_version
+    topology.update(desc, description)
+    close_connection_pool(desc) if error.shutdown?
+    @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
   end
 
   private def keeps_implicit_session?(result) : Bool
