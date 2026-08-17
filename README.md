@@ -20,7 +20,7 @@ What is already in place:
 * **BSON:** `alumna/bson.cr` with native Decimal128 and Vector. The driver does not use Vector / ExtJSON on the hot path yet.
 * **Auth:** SCRAM-SHA-1, SCRAM-SHA-256 (no SASLprep), X509, and PLAIN.
 
-The UTF runner is **honest**: unknown operations become Crystal `pending`, they do not fake a pass. That is **not** the same as “100% spec compliant”. Many official suites are not wired yet. See [ROADMAP.md](ROADMAP.md) and [FIXES.md](FIXES.md).
+The UTF runner is **clear**: unknown operations become Crystal `pending`, they do not fake a pass. Many official suites are not wired yet. See [ROADMAP.md](ROADMAP.md).
 
 ### Where the work stands
 
@@ -40,8 +40,6 @@ The driver is in **beta**. Core CRUD, sessions, and transactions work against a 
 - Official Change Stream / GridFS / index-management UTF suites.
 - `MONGODB-AWS`, `MONGODB-OIDC`, CSFLE.
 - Connection-pool lock cleanup for true parallel execution contexts.
-
-How to run the tests on this machine: [LOCAL_TESTING.md](LOCAL_TESTING.md).
 
 #### Cryomongo is a MongoDB driver written in pure Crystal (no C library).
 
@@ -713,17 +711,6 @@ end
 - [Mongo::Session#commit_transaction](docs/Mongo/Session/ClientSession.html#commit_transaction(*,write_concern:WriteConcern?=nil)-instance-method)
 - [Mongo::Session#abort_transaction](docs/Mongo/Session/ClientSession.html#abort_transaction(*,write_concern:WriteConcern?=nil)-instance-method)
 - [Mongo::Session::TransactionOptions](docs/Mongo/Session/TransactionOptions.html)
-
-
-## Testing
-
-See [LOCAL_TESTING.md](LOCAL_TESTING.md). Short version:
-
-```bash
-shards install
-sudo scripts/mongo-rs.sh configure-systemd
-scripts/run-specs.sh
-```
 
 ## Contributing
 

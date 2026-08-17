@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.13.0 - 2026-08-17
+
+Correctness release for MongoDB 8.0 and Crystal 1.21.
+This release was focused in improving the rough edges before continuing with the roadmap.
+
+### Added
+* **insert:** Client-generated `_id` and `insertedIds` on insert results. `insertMany` is one retryable command.
+* **gridfs:** `session:` on all methods. Stream `#close` waits for the background fiber.
+* **testing:** Honest UTF runner (results, errors, events, outcomes). Local `scripts/mongo-rs.sh` and `LOCAL_TESTING.md`.
+
+### Changed
+* **cursors / change streams:** Pin session and server. Tailable streams stay open on an empty getMore. `find` honors `limit`. `getMore` can retry.
+* **sessions / transactions:** One implicit session for a whole bulk. Empty commit is reset. Cluster time and txn numbers are locked.
+* **sdam / selection:** `Time.instant` for selection, monitor cooldown, and session idle. `serverSelectionTryOnce` works (default `false`). Stale `topologyVersion` errors do not mark the server Unknown.
+* **uri / tls / pool:** Case-insensitive URI bools, typed `loadBalanced`, `maxIdleTimeMS`, hostname TLS flags.
+* **crystal:** `Sync::Mutex`, `Time.instant`, no `spawn(same_thread:)`, no `.not_nil!`.
+* **testing:** Live UTF is 362 examples, 0 failures, about 5.5 minutes (was ~25). Unknown work is `pending`, not a fake pass.
+
+### Fixed
+* GridFS chunk math, index names, and optional metadata. Counts return `Int64`. Timeout units. Tag-set match. `list*` can use a secondary.
+* Monitor close, APM request ids, APM callbacks without the list lock, client close ends sessions first.
+
 ## 0.12.0 - 2026-07-30
 
 ### Added
