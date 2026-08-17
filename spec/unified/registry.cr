@@ -17,6 +17,10 @@ module Mongo::Unified
     property threads = Hash(String, Channel(Exception?)).new
 
     def close_all
+      sessions.each_value do |session|
+        session.end
+      rescue
+      end
       clients.each_value(&.close)
     end
 

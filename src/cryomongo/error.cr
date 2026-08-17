@@ -116,7 +116,8 @@ module Mongo
     # See: https://github.com/mongodb/specifications/blob/master/source/retryable-reads/retryable-reads.rst#retryable-error
     RETRYABLE_READ_CODES = RETRYABLE_CODES + {133, 134}
     # See: https://github.com/mongodb/specifications/blob/f1fcb6aa9751e5ed7eb8e64c0f08f1edf10a859a/source/change-streams/change-streams.rst#resumable-error
-    RESUMABLE_CODES = {63, 150, 234, 13388, 133} + RETRYABLE_CODES
+    # CursorNotFound (43) is always resumable for change streams.
+    RESUMABLE_CODES = {43, 63, 150, 234, 13388, 133} + RETRYABLE_CODES
 
     def initialize(code, @code_name, message, @details, *, @error_labels = Set(String).new, @topology_version : BSON? = nil)
       @code = code.try &.as(Int32) || 0

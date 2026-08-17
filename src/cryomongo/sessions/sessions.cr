@@ -104,9 +104,11 @@ module Mongo::Session
     #
     # NOTE: this method is a no-op if the provider cluster time is less than the current cluster time.
     def advance_cluster_time(cluster_time : ClusterTime)
-      self_cluster_time = @cluster_time
-      if !self_cluster_time || self_cluster_time < cluster_time
-        @cluster_time = cluster_time
+      @lock.synchronize do
+        self_cluster_time = @cluster_time
+        if !self_cluster_time || self_cluster_time < cluster_time
+          @cluster_time = cluster_time
+        end
       end
     end
 
@@ -114,9 +116,11 @@ module Mongo::Session
     #
     # NOTE: this method is a no-op if the provider operation time is less than the current operation time.
     def advance_operation_time(operation_time : BSON::Timestamp)
-      self_operation_time = @operation_time
-      if !self_operation_time || self_operation_time < operation_time
-        @operation_time = operation_time
+      @lock.synchronize do
+        self_operation_time = @operation_time
+        if !self_operation_time || self_operation_time < operation_time
+          @operation_time = operation_time
+        end
       end
     end
 

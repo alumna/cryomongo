@@ -16,17 +16,27 @@ class Mongo::Client
       selected_server = suitable_servers.try { |s| select_by_latency(s) }
       return selected_server if selected_server
 
-      # Request an immediate topology check, then block the server selection thread until the topology changes or until the server selection timeout has elapsed
+      # Request an immediate topology check, then block until the topology
+      # changes or until the server selection timeout has elapsed.
       @monitors.each { |monitor|
         monitor.request_immediate_scan
       }
 
-      select
-      when @topology_update.receive
-      when timeout selection_timeout - Time.utc
+      # The monitor may have already published. Recheck before sleeping.
+      suitable_servers = find_suitable_servers(command, args, read_preference)
+      selected_server = suitable_servers.try { |s| select_by_latency(s) }
+      return selected_server if selected_server
+
+      remaining = selection_timeout - Time.utc
+      if remaining <= Time::Span.zero
+        raise Error::ServerSelection.new "Timeout (#{@options.server_selection_timeout}) reached while trying to select a suitable server with read preference #{read_preference.mode}."
       end
 
-      # If more than serverSelectionTimeoutMS milliseconds have elapsed since the selection start time, raise a server selection error
+      select
+      when @topology_update.receive
+      when timeout remaining
+      end
+
       if Time.utc > selection_timeout
         raise Error::ServerSelection.new "Timeout (#{@options.server_selection_timeout}) reached while trying to select a suitable server with read preference #{read_preference.mode}."
       end
@@ -107,14 +117,23 @@ class Mongo::Client
 
   private def filter_by_tags(server_descriptions, read_preference) : Array(SDAM::ServerDescription)?
     # https://github.com/mongodb/specifications/blob/master/source/server-selection/server-selection.rst#tag-sets
+    # Use the first tag set that matches any server. Do not union all sets.
     return server_descriptions unless (tag_sets = read_preference.tags) && tag_sets.size > 0
-    server_descriptions.select { |server|
-      tag_sets.any? { |tags|
+
+    tag_sets.each do |tags|
+      matched = server_descriptions.select { |server|
         tags.all? { |key, value|
-          server.tags.try &.[key].== value
+          if server_tags = server.tags
+            server_tags[key]? == value
+          else
+            false
+          end
         }
       }
-    }
+      return matched unless matched.empty?
+    end
+
+    [] of SDAM::ServerDescription
   end
 
   private def select_by_latency(server_descriptions) : SDAM::ServerDescription?

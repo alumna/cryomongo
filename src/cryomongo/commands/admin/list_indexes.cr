@@ -9,6 +9,7 @@ require "../commands"
 # NOTE: [for more details, please check the official MongoDB documentation](https://docs.mongodb.com/manual/reference/command/listIndexes/).
 module Mongo::Commands::ListIndexes
   extend ReadCommand
+  extend MayUseSecondary
   extend Retryable
   extend self
 

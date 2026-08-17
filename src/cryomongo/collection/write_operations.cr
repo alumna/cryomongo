@@ -19,12 +19,17 @@ class Mongo::Collection
   #
   # NOTE: [for more details, please check the official documentation](https://docs.mongodb.com/manual/reference/command/insert/).
   def insert_one(document, *, write_concern : WriteConcern? = nil, bypass_document_validation : Bool? = nil, comment = nil, session : Session::ClientSession? = nil) : Commands::Common::InsertResult?
-    self.command(Commands::Insert, documents: [document], session: session, options: {
+    docs = Commands::Insert.with_ids([document])
+    result = self.command(Commands::Insert, documents: docs, session: session, options: {
       write_concern:              write_concern,
       bypass_document_validation: bypass_document_validation,
       ordered:                    true,
       comment:                    comment,
     })
+    result.try { |r|
+      r.inserted_ids = docs.map { |doc| doc["_id"] }
+      r
+    }
   end
 
   # Inserts the provided document. If any documents are missing an identifier, they will be generated.
@@ -40,12 +45,17 @@ class Mongo::Collection
     session : Session::ClientSession? = nil,
   ) : Commands::Common::InsertResult?
     raise Mongo::Error.new "Tried to insert an empty document array" unless documents.size > 0
-    self.command(Commands::Insert, documents: documents, session: session, options: {
+    docs = Commands::Insert.with_ids(documents)
+    result = self.command(Commands::Insert, documents: docs, session: session, options: {
       ordered:                    ordered,
       write_concern:              write_concern,
       bypass_document_validation: bypass_document_validation,
       comment:                    comment,
     })
+    result.try { |r|
+      r.inserted_ids = docs.map { |doc| doc["_id"] }
+      r
+    }
   end
 
   # Deletes one document.

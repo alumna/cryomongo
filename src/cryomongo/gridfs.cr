@@ -54,14 +54,15 @@ module Mongo::GridFS
       id = nil,
       chunk_size_bytes : Int32? = nil,
       metadata = nil,
+      session : Session::ClientSession? = nil,
     ) : IO
       id ||= BSON::ObjectId.new
       chunk_size : Int32 = chunk_size_bytes || @chunk_size_bytes
 
-      check_indexes(bucket, chunks)
+      check_indexes(bucket, chunks, session)
 
       reader, writer = Pipe.create(capacity: chunk_size)
-      spawn { consume_upload(reader, id, filename, chunk_size, metadata) }
+      spawn { consume_upload(reader, id, filename, chunk_size, metadata, session) }
       writer
     end
 
@@ -81,18 +82,19 @@ module Mongo::GridFS
       id : FileID = nil,
       chunk_size_bytes : Int32? = nil,
       metadata = nil,
+      session : Session::ClientSession? = nil,
       &block
     ) forall FileID
       id ||= BSON::ObjectId.new
       chunk_size : Int32 = chunk_size_bytes || @chunk_size_bytes
 
-      check_indexes(bucket, chunks)
+      check_indexes(bucket, chunks, session)
 
       reader, writer = Pipe.create(capacity: chunk_size)
       wg = WaitGroup.new
       wg.add(1)
       spawn do
-        consume_upload(reader, id, filename, chunk_size, metadata)
+        consume_upload(reader, id, filename, chunk_size, metadata, session)
       ensure
         wg.done
       end
@@ -107,7 +109,7 @@ module Mongo::GridFS
       id
     end
 
-    private def consume_upload(reader, id, filename, chunk_size, metadata)
+    private def consume_upload(reader, id, filename, chunk_size, metadata, session)
       index = 0
       length = 0_i64
       buffer = Bytes.new(chunk_size)
@@ -119,7 +121,7 @@ module Mongo::GridFS
           files_id: id,
           n:        index,
           data:     data,
-        }, write_concern: write_concern)
+        }, write_concern: write_concern, session: session)
         length += read_bytes
         index += 1_i64
         break if read_bytes < chunk_size
@@ -134,7 +136,7 @@ module Mongo::GridFS
         uploadDate: Time.utc,
         filename:   filename,
         metadata:   metadata,
-      }, write_concern: write_concern)
+      }, write_concern: write_concern, session: session)
     ensure
       reader.close
     end
@@ -165,11 +167,12 @@ module Mongo::GridFS
       id : FileID = nil,
       chunk_size_bytes : Int32? = nil,
       metadata = nil,
+      session : Session::ClientSession? = nil,
     ) forall FileID
       id ||= BSON::ObjectId.new
       chunk_size_bytes ||= @chunk_size_bytes
 
-      check_indexes(bucket, chunks)
+      check_indexes(bucket, chunks, session)
 
       index = 0
       length = 0_i64
@@ -180,7 +183,7 @@ module Mongo::GridFS
           files_id: id,
           n:        index,
           data:     data,
-        }, write_concern: write_concern)
+        }, write_concern: write_concern, session: session)
         length += read_bytes
         index += 1_i64
       end
@@ -192,7 +195,7 @@ module Mongo::GridFS
         uploadDate: Time.utc,
         filename:   filename,
         metadata:   metadata,
-      }, write_concern: write_concern)
+      }, write_concern: write_concern, session: session)
 
       id
     end
@@ -209,8 +212,8 @@ module Mongo::GridFS
     # puts stream.gets_to_end
     # stream.close
     # ```
-    def open_download_stream(id : FileID) : IO forall FileID
-      file = get_file(id)
+    def open_download_stream(id : FileID, *, session : Session::ClientSession? = nil) : IO forall FileID
+      file = get_file(id, session)
       count = chunk_count(file)
       remaining = file.length
 
@@ -219,7 +222,7 @@ module Mongo::GridFS
 
       spawn do
         count.times { |n|
-          chunk = get_chunk(id, n)
+          chunk = get_chunk(id, n, session)
           integrity_check!(file, chunk, remaining)
           writer.write(chunk.data)
           remaining -= chunk.data.size
@@ -241,13 +244,13 @@ module Mongo::GridFS
     # gridfs.download_to_stream(id, stream)
     # puts stream.rewind.gets_to_end
     # ```
-    def download_to_stream(id : FileID, destination : IO) : Nil forall FileID
-      file = get_file(id)
+    def download_to_stream(id : FileID, destination : IO, *, session : Session::ClientSession? = nil) : Nil forall FileID
+      file = get_file(id, session)
       count = chunk_count(file)
       remaining = file.length
 
       count.times { |n|
-        chunk = get_chunk(id, n)
+        chunk = get_chunk(id, n, session)
         integrity_check!(file, chunk, remaining)
         destination.write(chunk.data)
         remaining -= chunk.data.size
@@ -282,8 +285,8 @@ module Mongo::GridFS
     #
     # - -2 = the second most recent revision
     # - -1 = the most recent revision
-    def open_download_stream_by_name(filename : String, revision : Int32 = -1) : IO
-      file = get_file_by_name(filename, revision)
+    def open_download_stream_by_name(filename : String, revision : Int32 = -1, *, session : Session::ClientSession? = nil) : IO
+      file = get_file_by_name(filename, revision, session)
       count = chunk_count(file)
 
       # to_i32 naturally raises on overflow. Using `!` was an unsafe bypass.
@@ -292,7 +295,7 @@ module Mongo::GridFS
       spawn do
         remaining = file.length
         count.times { |n|
-          chunk = get_chunk(file._id, n)
+          chunk = get_chunk(file._id, n, session)
           integrity_check!(file, chunk, remaining)
           writer.write(chunk.data)
           remaining -= chunk.data.size
@@ -314,13 +317,13 @@ module Mongo::GridFS
     # gridfs.download_to_stream_by_name("file", io, revision: -1)
     # puts io.to_s
     # ```
-    def download_to_stream_by_name(filename : String, destination : IO, revision : Int32 = -1) : Nil
-      file = get_file_by_name(filename, revision)
+    def download_to_stream_by_name(filename : String, destination : IO, revision : Int32 = -1, *, session : Session::ClientSession? = nil) : Nil
+      file = get_file_by_name(filename, revision, session)
       count = chunk_count(file)
       remaining = file.length
 
       count.times { |n|
-        chunk = get_chunk(file._id, n)
+        chunk = get_chunk(file._id, n, session)
         integrity_check!(file, chunk, remaining)
         destination.write(chunk.data)
         remaining -= chunk.data.size
@@ -334,9 +337,9 @@ module Mongo::GridFS
     # id = BSON::ObjectId.new("5eed35600000000000000000")
     # gridfs.delete(id)
     # ```
-    def delete(id : FileID) : Nil forall FileID
-      delete_result = bucket.delete_one({_id: id}, write_concern: write_concern)
-      chunks.delete_many({files_id: id}, write_concern: write_concern)
+    def delete(id : FileID, *, session : Session::ClientSession? = nil) : Nil forall FileID
+      delete_result = bucket.delete_one({_id: id}, write_concern: write_concern, session: session)
+      chunks.delete_many({files_id: id}, write_concern: write_concern, session: session)
       raise Mongo::Error.new "File not found." if delete_result.try &.n == 0
     end
 
@@ -358,6 +361,7 @@ module Mongo::GridFS
       no_cursor_timeout : Bool? = nil,
       skip : Int32? = nil,
       sort = nil,
+      session : Session::ClientSession? = nil,
     ) : Cursor::Wrapper(File(BSON::Value))
       cursor = bucket.find(
         filter,
@@ -369,7 +373,8 @@ module Mongo::GridFS
         skip: skip,
         sort: sort,
         read_concern: read_concern,
-        read_preference: read_preference
+        read_preference: read_preference,
+        session: session
       )
       Cursor::Wrapper(File(BSON::Value)).new(cursor)
     end
@@ -381,8 +386,8 @@ module Mongo::GridFS
     # id = BSON::ObjectId.new("5eed35600000000000000000")
     # gridfs.rename(id, new_filename: "new_name.txt")
     # ```
-    def rename(id : FileID, new_filename : String) : Nil forall FileID
-      bucket.update_one({_id: id}, {"$set": {filename: new_filename}})
+    def rename(id : FileID, new_filename : String, *, session : Session::ClientSession? = nil) : Nil forall FileID
+      bucket.update_one({_id: id}, {"$set": {filename: new_filename}}, session: session)
     end
 
     # Drops the files and chunks collections associated with this bucket.
@@ -391,9 +396,9 @@ module Mongo::GridFS
     # gridfs = client["database"].grid_fs
     # gridfs.drop
     # ```
-    def drop
-      bucket.delete_many(BSON.new)
-      chunks.delete_many(BSON.new)
+    def drop(*, session : Session::ClientSession? = nil)
+      bucket.delete_many(BSON.new, session: session)
+      chunks.delete_many(BSON.new, session: session)
     end
 
     private module Internal
@@ -405,19 +410,19 @@ module Mongo::GridFS
         @db["#{@bucket_name}.chunks"]
       end
 
-      def check_indexes(bucket, chunks)
+      def check_indexes(bucket, chunks, session = nil)
         # see: https://github.com/mongodb/specifications/blob/master/source/gridfs/gridfs-spec.rst#before-write-operations
         return if @completed_indexes_check
-        check_collection_index(bucket, {filename: 1, uploadDate: 1})
-        check_collection_index(chunks, {files_id: 1, n: 1})
+        check_collection_index(bucket, {filename: 1, uploadDate: 1}, session)
+        check_collection_index(chunks, {files_id: 1, n: 1}, session)
         @completed_indexes_check = true
       end
 
-      def check_collection_index(collection, keys)
-        return if collection.find_one(projection: {_id: 1})
+      def check_collection_index(collection, keys, session = nil)
+        return if collection.find_one(projection: {_id: 1}, session: session)
 
         begin
-          indexes = collection.list_indexes.to_a
+          indexes = collection.list_indexes(session: session).to_a
         rescue e
           # Collection might not exist and listing indexes will raise.
         end
@@ -428,7 +433,8 @@ module Mongo::GridFS
                   }
 
         collection.create_index(
-          keys: keys
+          keys: keys,
+          session: session
         )
       end
 
@@ -443,20 +449,21 @@ module Mongo::GridFS
         count
       end
 
-      def get_file(id : FileID) : File(FileID) forall FileID
-        file = bucket.find_one({_id: id}, read_preference: read_preference, read_concern: read_concern)
+      def get_file(id : FileID, session = nil) : File(FileID) forall FileID
+        file = bucket.find_one({_id: id}, read_preference: read_preference, read_concern: read_concern, session: session)
         raise Mongo::Error.new "Cannot find file with id: #{id}" unless file
         File(FileID).from_bson(file)
       end
 
-      def get_file_by_name(name : String, revision : Int32 = -1) : File(BSON::Value)
+      def get_file_by_name(name : String, revision : Int32 = -1, session = nil) : File(BSON::Value)
         sort_order = revision >= 0 ? 1 : -1
         file = bucket.find_one(
           {filename: name},
           sort: {uploadDate: sort_order},
           skip: revision >= 0 ? revision : -revision - 1,
           read_preference: read_preference,
-          read_concern: read_concern
+          read_concern: read_concern,
+          session: session
         )
         raise Mongo::Error.new "Cannot find revision #{revision} of the file named: #{name}" unless file
         File(BSON::Value).from_bson(file)
@@ -469,8 +476,8 @@ module Mongo::GridFS
         count
       end
 
-      def get_chunk(id : FileID, n : Int64) forall FileID
-        chunk = chunks.find_one({files_id: id, n: n}, sort: {n: 1}, read_preference: read_preference, read_concern: read_concern)
+      def get_chunk(id : FileID, n : Int64, session = nil) forall FileID
+        chunk = chunks.find_one({files_id: id, n: n}, sort: {n: 1}, read_preference: read_preference, read_concern: read_concern, session: session)
         raise Mongo::Error.new "Chunk not found" unless chunk
         Chunk(FileID).from_bson(chunk)
       end

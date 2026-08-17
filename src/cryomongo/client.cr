@@ -39,6 +39,7 @@ class Mongo::Client
   @monitoring_enabled : Bool
 
   @topology_lock = Sync::Mutex.new(:reentrant)
+  @cluster_time_lock = Sync::Mutex.new
   @connection_pool_lock = Sync::Mutex.new
   @pool_locks = Hash(String, Sync::Mutex).new
   @pools : Hash(String, Mongo::Connection::Pool(Mongo::Connection)) = Hash(String, Mongo::Connection::Pool(Mongo::Connection)).new
@@ -46,7 +47,9 @@ class Mongo::Client
   @monitors : Array(SDAM::Monitor) = Array(SDAM::Monitor).new
   @socket_check_interval : Time::Span = 5.seconds
   @last_scan : Time = Time::UNIX_EPOCH
-  @topology_update = Channel(Bool).new
+  # Capacity 1 so a topology change that happens just before server selection
+  # waits is not lost (unbuffered send would take the else branch and drop).
+  @topology_update = Channel(Bool).new(1)
   @commands_observable = Monitoring::Observable(Monitoring::Commands::Event).new
   @sdam_observable = Monitoring::Observable(Monitoring::SDAM::Event).new
 
@@ -72,7 +75,7 @@ class Mongo::Client
     @monitoring_enabled = start_monitoring
 
     if (w = @options.w) || (w_timeout = @options.w_timeout) || (journal = @options.journal)
-      @write_concern = WriteConcern.new(w: w, w_timeout: w_timeout.try &.milliseconds.to_i64, j: journal)
+      @write_concern = WriteConcern.new(w: w, w_timeout: w_timeout.try(&.total_milliseconds.to_i64), j: journal)
     end
 
     if read_concern_level = @options.read_concern_level
@@ -368,12 +371,10 @@ class Mongo::Client
   end
 
   protected def on_topology_update
-    loop do
-      select
-      when @topology_update.send true
-      else
-        break
-      end
+    select
+    when @topology_update.send true
+    else
+      # A notification is already waiting for server selection.
     end
 
     @topology_lock.synchronize do
@@ -388,8 +389,10 @@ class Mongo::Client
 
   private def gossip_cluster_time(session : Session::ClientSession? = nil)
     # see: https://github.com/mongodb/specifications/blob/master/source/sessions/driver-sessions.rst#gossipping-the-cluster-time
-    return @cluster_time unless session
-    [session.cluster_time, @cluster_time].compact.max?
+    @cluster_time_lock.synchronize do
+      return @cluster_time unless session
+      [session.cluster_time, @cluster_time].compact.max?
+    end
   end
 
   # :nodoc:

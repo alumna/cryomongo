@@ -18,7 +18,8 @@ class Mongo::Cursor
   @database : String
   @collection : Collection::CollectionKey
   @tailable : Bool = false
-  @counter : Int32
+  # Documents already returned to the caller. Used to honor `limit`.
+  @yielded : Int32 = 0
   @limit : Int32? = nil
   @comment : BSON::Value? = nil
 
@@ -38,7 +39,6 @@ class Mongo::Cursor
     @session : Session::ClientSession? = nil,
     @comment = nil,
   )
-    @counter = @batch.size
     @database, @collection = namespace.split(".", 2)
   end
 
@@ -55,31 +55,69 @@ class Mongo::Cursor
   )
     @cursor_id = result.cursor.id
     @batch = result.cursor.first_batch
-    @counter = @batch.size
     @database, @collection = result.cursor.ns.split(".", 2)
   end
 
+  # Copy the session and originating server onto this cursor.
+  # getMore and killCursors must use the same lsid and the same server.
+  protected def bind(session : Session::ClientSession?) : self
+    @session = session
+    @server_description = session.try(&.last_operation_server)
+    self
+  end
+
+  # The server has closed the cursor, or the caller has already received `limit` documents.
+  # An open cursor with leftover documents still needs killCursors.
   # :nodoc:
   def exhausted?
-    @cursor_id == 0 || @limit.try { |limit| limit <= @counter }
+    @cursor_id == 0
   end
 
   def next
-    element = @batch.shift?
+    loop do
+      if (limit = @limit) && @yielded >= limit
+        return Iterator::Stop::INSTANCE
+      end
 
-    if @tailable && !element
+      if element = @batch.shift?
+        @yielded += 1
+        return element
+      end
+
+      # Tailable / awaitData / change streams stay open on an empty getMore.
+      # Only a closed cursor (id 0) means the iteration is over.
+      return Iterator::Stop::INSTANCE if @cursor_id == 0
+
       fetch_more
-      element = @batch.shift?
+
+      # Non-tailable: an empty getMore means the result is exhausted.
+      # Tailable / change streams stay open and wait again.
+      if !@tailable && @batch.empty?
+        return Iterator::Stop::INSTANCE
+      end
+    end
+  end
+
+  # One getMore at most. Returns `nil` when the batch is empty and the cursor is
+  # still open (normal for tailable and change-stream cursors).
+  def try_next : BSON?
+    return nil if (limit = @limit) && @yielded >= limit
+
+    if element = @batch.shift?
+      @yielded += 1
+      return element
     end
 
-    return element if element
+    return nil if @cursor_id == 0
 
-    if @cursor_id == 0 || (@tailable && !element)
-      Iterator::Stop::INSTANCE
-    else
-      fetch_more
-      self.next
+    fetch_more
+
+    if element = @batch.shift?
+      @yielded += 1
+      return element
     end
+
+    nil
   end
 
   # Close the cursor and frees underlying resources.
@@ -90,26 +128,41 @@ class Mongo::Cursor
   rescue e
     # Ignore - client might be dead
   ensure
-    if (session = @session) && session.implicit?
-      session.end
-    end
+    end_implicit_session
   end
 
-  private def kill
+  # Kill the cursor on the pinned server only. Errors are ignored (resume path).
+  protected def kill_quietly
+    return if @cursor_id == 0
+    self.kill
+  rescue
+    @cursor_id = 0_i64
+    @batch = [] of BSON
+  end
+
+  protected def kill
+    return if @cursor_id == 0
     @client.command(
       Commands::KillCursors,
       database: @database,
       collection: @collection,
       cursor_ids: [@cursor_id],
-      server_description: @server_description
+      server_description: @server_description,
+      session: @session
     )
     @cursor_id = 0_i64
+  end
+
+  protected def end_implicit_session
+    if (session = @session) && session.implicit?
+      session.end
+    end
   end
 
   protected def fetch_more
     return if @cursor_id == 0
 
-    batch_size = @limit.try { |limit| Math.max(limit - @counter, 1) } || @batch_size
+    batch_size = next_batch_size
 
     reply = @client.command(
       Commands::GetMore,
@@ -127,13 +180,29 @@ class Mongo::Cursor
 
     @cursor_id = reply.cursor.id
     @batch = reply.cursor.next_batch
-    @counter += @batch.size
 
     if (session = @session) && exhausted? && session.implicit?
       session.end
     end
 
     reply
+  end
+
+  # Prefer the original batchSize. 0 means "default" (omit on getMore).
+  # When a limit remains, never ask for more documents than the caller still wants.
+  private def next_batch_size : Int32?
+    if (limit = @limit)
+      remaining = limit - @yielded
+      return nil if remaining <= 0
+      if (bs = @batch_size) && bs > 0 && bs < remaining
+        bs
+      else
+        remaining
+      end
+    else
+      bs = @batch_size
+      (bs && bs > 0) ? bs : nil
+    end
   end
 
   # Will convert the elements to the `T` type while iterating the `Cursor`.

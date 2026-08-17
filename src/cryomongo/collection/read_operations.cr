@@ -56,7 +56,7 @@ class Mongo::Collection
     read_preference : ReadPreference? = nil,
     comment = nil,
     session : Session::ClientSession? = nil,
-  ) : Int32 forall H
+  ) : Int64 forall H
     pipeline = !filter || filter.empty? ? [BSON.new({"$match": BSON.new})] : [BSON.new({"$match": BSON.new(filter)})]
     skip.try { pipeline << BSON.new({"$skip": skip}) }
     limit.try { pipeline << BSON.new({"$limit": limit}) }
@@ -79,19 +79,9 @@ class Mongo::Collection
     }
     begin
       if (item = cursor.try(&.next)).is_a? BSON
-        n = item["n"]
-        case n
-        when Int32
-          n
-        when Int64
-          n.to_i32
-        when Float64
-          n.to_i32
-        else
-          0
-        end
+        bson_count(item["n"])
       else
-        0
+        0_i64
       end
     ensure
       cursor.try(&.close)
@@ -101,14 +91,27 @@ class Mongo::Collection
   # Gets an estimate of the count of documents in a collection using collection metadata.
   #
   # See: [the specification document](https://github.com/mongodb/specifications/blob/master/source/crud/crud.rst#count-api-details).
-  def estimated_document_count(*, max_time_ms : Int64? = nil, read_preference : ReadPreference? = nil, comment = nil, session : Session::ClientSession? = nil) : Int32
+  def estimated_document_count(*, max_time_ms : Int64? = nil, read_preference : ReadPreference? = nil, comment = nil, session : Session::ClientSession? = nil) : Int64
     result = self.command(Commands::Count, session: session, options: {
       max_time_ms:     max_time_ms,
       read_preference: read_preference,
       comment:         comment,
     })
     raise Mongo::Error.new("Command failed to return a result") unless result
-    result["n"].as(Int32)
+    bson_count(result["n"])
+  end
+
+  private def bson_count(value) : Int64
+    case value
+    when Int32
+      value.to_i64
+    when Int64
+      value
+    when Float64
+      value.to_i64
+    else
+      0_i64
+    end
   end
 
   # Finds the distinct values for a specified field across a single collection.

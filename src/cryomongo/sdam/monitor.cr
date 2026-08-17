@@ -55,13 +55,18 @@ module Mongo::SDAM
           break if server_to_check.nil? || @closed
 
           unless (new_description = check(server_to_check)).nil?
-            @topology.update(server_to_check, new_description)
+            @topology.update(server_to_check, new_description) unless @closed
           end
+
+          # Close can happen during check(). The immediate-scan signal is then
+          # dropped (unbuffered channel + else). Do not wait a full heartbeat.
+          break if @closed
 
           select
           when resume_scan.receive
-            # Immediate scan requested
-            sleep(before_cooldown - Time.utc) if Time.utc < before_cooldown
+            break if @closed
+            # Cooldown only applies to a live monitor that was asked to scan again.
+            wait_cooldown(before_cooldown)
           when timeout @heartbeat_frequency
           end
         rescue e
@@ -110,6 +115,16 @@ module Mongo::SDAM
       @closed = true
       request_immediate_scan
       @done.wait
+    end
+
+    # Sleep until the minHeartbeatFrequency cooldown, but wake if close() runs.
+    private def wait_cooldown(until_time : Time)
+      leftover = until_time - Time.utc
+      return if leftover <= Time::Span.zero || @closed
+      select
+      when resume_scan.receive
+      when timeout leftover
+      end
     end
   end
 end

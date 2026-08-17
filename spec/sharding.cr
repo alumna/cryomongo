@@ -1,8 +1,12 @@
 module Mongo::SpecSharding
   extend self
 
-  # Filters an array of file paths based on the CI_SHARD environment variable
-  # using a greedy cost-aware bin-packing algorithm (Longest Processing Time first).
+  # Optional split of UTF JSON files for CI.
+  # Local runs and the default GitHub Actions job leave CI_SHARD unset, so
+  # every file runs. Set CI_SHARD="0/5" … "4/5" only if the suite grows
+  # and one job is too slow again.
+  #
+  # The split is greedy bin-packing by file size (Longest Processing Time).
   def filter(files : Array(String)) : Array(String)
     if split = ENV["CI_SHARD"]?
       part, total = split.split('/').map(&.to_i)

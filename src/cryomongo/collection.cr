@@ -79,9 +79,7 @@ class Mongo::Collection
 
   # :nodoc:
   protected def bind_cursor(cursor : Cursor, session : Session::ClientSession?) : Cursor
-    cursor.session = session
-    cursor.server_description = session.try(&.last_operation_server)
-    cursor
+    cursor.bind(session)
   end
 
   # Returns a `ChangeStream::Cursor` watching a specific collection.

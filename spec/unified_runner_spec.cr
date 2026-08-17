@@ -1,8 +1,15 @@
 require "./spec_helper"
 require "./unified/runner"
+require "./unified/timing"
 require "./sharding"
 
 describe "Unified Test Runner" do
+  Spec.before_suite { Mongo::Unified::Timing.start_suite }
+  Spec.after_suite do
+    Mongo::Unified::Timing.finish_suite
+    Mongo::Unified::Runner.close_shared_client
+  end
+
   it "bootstraps the environment successfully" do
     uri = ENV["MONGODB_URI"]
     separator = uri.includes?("?") ? "&" : "?"

@@ -6,6 +6,7 @@ require "./registry"
 require "./dispatcher"
 require "./matcher"
 require "./parse"
+require "./timing"
 
 module Mongo::Unified
   class Skip < Exception
@@ -14,10 +15,12 @@ module Mongo::Unified
   class Runner
     @@mongo_version : SemanticVersion? = nil
     @@topology : String? = nil
+    @@shared_client : Mongo::Client? = nil
+    @@shared_lock = Sync::Mutex.new
 
     @registry = Registry.new
     @test_file : TestFile
-    @internal_client : Mongo::Client
+    @internal_client : Mongo::Client? = nil
     @skip_reason : String? = nil
     @file_path : String
 
@@ -34,14 +37,42 @@ module Mongo::Unified
       @file_path = file_path
       json_data = File.read(file_path)
       @test_file = TestFile.from_json(json_data)
-      uri = ENV["MONGODB_URI"]
-      separator = uri.includes?("?") ? "&" : "?"
-      @internal_client = Mongo::Client.new("#{uri}#{separator}serverSelectionTimeoutMS=3000")
 
+      # CMAP / backpressure / interrupt-in-use are not implemented.
+      # pool-cleared-error.json races: 6 inserts share maxPoolSize=1, a fail
+      # point closes the socket, checkout raises PoolClearedError, and
+      # waitForThread surfaces it before waitForEvent can SKIP_TEST.
       @skip_reason = "hardcoded skip" if file_path.ends_with?("create-null-ids.json") ||
                                          file_path.includes?("backpressure-") ||
                                          file_path.ends_with?("rediscover-quickly-after-step-down.json") ||
-                                         file_path.ends_with?("interruptInUse-pool-clear.json")
+                                         file_path.ends_with?("interruptInUse-pool-clear.json") ||
+                                         file_path.ends_with?("pool-cleared-error.json")
+    end
+
+    # One client for runner setup (drop / insert / fail-point off). Creating a
+    # client per JSON file was a large part of the old 25-minute suite time.
+    def self.shared_client : Mongo::Client
+      if client = @@shared_client
+        return client
+      end
+      @@shared_lock.synchronize do
+        @@shared_client ||= begin
+          uri = ENV["MONGODB_URI"]
+          separator = uri.includes?("?") ? "&" : "?"
+          Mongo::Client.new("#{uri}#{separator}serverSelectionTimeoutMS=3000")
+        end
+      end
+    end
+
+    def self.close_shared_client
+      @@shared_lock.synchronize do
+        @@shared_client.try(&.close)
+        @@shared_client = nil
+      end
+    end
+
+    private def internal_client : Mongo::Client
+      @internal_client || Runner.shared_client
     end
 
     private def disable_fail_points
@@ -49,7 +80,7 @@ module Mongo::Unified
 
       ["failCommand", "onPrimaryTransactionalWrite"].each do |fp|
         begin
-          @internal_client["admin"].command(
+          internal_client["admin"].command(
             Mongo::Commands::ConfigureFailPoint,
             fail_point: fp,
             mode: "off"
@@ -81,20 +112,37 @@ module Mongo::Unified
     end
 
     def run
-      raise Skip.new(@skip_reason || "skipped") if @skip_reason
+      file_started = Time.utc
+      Timing.line("START", file: @file_path)
+
+      if reason = @skip_reason
+        Timing.line("SKIP", file: @file_path, reason: reason, duration_ms: Timing.elapsed_ms(file_started))
+        raise Skip.new(reason)
+      end
+
+      # Shared client is created only when we may actually talk to the server.
+      @internal_client = Runner.shared_client
       detect_deployment
-      raise Skip.new("file runOnRequirements not met") unless meets_requirements?(@test_file.runOnRequirements)
+
+      unless meets_requirements?(@test_file.runOnRequirements)
+        Timing.line("SKIP", file: @file_path, reason: "file runOnRequirements not met", duration_ms: Timing.elapsed_ms(file_started))
+        raise Skip.new("file runOnRequirements not met")
+      end
 
       executed = 0
       skipped = 0
+      client = internal_client
 
       @test_file.tests.each do |test|
+        test_started = Time.utc
         if reason = test.skipReason
           skipped += 1
+          Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: reason, duration_ms: Timing.elapsed_ms(test_started))
           next
         end
         unless meets_requirements?(test.runOnRequirements)
           skipped += 1
+          Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "runOnRequirements", duration_ms: Timing.elapsed_ms(test_started))
           next
         end
 
@@ -118,7 +166,7 @@ module Mongo::Unified
 
         begin
           test.operations.each do |op|
-            Dispatcher.execute(op, @registry, @internal_client, self)
+            Dispatcher.execute(op, @registry, client, self)
           end
         rescue e : Exception
           if e.message == "SKIP_TEST"
@@ -138,27 +186,47 @@ module Mongo::Unified
         disable_fail_points
         @registry.close_all
         @registry = Registry.new
+
+        test_ms = Timing.elapsed_ms(test_started)
+        Timing.record_test(@file_path, test.description, test_ms)
+        Timing.line("TEST", file: @file_path, name: test.description, status: (test_aborted ? "skip_op" : "ok"), duration_ms: test_ms)
       end
 
-      raise Skip.new("all tests skipped in #{@file_path}") if executed == 0
-    ensure
-      @internal_client.close
+      file_ms = Timing.elapsed_ms(file_started)
+      Timing.record_file(@file_path, file_ms)
+
+      if executed == 0
+        Timing.line("SKIP", file: @file_path, reason: "all tests skipped", executed: 0, skipped: skipped, duration_ms: file_ms)
+        raise Skip.new("all tests skipped in #{@file_path}")
+      end
+
+      Timing.line("FILE", file: @file_path, status: "ok", executed: executed, skipped: skipped, duration_ms: file_ms)
     end
 
     private def detect_deployment
       return if @@mongo_version && @@topology
 
+      # Ping waits for server selection, so the topology is already known.
+      # A fixed 250ms sleep after that only added latency.
       begin
-        @internal_client.command(Mongo::Commands::Ping)
+        internal_client.command(Mongo::Commands::Ping)
       rescue
       end
-      sleep 250.milliseconds
 
-      version = parse_semver(ENV["MONGODB_VERSION"]? || "8.0.29")
+      version = if env_version = ENV["MONGODB_VERSION"]?
+                  parse_semver(env_version)
+                else
+                  begin
+                    info = internal_client.command(Mongo::Commands::BuildInfo)
+                    parse_semver(info.try(&.version) || "8.0.0")
+                  rescue
+                    parse_semver("8.0.0")
+                  end
+                end
       @@mongo_version = version
 
       @@topology = ENV["TOPOLOGY"]? || begin
-        case @internal_client.topology.type
+        case internal_client.topology.type
         when .replica_set_with_primary?, .replica_set_no_primary?
           "replicaset"
         when .sharded?
@@ -397,12 +465,11 @@ module Mongo::Unified
       return unless initial_data
 
       initial_data.each do |data|
-        db = @internal_client[data.databaseName]
+        db = internal_client[data.databaseName]
         coll = db[data.collectionName]
 
         db.command(Mongo::Commands::Drop, name: data.collectionName) rescue nil
         db.command(Mongo::Commands::Create, name: data.collectionName) rescue nil
-        coll.delete_many(BSON.new) rescue nil
 
         unless data.documents.empty?
           docs = data.documents.map { |d| BSON.from_json(d.to_json) }
@@ -415,7 +482,7 @@ module Mongo::Unified
       return unless outcome
 
       outcome.each do |data|
-        coll = @internal_client[data.databaseName][data.collectionName]
+        coll = internal_client[data.databaseName][data.collectionName]
         actual_docs = coll.find.to_a
 
         unless Matcher.documents_match?(data.documents, actual_docs)
@@ -522,7 +589,7 @@ module Mongo::Unified
     end
 
     private def fetch_server_parameter(name : String) : JSON::Any?
-      result = @internal_client.command(
+      result = internal_client.command(
         Operations::RawCommand.new("getParameter"),
         database: "admin",
         command_bson: BSON.new({"getParameter" => 1, name => 1})

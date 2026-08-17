@@ -128,6 +128,11 @@ class Mongo::Bulk
     process_group(group_family, group, group_indices, results, options, operation_id)
 
     results
+  ensure
+    # One implicit session for the whole bulk. Return it only when execute ends.
+    if @session.implicit?
+      @session.end
+    end
   end
 
   # Same wire command can carry mixed models (updateOne + replaceOne, deleteOne + deleteMany).

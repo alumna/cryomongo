@@ -16,7 +16,9 @@ class Mongo::Client
     **args,
     &block
   )
-    # Create an implicit session
+    # Create an implicit session only when the caller did not pass one.
+    # The caller (bulk, change stream, cursor) owns ending a session it created.
+    owns_session = session.nil?
     session ||= Session::ClientSession.new(self)
 
     result = begin
@@ -31,6 +33,7 @@ class Mongo::Client
             server_description: server_description,
             session: session,
             operation_id: operation_id,
+            end_implicit_session: owns_session,
           )
         }
       else
@@ -43,6 +46,7 @@ class Mongo::Client
           server_description: server_description,
           session: session,
           operation_id: operation_id,
+          end_implicit_session: owns_session,
         )
       end
     end
@@ -83,6 +87,7 @@ class Mongo::Client
     server_description : SDAM::ServerDescription? = nil,
     session : Session::ClientSession? = nil,
     operation_id : Int64? = nil,
+    end_implicit_session : Bool = true,
     **args,
   )
     # Mix collection/database/client/options read and write concerns considering the precedence rules.
@@ -120,6 +125,7 @@ class Mongo::Client
         read_preference,
         server_description,
         operation_id,
+        end_implicit_session,
         **args
       )
     elsif retryable_command && @options.retry_reads && command.is_a?(Commands::ReadCommand) && command.read_command?
@@ -129,6 +135,7 @@ class Mongo::Client
         read_preference,
         server_description,
         operation_id,
+        end_implicit_session,
         **args
       )
     else
@@ -149,6 +156,7 @@ class Mongo::Client
         server_description,
         connection,
         operation_id,
+        end_implicit_session,
         **args
       )
     end
@@ -161,9 +169,10 @@ class Mongo::Client
     server_description : SDAM::ServerDescription,
     connection : Mongo::Connection,
     operation_id : Int64? = nil,
+    end_implicit_session : Bool = true,
     **args,
   )
-    execute_command(command, session, read_preference, server_description, connection, operation_id, **args) { }
+    execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, **args) { }
   end
 
   private def execute_command(
@@ -173,6 +182,7 @@ class Mongo::Client
     server_description : SDAM::ServerDescription,
     connection : Mongo::Connection,
     operation_id : Int64? = nil,
+    end_implicit_session : Bool = true,
     **args,
     &
   )
@@ -357,7 +367,9 @@ class Mongo::Client
 
     # Update the stored cluster time.
     if cluster_time = base_result.cluster_time
-      @cluster_time = cluster_time if !@cluster_time || @cluster_time.try &.< cluster_time
+      @cluster_time_lock.synchronize do
+        @cluster_time = cluster_time if !@cluster_time || @cluster_time.try &.< cluster_time
+      end
       session.advance_cluster_time(cluster_time) if session
     end
 
@@ -441,7 +453,7 @@ class Mongo::Client
     raise error
   ensure
     release_connection(connection) if connection
-    unless keeps_implicit_session?(result)
+    if end_implicit_session && !keeps_implicit_session?(result)
       session.try &.end if session.try(&.implicit?)
     end
   end

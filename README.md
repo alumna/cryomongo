@@ -9,45 +9,45 @@
 
 <hr/>
 
-This is a temporary fork to update the codebase while working on performance, stability, and compatibility with the latest MongoDB LTS release (8.0). Merging to the upstream original repository is part of the plan, as soon as the work on updating is concluded.
+This is a fork of `elbywan/cryomongo`. The goal is to make the driver ready for **MongoDB 8.0** and **Crystal 1.21**. We plan to merge back to the original project when that work is done.
 
-It follows the newest MongoDB specifications (MongoDB 8.0).
+The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0).
 
-On a technical level, the current update already includes:
+What is already in place:
 
-* **MongoDB 8.0 & Spec Compliance:** Bumped to the latest wire version of `25`. Implemented the official MongoDB Unified Test Format (UTF), already 100% compliant with the official `crud`, `retryable-reads`, and `retryable-writes` test suites.
-* **Performance & Reduced Allocations:** Optimized TCP socket, replacing intermediate buffer allocations with read-only `IO::Memory` byte scanning. Optimizations for efficiency, performance and less GC pressure, like lock-free atomics, single-pass iterators and user-space pipes ([`jgaskins/pipe`](https://github.com/jgaskins/pipe) for GridFS).
-* **Crystal 1.20+ Ready:** Updated for the latest Crystal 1.20/1.21 branches, migrating to the updated `Sync::Mutex`, replacing `Time.monotonic` with `Time.instant`, and full support for the new `Parallel` Execution Contexts.
-* **BSON 8.0 Integration:** Uses the updated `alumna/bson.cr` shard, enabling zero-allocation Extended JSON, native 16-byte `Decimal128`, and the new Binary `Vector` types.
+* **MongoDB 8.0:** `hello`, sessions, transactions, retryable reads and writes, Versioned API, and a Unified Test Format (UTF) runner.
+* **Crystal 1.21:** `Sync::Mutex`, `Time.instant`, no `spawn(same_thread:)`. Execution contexts are on by default.
+* **BSON:** `alumna/bson.cr` with native Decimal128 and Vector. The driver does not use Vector / ExtJSON on the hot path yet.
+* **Auth:** SCRAM-SHA-1, SCRAM-SHA-256 (no SASLprep), X509, and PLAIN.
 
-### Roadmap & Checklist
+The UTF runner is **honest**: unknown operations become Crystal `pending`, they do not fake a pass. That is **not** the same as “100% spec compliant”. Many official suites are not wired yet. See [ROADMAP.md](ROADMAP.md) and [FIXES.md](FIXES.md).
 
-The driver is in **beta** state. The core foundation is built, and we are actively hardening it for a `v1.0.0` release. 
+### Where the work stands
 
-**✓ Phase 1: Core Foundation (Completed)**
-- **BSON 8.0:** Zero-allocation, native Decimal128, and Vector support.
-- **Unified Test Format (UTF):** Custom spec runner built and routing correctly.
-- **Core Specs 100% Compliant:** CRUD, Retryable Reads/Writes, Sessions, Causal Consistency, and Transactions.
-- **SDAM:** 100% compliant with legacy Server Discovery and Monitoring state-machine tests.
-- **Basic Auth:** SCRAM-SHA-1/256, X509, and PLAIN.
+The driver is in **beta**. Core CRUD, sessions, and transactions work against a replica set.
 
-**► Phase 2: Hardening & Crystal 1.21 Concurrency (In Progress)**
-- **Strict Compliance:** Wiring up remaining spec tests (Change Streams, GridFS) to the UTF runner and implementing manual "Prose Tests" (e.g., exponential backoff, SDAM RTT).
-- **Security & Stability:** Command log redaction (PII hiding) and deterministic cursor cleanup.
-- **Concurrency:** Optimizing the Connection Pool and locks for Crystal 1.21's new Parallel Execution Contexts.
+**Done enough to build apps**
+- CRUD helpers, bulk, aggregation (no mapReduce).
+- Sessions, causal consistency, transactions, convenient `with_transaction`.
+- Retryable reads and writes (including `insertMany` as one command).
+- Legacy SDAM state-machine tests.
+- SCRAM, X509, PLAIN.
 
-**○ Phase 3: Cloud & Enterprise Features (Planned)**
-- **Atlas Readiness:** SRV Polling and Load Balancer specifications.
-- **Advanced Auth:** `MONGODB-AWS` and `MONGODB-OIDC`.
-- **Encryption:** Client-Side Field Level Encryption (CSFLE / Queryable Encryption).
+**Not done (see ROADMAP)**
+- Command log redaction (passwords can still appear in `Log.trace`).
+- Cursor cleanup still uses `#finalize` for `killCursors`. Call `#close`.
+- Handshake metadata / `backpressure`, SRV polling, load-balancer pinning, CSOT.
+- Official Change Stream / GridFS / index-management UTF suites.
+- `MONGODB-AWS`, `MONGODB-OIDC`, CSFLE.
+- Connection-pool lock cleanup for true parallel execution contexts.
 
-*For a detailed breakdown of the specifications, see [ROADMAP.md](ROADMAP.md).*
+How to run the tests on this machine: [LOCAL_TESTING.md](LOCAL_TESTING.md).
 
-#### Cryomongo is a high-performance MongoDB driver written in pure Crystal. (i.e. no C dependencies needed.)
+#### Cryomongo is a MongoDB driver written in pure Crystal (no C library).
 
-*Compatible with MongoDB 8.0+. Tested against: 8.0.*
+*Works with MongoDB 8.0+. Tested against 8.0.*
 
-**⚠️ BETA state.**
+**BETA.**
 
 > If you are looking for a higher-level object-document mapper library, you might want to check out the [`moongoon`](https://github.com/elbywan/moongoon) shard.
 
@@ -78,12 +78,15 @@ database = client["database_name"]
 collection = database["collection_name"]
 
 # Perform crud operations.
-collection.insert_one({ one: 1 })
+result = collection.insert_one({ one: 1 })
+# The driver adds `_id` when the document is a BSON. inserted_ids is on the result.
+puts result.try(&.inserted_ids)
 collection.replace_one({ one: 1 }, { two: 2 })
 bson = collection.find_one({ two: 2 })
 puts bson.try(&.["two"]) # => 2
 collection.delete_one({ two: 2 })
-puts collection.count_documents # => 0
+puts collection.count_documents # => 0_i64
+client.close
 ```
 
 ### Complex example with serialization
@@ -153,12 +156,12 @@ puts cursor.of(User).to_a.to_pretty_json
 - **[Bulk](https://docs.mongodb.com/manual/reference/method/Bulk/index.html)**
 - **[Read](https://docs.mongodb.com/manual/reference/read-concern/index.html) and [Write](https://docs.mongodb.com/manual/reference/write-concern/) Concerns**
 - **[Read Preference](https://docs.mongodb.com/manual/core/read-preference/index.html)**
-- **[Authentication](https://docs.mongodb.com/manual/core/authentication/index.html) (only: SCRAM mechanisms)**
+- **[Authentication](https://docs.mongodb.com/manual/core/authentication/index.html)** — SCRAM-SHA-1/256 (no SASLprep), X509, PLAIN
 - **[TLS encryption](https://docs.mongodb.com/manual/core/security-transport-encryption/)**
 - **[Indexes](https://docs.mongodb.com/manual/indexes/index.html)**
-- **[GridFS](https://docs.mongodb.com/manual/core/gridfs/index.html)**
-- **[Change Streams](https://docs.mongodb.com/manual/changeStreams/index.html)**
-- **[Admin/Diagnostic commands](https://elbywan.github.io/cryomongo/Mongo/Commands.html)**
+- **[GridFS](https://docs.mongodb.com/manual/core/gridfs/index.html)** (methods accept `session:`)
+- **[Change Streams](https://docs.mongodb.com/manual/changeStreams/index.html)** (`#next` waits; use `#try_next` to poll)
+- **[Admin/Diagnostic commands](docs/Mongo/Commands.html)**
 - **[Tailable and Awaitable cursors](https://docs.mongodb.com/manual/core/tailable-cursors/index.html)**
 - **[Collation](https://docs.mongodb.com/manual/reference/collation/index.html)**
 - **Standalone, [Sharded](https://docs.mongodb.com/manual/sharding/) or [ReplicaSet](https://docs.mongodb.com/manual/replication/) topologies**
@@ -170,11 +173,11 @@ puts cursor.of(User).to_a.to_pretty_json
 ## Conventions
 
 - Methods and arguments names are in **snake case**.
-- Object arguments can usually be passed as a **[NamedTuple](https://crystal-lang.org/api/NamedTuple.html)**, **[Hash](https://crystal-lang.org/api/Hash.html)**, **[BSON::Serializable](https://github.com/elbywan/bson.cr#serialization)** or a **[BSON](https://elbywan.github.io/bson.cr/BSON.html)** instance.
+- Object arguments can usually be passed as a **[NamedTuple](https://crystal-lang.org/api/NamedTuple.html)**, **[Hash](https://crystal-lang.org/api/Hash.html)**, **[BSON::Serializable](https://github.com/alumna/bson.cr#serialization)** or a **[BSON](https://github.com/alumna/bson.cr)** instance.
 
 ## Documentation
 
-**The generated API documentation is available [here](https://elbywan.github.io/cryomongo/Mongo.html).**
+Generated API pages live in [`docs/`](docs/Mongo.html). The old `elbywan.github.io` site is stale.
 
 ### Connection
 
@@ -185,6 +188,8 @@ require "cryomongo"
 # It is responsible for monitoring the cluster, routing the requests and managing the socket pools.
 
 # A client can be instantiated using a standard mongodb connection string.
+# Against a replica set (this is what the tests use):
+#   Mongo::Client.new("mongodb://localhost:27017/?replicaSet=rs0")
 
 # Client options can be passed as query parameters…
 client = Mongo::Client.new("mongodb://address:port/database?appname=MyApp")
@@ -220,14 +225,20 @@ ssl_client = Mongo::Client.new uri
 
 ### Authentication
 
-*Cryomongo only supports the SCRAM-SHA1 and SCRAM-SHA256 authentication methods without SASLprep.*
+Supported: **SCRAM-SHA-1**, **SCRAM-SHA-256** (no SASLprep), **X509**, and **PLAIN**.
+
+Not supported yet: `MONGODB-AWS`, `MONGODB-OIDC`.
 
 ```crystal
 require "cryomongo"
 
-# To use authentication, specify a username and password when passing an URI to the client constructor.
-# Authentication methods depend on the server configuration and on the value of the `authMechanism` query parameter.
+# Username and password. The server picks SCRAM-SHA-1 or SCRAM-SHA-256.
 client = Mongo::Client.new("mongodb://username:password@localhost:27017")
+
+# Or set the mechanism:
+# mongodb://username:password@localhost:27017/?authMechanism=SCRAM-SHA-256
+# mongodb://localhost:27017/?authMechanism=MONGODB-X509&tls=true
+# mongodb://user:pass@localhost:27017/?authMechanism=PLAIN
 ```
 
 ### Basic operations
@@ -261,7 +272,8 @@ document.try { |d| puts d.to_json }
 
 # Find multiple documents.
 cursor = collection.find({ qty: { "$gt": 4 }})
-elements = cursor.to_a # cursor is an Iterable(BSON)
+elements = cursor.to_a # cursor is an Iterator(BSON)
+cursor.close           # send killCursors if the server cursor is still open
 
 ## Update
 
@@ -303,10 +315,10 @@ values = collection.distinct(
   filter: { age: { "$gt": 18 }}
 )
 
-# Documents count
+# Documents count (returns Int64)
 counter = collection.count_documents({ age: { "$lt": 18 }})
 
-# Estimated count
+# Estimated count (also Int64)
 counter = collection.estimated_document_count
 ```
 
@@ -405,7 +417,8 @@ database = client["database_name"]
 # A GridFS bucket belongs to a database.
 gridfs = database.grid_fs
 
-# Upload (using File.open ensures the file descriptor is closed automatically)
+# Upload (using File.open ensures the file descriptor is closed automatically).
+# All GridFS methods accept session: if you need a transaction or causal reads.
 id = File.open("file.txt") do |file|
   gridfs.upload_from_stream("file.txt", file)
 end
@@ -451,10 +464,15 @@ spawn do
     ],
     max_await_time_ms: 10000
   )
-  # cursor.of(BSON) converts fetched elements to the Mongo::ChangeStream::Document(BSON) type.
-  cursor.of(BSON).each do |doc|
-    puts doc.document_key
-    puts doc.full_document.to_json
+  # `#each` / `#next` wait while the stream is open. An empty getMore does not stop.
+  # Use `#try_next` when you want one poll (and the latest resume_token) without blocking.
+  begin
+    cursor.of(BSON).each do |doc|
+      puts doc.document_key
+      puts doc.full_document.to_json
+    end
+  ensure
+    cursor.close
   end
 end
 
@@ -697,9 +715,19 @@ end
 - [Mongo::Session::TransactionOptions](https://elbywan.github.io/cryomongo/Mongo/Session/TransactionOptions.html)
 
 
+## Testing
+
+See [LOCAL_TESTING.md](LOCAL_TESTING.md). Short version:
+
+```bash
+shards install
+sudo scripts/mongo-rs.sh configure-systemd
+scripts/run-specs.sh
+```
+
 ## Contributing
 
-1. Fork it (<https://github.com/elbywan/cryomongo/fork>)
+1. Fork it (<https://github.com/alumna/cryomongo/fork>)
 2. Create your feature branch (`git checkout -b my-new-feature`)
 3. Commit your changes (`git commit -am 'Add some feature'`)
 4. Push to the branch (`git push origin my-new-feature`)

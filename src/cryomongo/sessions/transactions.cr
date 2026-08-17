@@ -90,6 +90,8 @@ module Mongo::Session
       state_transition(:start) {
         increment_txn_number
         @apply_transaction_read_concern = true
+        # A previous empty start+commit must not skip commitTransaction on this attempt.
+        @empty_commit = false
         self.unpin
       }
     end
