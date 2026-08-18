@@ -1,5 +1,6 @@
 require "./database"
 require "./error"
+require "./tools"
 require "pipe"
 require "wait_group"
 require "./gridfs/*"
@@ -465,14 +466,14 @@ module Mongo::GridFS
       # Do not store metadata: null. BSON::Serializable cannot read a BSON null
       # into a BSON? field, and the spec says metadata is optional.
       private def insert_file_document(id, length, chunk_size, filename, metadata, session)
-        doc = BSON.new({
-          _id:        id,
-          length:     length,
-          chunkSize:  chunk_size,
-          uploadDate: Time.utc,
-          filename:   filename,
-        })
-        doc["metadata"] = metadata unless metadata.nil?
+        doc = BSON.build do |builder|
+          Tools.write_bson_field(builder, "_id", id)
+          builder["length"] = length
+          builder["chunkSize"] = chunk_size
+          builder["uploadDate"] = Time.utc
+          builder["filename"] = filename
+          builder["metadata"] = metadata unless metadata.nil?
+        end
         bucket.insert_one(doc, write_concern: write_concern, session: session)
       end
 

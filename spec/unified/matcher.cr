@@ -169,11 +169,26 @@ module Mongo::Unified::Matcher
         return eh["$oid"] == ah["$oid"]
       end
       if eh.has_key?("$date") && ah.has_key?("$date")
-        return eh["$date"] == ah["$date"]
+        return date_ms(eh["$date"]) == date_ms(ah["$date"])
       end
     end
 
     expected == actual
+  end
+
+  # Canonical ExtJSON uses `{"$numberLong": "..."}`. Relaxed ExtJSON uses an ISO string.
+  private def date_ms(value : JSON::Any) : Int64?
+    if s = value.as_s?
+      Time.parse_rfc3339(s).to_unix_ms
+    elsif h = value.as_h?
+      if v = h["$numberLong"]?
+        v.as_s.to_i64
+      end
+    elsif n = value.as_i64?
+      n
+    end
+  rescue
+    nil
   end
 
   def json_from(value) : JSON::Any

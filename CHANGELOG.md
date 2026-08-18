@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+Updating driver implementation with the recent and more efficient BSON v0.8.0
+
+### Changed
+* **bson:** Command bodies use one `BSON.append` for options and session fields. Receive reads documents with `BSON.view` over the OP_MSG buffer. `copy_with` is one builder pass.
+* **hello:** `lastWrite` is a typed document. `lastWriteDate` is `BSON::DateTime` on the wire and becomes `Time` for max-staleness.
+* **apm:** `safe_payload` builds a new document. It does not mutate the live reply (`BSON.new(BSON)` is a no-op).
+* **utf:** Date match accepts both canonical `$numberLong` and relaxed ISO `$date`.
+* **insert:** `inserted_ids` is ignored on BSON decode. The server does not send this field.
+* **bson.cr:** `Serializable` / `Array` / `Hash` can deserialize `BSON::Value` after 0.8.0 (no duplicate `when BSON::DateTime`). This reflected in an update to `alumna/bson.cr`, released as v0.8.1.
+
+### Fixed
+* Replica-set hello no longer raises `TypeCastError` on `lastWriteDate`.
+* Removed the unused `UNACKNOWLEDGED_WRITE_PROHIBITED_OPTIONS` constant. Unack writes still omit `lsid` and still send `hint` / `collation` / `arrayFilters` (UTF wants that).
+
 ## 0.13.0 - 2026-08-17
 
 Correctness release for MongoDB 8.0 and Crystal 1.21.

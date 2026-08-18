@@ -87,13 +87,13 @@ class Mongo::Client
         mode: read_pref,
         max_staleness_seconds: @options.max_staleness_seconds,
         tags: @options.read_preference_tags.map do |tags_str|
-          bson = BSON.new
-          tags_str.split(',') do |tag|
-            if byte_idx = tag.byte_index(':')
-              bson[tag.byte_slice(0, byte_idx)] = tag.byte_slice(byte_idx + 1)
+          BSON.build do |builder|
+            tags_str.split(',') do |tag|
+              if byte_idx = tag.byte_index(':')
+                builder[tag.byte_slice(0, byte_idx)] = tag.byte_slice(byte_idx + 1)
+              end
             end
           end
-          bson
         end
       )
     end
@@ -392,18 +392,16 @@ class Mongo::Client
   private def gossip_cluster_time(session : Session::ClientSession? = nil)
     # see: https://github.com/mongodb/specifications/blob/master/source/sessions/driver-sessions.rst#gossipping-the-cluster-time
     @cluster_time_lock.synchronize do
-      return @cluster_time unless session
-      [session.cluster_time, @cluster_time].compact.max?
+      client_time = @cluster_time
+      return client_time unless session
+      session_time = session.cluster_time
+      if session_time && client_time
+        session_time > client_time ? session_time : client_time
+      else
+        session_time || client_time
+      end
     end
   end
-
-  # :nodoc:
-  UNACKNOWLEDGED_WRITE_PROHIBITED_OPTIONS = {
-    "hint",
-    "collation",
-    "bypass_document_validation",
-    "array_filters",
-  }
 
   private def acknowledged?(args : NamedTuple, session : Session::ClientSession, validate : Bool = true) : Bool
     unacknowledged = false

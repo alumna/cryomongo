@@ -96,12 +96,12 @@ class Mongo::Client
 
     # Determines the read preference to apply to the command
     if WithReadPreference.must_use_primary_command?(command, args)
-      read_preference = ReadPreference.new(mode: "primary")
+      read_preference = PRIMARY_READ_PREFERENCE
     else
       if session.is_transaction?
-        read_preference = session.current_transaction_options.read_preference || read_preference || @read_preference || ReadPreference.new(mode: "primary")
+        read_preference = session.current_transaction_options.read_preference || read_preference || @read_preference || PRIMARY_READ_PREFERENCE
       else
-        read_preference = read_preference || @read_preference || ReadPreference.new(mode: "primary")
+        read_preference = read_preference || @read_preference || PRIMARY_READ_PREFERENCE
       end
     end
 
@@ -227,66 +227,11 @@ class Mongo::Client
 
     flag_bits = unacknowledged ? Messages::OpMsg::Flags::MoreToCome : Messages::OpMsg::Flags::None
 
-    # Apply session rules.
+    # Apply session rules, then retry extras, then Server API.
     session.mark_used
-    if topology.supports_sessions?
-      if unacknowledged
-        # Sessions are not compatible with unacknowledged writes
-        raise Mongo::Error.new("Unacknowledged writes are incompatible with sessions.") unless session.implicit?
-      end
-
-      body["lsid"] = session.session_id unless unacknowledged
-
-      if topology.supports_cluster_time?
-        cluster_time = gossip_cluster_time(session)
-        body["$clusterTime"] = cluster_time if cluster_time
-      end
-
-      if session.is_transaction? && server_description.supports_retryable_writes?
-        if session.transitions_from.try(&.starting?) || session.apply_transaction_read_concern?
-          body["startTransaction"] = true
-        end
-        body["txnNumber"] = session.txn_number
-        body["autocommit"] = false
-      end
-
-      unless command.is_a?(Commands::EndSessions) || command.is_a?(Commands::Hello)
-        if session.options.snapshot && !body["readConcern"]?
-          body["readConcern"] = ReadConcern.new(level: "snapshot", at_cluster_time: session.snapshot_time)
-        elsif session.is_transaction? && body["startTransaction"]? == true && !body["readConcern"]?
-          if concern = session.current_transaction_options.read_concern
-            body["readConcern"] = concern
-          end
-        end
-        if session.is_transaction? && body["startTransaction"]? == true
-          session.apply_transaction_read_concern = false
-        end
-      end
-
-      if !session.is_transaction? && session.options.causal_consistency
-        if (operation_time = session.operation_time) && !body["readConcern"]?
-          is_read = command.responds_to?(:read_command?) && command.read_command?(**args)
-          is_write = command.responds_to?(:write_command?) && command.write_command?(**args)
-          if is_read || is_write
-            body["readConcern"] = ReadConcern.new(after_cluster_time: operation_time)
-          end
-        end
-      end
-    end
-
+    body = apply_session_fields(body, session, unacknowledged, command, server_description, **args)
     body = (yield body) || body
-
-    # Apply Server API parameters (Versioned API)
-    if api = @options.server_api
-      api_options = {apiVersion: api.version}
-      unless api.strict.nil?
-        api_options = api_options.merge({apiStrict: api.strict.as(Bool)})
-      end
-      unless api.deprecation_errors.nil?
-        api_options = api_options.merge({apiDeprecationErrors: api.deprecation_errors.as(Bool)})
-      end
-      body = body.copy_with(api_options)
-    end
+    body = apply_server_api(body)
 
     # Create the OP_MSG message to send.
     op_msg = Messages::OpMsg.new(body, flag_bits: flag_bits)
@@ -469,6 +414,85 @@ class Mongo::Client
     topology.update(desc, description)
     close_connection_pool(desc) if error.shutdown?
     @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
+  end
+
+  # Write session fields with one builder append instead of many `[]=`.
+  private def apply_session_fields(
+    body : BSON,
+    session : Session::ClientSession,
+    unacknowledged : Bool,
+    command,
+    server_description : SDAM::ServerDescription,
+    **args,
+  ) : BSON
+    return body unless topology.supports_sessions?
+
+    if unacknowledged
+      # Sessions are not compatible with unacknowledged writes
+      raise Mongo::Error.new("Unacknowledged writes are incompatible with sessions.") unless session.implicit?
+    end
+
+    add_lsid = !unacknowledged
+    cluster_time = topology.supports_cluster_time? ? gossip_cluster_time(session) : nil
+    start_transaction = false
+    add_txn_fields = false
+    read_concern = nil.as(ReadConcern?)
+    has_read_concern = body.has_key?("readConcern")
+
+    if session.is_transaction? && server_description.supports_retryable_writes?
+      if session.transitions_from.try(&.starting?) || session.apply_transaction_read_concern?
+        start_transaction = true
+      end
+      add_txn_fields = true
+    end
+
+    unless command.is_a?(Commands::EndSessions) || command.is_a?(Commands::Hello)
+      if session.options.snapshot && !has_read_concern
+        read_concern = ReadConcern.new(level: "snapshot", at_cluster_time: session.snapshot_time)
+      elsif session.is_transaction? && start_transaction && !has_read_concern
+        read_concern = session.current_transaction_options.read_concern
+      end
+      if session.is_transaction? && start_transaction
+        session.apply_transaction_read_concern = false
+      end
+    end
+
+    if !session.is_transaction? && session.options.causal_consistency && read_concern.nil? && !has_read_concern
+      if operation_time = session.operation_time
+        is_read = command.responds_to?(:read_command?) && command.read_command?(**args)
+        is_write = command.responds_to?(:write_command?) && command.write_command?(**args)
+        if is_read || is_write
+          read_concern = ReadConcern.new(after_cluster_time: operation_time)
+        end
+      end
+    end
+
+    return body unless add_lsid || cluster_time || add_txn_fields || read_concern
+
+    body.append do |builder|
+      builder["lsid"] = session.session_id if add_lsid
+      builder["$clusterTime"] = cluster_time if cluster_time
+      if add_txn_fields
+        builder["startTransaction"] = true if start_transaction
+        builder["txnNumber"] = session.txn_number
+        builder["autocommit"] = false
+      end
+      builder["readConcern"] = read_concern if read_concern
+    end
+    body
+  end
+
+  # Versioned API fields. One append. Applied after retryable-write extras.
+  private def apply_server_api(body : BSON) : BSON
+    api = @options.server_api
+    return body unless api
+
+    body.append do |builder|
+      builder["apiVersion"] = api.version
+      builder["apiStrict"] = api.strict.as(Bool) unless api.strict.nil?
+      builder["apiDeprecationErrors"] = api.deprecation_errors.as(Bool) unless api.deprecation_errors.nil?
+    end
+    body
   end
 
   private def keeps_implicit_session?(result) : Bool

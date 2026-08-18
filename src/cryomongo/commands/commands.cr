@@ -138,6 +138,7 @@ module Mongo::Commands
       property write_errors : Array(WriteError)?
       property write_concern_error : WriteConcernError?
       # Client-side only. The server does not return inserted ids.
+      @[BSON::Field(ignore: true)]
       property inserted_ids : Array(BSON::Value)? = nil
     }
 
@@ -164,22 +165,28 @@ module Mongo::Commands
     }
   end
 
+  # Build a command body. *init* is one builder pass (`BSON.new`). All *options*
+  # are written with one `append` so we do not rebuild the document per field.
   # :nodoc:
   def self.make(init, options = nil, sequences = nil, skip_nil = true)
     bson = BSON.new(init)
-    options.try &.each { |key, value|
-      skip_key = yield bson, key, value
-      if skip_key == false && (skip_nil == false || !value.nil?)
-        if key.to_s == "read_preference"
-          bson["$readPreference"] = value
-        elsif key.to_s == "max_time_ms" || key.to_s == "max_commit_time_ms"
-          bson["maxTimeMS"] = value
-        else
-          bson[key.to_s.camelcase(lower: true)] = value
-        end
+    if options
+      bson.append do |builder|
+        options.each { |key, value|
+          skip_key = yield nil, key, value
+          if skip_key == false && (skip_nil == false || !value.nil?)
+            key_s = key.to_s
+            if key_s == "read_preference"
+              Tools.write_bson_field(builder, "$readPreference", value)
+            elsif key_s == "max_time_ms" || key_s == "max_commit_time_ms"
+              Tools.write_bson_field(builder, "maxTimeMS", value)
+            else
+              Tools.write_bson_field(builder, key_s.camelcase(lower: true), value)
+            end
+          end
+        }
       end
-    }
-    bson
+    end
     {bson, sequences}
   end
 

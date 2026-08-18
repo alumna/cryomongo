@@ -20,6 +20,9 @@ struct Mongo::Messages::OpReply < Mongo::Messages::Part
   getter starting_from : Int32
   getter number_returned : Int32
   getter documents : Array(BSON)
+  # Keeps the receive buffer alive so BSON.view slices stay valid.
+  @[Field(ignore: true)]
+  @payload_bytes : Bytes? = nil
 
   def initialize(
     @response_flags,
@@ -34,7 +37,8 @@ struct Mongo::Messages::OpReply < Mongo::Messages::Part
     size = header.body_size
     msg_bytes = Bytes.new(size)
     io.read_fully(msg_bytes)
-    msg_view = IO::Memory.new(msg_bytes, false)
+    @payload_bytes = msg_bytes
+    msg_view = IO::Memory.new(msg_bytes, writable: false)
 
     @response_flags = ResponseFlags.from_value(msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian))
     @cursor_id = msg_view.read_bytes(Int64, IO::ByteFormat::LittleEndian)
@@ -44,7 +48,7 @@ struct Mongo::Messages::OpReply < Mongo::Messages::Part
     @documents = [] of BSON
 
     while msg_view.pos < size
-      @documents << BSON.new(msg_view)
+      @documents << Messages.read_bson_view(msg_bytes, msg_view)
     end
   end
 end

@@ -27,7 +27,9 @@ class Mongo::Collection
       comment:                    comment,
     })
     result.try { |r|
-      r.inserted_ids = docs.map { |doc| doc["_id"] }
+      ids = Array(BSON::Value).new(docs.size)
+      docs.each { |doc| ids << doc["_id"] }
+      r.inserted_ids = ids
       r
     }
   end
@@ -53,7 +55,9 @@ class Mongo::Collection
       comment:                    comment,
     })
     result.try { |r|
-      r.inserted_ids = docs.map { |doc| doc["_id"] }
+      ids = Array(BSON::Value).new(docs.size)
+      docs.each { |doc| ids << doc["_id"] }
+      r.inserted_ids = ids
       r
     }
   end

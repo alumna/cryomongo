@@ -15,16 +15,23 @@ module Mongo::Commands::Aggregate
   # Returns a pair of OP_MSG body and sequences associated with the command and arguments.
   def command(database : String, collection : Collection::CollectionKey, pipeline : Array, options = nil)
     need_cursor = true
-    body, sequences = Commands.make({
-      "aggregate": collection,
-      "pipeline":  pipeline.map { |elt| BSON.new(elt) },
-      "$db":       database,
-    }, options) { |_, key, value|
+    options.try &.each { |key, value|
       need_cursor = false if (key.to_s == "explain" || key.to_s == "cursor") && !value.nil?
-      false
     }
-    body["cursor"] = BSON.new if need_cursor
-    {body, sequences}
+    if need_cursor
+      Commands.make({
+        "aggregate": collection,
+        "pipeline":  pipeline.map { |elt| BSON.new(elt) },
+        "$db":       database,
+        "cursor":    BSON.new,
+      }, options)
+    else
+      Commands.make({
+        "aggregate": collection,
+        "pipeline":  pipeline.map { |elt| BSON.new(elt) },
+        "$db":       database,
+      }, options)
+    end
   end
 
   # Transforms the server result.

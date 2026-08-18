@@ -76,23 +76,27 @@ struct Mongo::Connection
       body, _ = Commands::Hello.command(appname: appname, legacy: legacy)
     else
       cmd_name = legacy ? "isMaster" : "hello"
-      body = BSON.new({cmd_name => 1, "$db" => "admin", "helloOk" => true})
-    end
-
-    if @credentials.username && !@credentials.mechanism
-      source = @credentials.source || ""
-      source = "admin" if source.empty?
-      body["saslSupportedMechs"] = "#{source}.#{@credentials.username}"
-    end
-
-    # Apply Server API parameters
-    if api = @options.server_api
-      body["apiVersion"] = api.version
-      unless api.strict.nil?
-        body["apiStrict"] = api.strict.as(Bool)
+      body = BSON.build do |builder|
+        builder[cmd_name] = 1
+        builder["$db"] = "admin"
+        builder["helloOk"] = true
       end
-      unless api.deprecation_errors.nil?
-        body["apiDeprecationErrors"] = api.deprecation_errors.as(Bool)
+    end
+
+    add_sasl = @credentials.username && !@credentials.mechanism
+    api = @options.server_api
+    if add_sasl || api
+      body.append do |builder|
+        if add_sasl
+          source = @credentials.source || ""
+          source = "admin" if source.empty?
+          builder["saslSupportedMechs"] = "#{source}.#{@credentials.username}"
+        end
+        if api
+          builder["apiVersion"] = api.version
+          builder["apiStrict"] = api.strict.as(Bool) unless api.strict.nil?
+          builder["apiDeprecationErrors"] = api.deprecation_errors.as(Bool) unless api.deprecation_errors.nil?
+        end
       end
     end
 

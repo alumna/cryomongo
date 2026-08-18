@@ -10,11 +10,11 @@ module Mongo::Commands::SetParameter
 
   # Returns a pair of OP_MSG body and sequences associated with the command and arguments.
   def command(parameter : String, value)
-    bson, _ = Commands.make({
-      setParameter: 1,
-      "$db":        "admin",
-    })
-    bson[parameter] = value
+    bson = BSON.build do |builder|
+      builder["setParameter"] = 1
+      builder["$db"] = "admin"
+      Tools.write_bson_field(builder, parameter, value)
+    end
     {bson, nil}
   end
 end
