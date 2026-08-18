@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.14.0 - 2026-08-19
 
-Updating driver implementation with the recent and more efficient BSON v0.8.0
+Updating driver implementation with the recent and more efficient BSON v0.8.1
 
 ### Changed
 * **bson:** Command bodies use one `BSON.append` for options and session fields. Receive reads documents with `BSON.view` over the OP_MSG buffer. `copy_with` is one builder pass.
