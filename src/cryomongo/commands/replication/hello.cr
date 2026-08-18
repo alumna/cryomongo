@@ -64,7 +64,12 @@ module Mongo::Commands::Hello
     property tags : BSON?
     property me : String?
     property election_id : BSON::ObjectId?
-    property last_write : BSON?
+    # lastWrite from hello. DateTime fields become Time through Serializable.
+    Common.result(LastWrite, root: false) {
+      property last_write_date : Time?
+      property op_time : BSON?
+    }
+    property last_write : LastWrite?
     property isreplicaset : Bool?
     property topology_version : BSON?
   }

@@ -3,14 +3,13 @@ require "../../messages/op_msg"
 
 module Mongo::Auth::X509
   def self.authenticate(connection : Mongo::Connection, credentials : Mongo::Credentials)
-    bson = BSON.new({
-      authenticate: 1,
-      mechanism:    "MONGODB-X509",
-      "$db":        "$external",
-    })
-
-    if username = credentials.username
-      bson["user"] = username
+    bson = BSON.build do |builder|
+      builder["authenticate"] = 1
+      builder["mechanism"] = "MONGODB-X509"
+      builder["$db"] = "$external"
+      if username = credentials.username
+        builder["user"] = username
+      end
     end
 
     request = Messages::OpMsg.new(bson)

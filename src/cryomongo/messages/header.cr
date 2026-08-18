@@ -14,17 +14,23 @@ struct Mongo::Messages::Header
   end
 
   def initialize(io : IO)
-    @message_length = io.read_bytes(Int32, IO::ByteFormat::LittleEndian)
-    @request_id = io.read_bytes(Int32, IO::ByteFormat::LittleEndian)
-    @response_to = io.read_bytes(Int32, IO::ByteFormat::LittleEndian)
-    @op_code = OpCode.from_value(io.read_bytes(Int32, IO::ByteFormat::LittleEndian))
+    buf = uninitialized UInt8[16]
+    slice = buf.to_slice
+    io.read_fully(slice)
+    @message_length = IO::ByteFormat::LittleEndian.decode(Int32, slice[0, 4])
+    @request_id = IO::ByteFormat::LittleEndian.decode(Int32, slice[4, 4])
+    @response_to = IO::ByteFormat::LittleEndian.decode(Int32, slice[8, 4])
+    @op_code = OpCode.from_value(IO::ByteFormat::LittleEndian.decode(Int32, slice[12, 4]))
   end
 
   def to_io(io : IO)
-    io.write_bytes(@message_length, IO::ByteFormat::LittleEndian)
-    io.write_bytes(@request_id, IO::ByteFormat::LittleEndian)
-    io.write_bytes(@response_to, IO::ByteFormat::LittleEndian)
-    io.write_bytes(@op_code.value, IO::ByteFormat::LittleEndian)
+    buf = uninitialized UInt8[16]
+    slice = buf.to_slice
+    IO::ByteFormat::LittleEndian.encode(@message_length, slice[0, 4])
+    IO::ByteFormat::LittleEndian.encode(@request_id, slice[4, 4])
+    IO::ByteFormat::LittleEndian.encode(@response_to, slice[8, 4])
+    IO::ByteFormat::LittleEndian.encode(@op_code.value, slice[12, 4])
+    io.write(slice)
   end
 
   def body_size

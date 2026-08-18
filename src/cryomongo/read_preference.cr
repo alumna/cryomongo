@@ -13,6 +13,10 @@ module Mongo
     include BSON::Serializable
   }
 
+  # Shared values for the common modes. The record is not mutated.
+  PRIMARY_READ_PREFERENCE           = ReadPreference.new(mode: "primary")
+  PRIMARY_PREFERRED_READ_PREFERENCE = ReadPreference.new(mode: "primaryPreferred")
+
   private module WithReadPreference
     macro included
       # ReadPreference accessor.
@@ -54,7 +58,7 @@ module Mongo
           if read_preference.try &.mode != "primary"
             args
           else
-            self.mix(args, ReadPreference.new(mode: "primaryPreferred"))
+            self.mix(args, PRIMARY_PREFERRED_READ_PREFERENCE)
           end
         end
         # when .sharded?

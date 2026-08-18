@@ -1,22 +1,32 @@
 # :nodoc:
 struct BSON
-  # Return a copy of this BSON object having the key/value pairs overriden by those located in the named_tuple argument.
+  # Return a copy with keys from *named_tuple* overriding this document.
+  # One builder pass. Do not use many `[]=` calls.
   def copy_with(named_tuple : NamedTuple) : BSON
-    copy = BSON.new
-    self.each { |key, value, code|
-      if named_tuple[key]?
-        copy[key] = named_tuple[key]
-      else
-        if value.is_a? BSON && code.array?
-          copy.append_array(key, value)
+    BSON.build do |builder|
+      self.each { |key, value, code|
+        if named_tuple[key]?
+          override = named_tuple[key]
+          if override.responds_to?(:to_bson)
+            builder[key] = override.to_bson
+          else
+            builder[key] = override
+          end
+        elsif value.is_a?(BSON) && code.array?
+          builder.append_array(key, value)
         else
-          copy[key] = value
+          builder[key] = value
         end
-      end
-    }
-    named_tuple.each { |key, value|
-      copy["#{key}"] = value unless copy["#{key}"]?
-    }
-    copy
+      }
+      named_tuple.each { |key, value|
+        key_s = key.to_s
+        next if has_key?(key_s)
+        if value.responds_to?(:to_bson)
+          builder[key_s] = value.to_bson
+        else
+          builder[key_s] = value
+        end
+      }
+    end
   end
 end

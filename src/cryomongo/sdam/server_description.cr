@@ -82,8 +82,10 @@ class Mongo::SDAM::ServerDescription
     ), hello_result)
 
     @last_update_time = Time.utc
-    @last_write_date = hello_result.last_write.try &.["lastWriteDate"]?.try &.as(Time)
-    @op_time = hello_result.last_write.try &.["opTime"]?.try &.as(BSON)
+    if last_write = hello_result.last_write
+      @last_write_date = last_write.last_write_date
+      @op_time = last_write.op_time
+    end
     @topology_version = hello_result.topology_version
 
     if hello_result.msg == "isdbgrid"

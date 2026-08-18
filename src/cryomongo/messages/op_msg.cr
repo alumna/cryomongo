@@ -17,6 +17,9 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
   getter flag_bits : Flags
   getter sections : Array(Part)
   getter checksum : UInt32?
+  # Keeps the receive buffer alive so BSON.view slices stay valid.
+  @[Field(ignore: true)]
+  @payload_bytes : Bytes? = nil
 
   def initialize(@flag_bits : Flags, @sections, @checksum = nil)
   end
@@ -34,7 +37,8 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
     size = header.body_size
     msg_bytes = Bytes.new(size)
     io.read_fully(msg_bytes)
-    msg_view = IO::Memory.new(msg_bytes, false)
+    @payload_bytes = msg_bytes
+    msg_view = IO::Memory.new(msg_bytes, writable: false)
 
     @flag_bits = Flags.from_value(msg_view.read_bytes(UInt32, IO::ByteFormat::LittleEndian))
     @sections = typeof(@sections).new
@@ -47,7 +51,7 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
 
       case payload_type
       when 0_u8
-        payload = BSON.new(msg_view)
+        payload = Messages.read_bson_view(msg_bytes, msg_view)
         @sections << SectionBody.new(payload)
       when 1_u8
         marker = msg_view.pos
@@ -59,7 +63,7 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
         contents = Array(BSON).new
 
         while msg_view.pos - marker < sequence_size
-          contents << BSON.new(msg_view)
+          contents << Messages.read_bson_view(msg_bytes, msg_view)
         end
 
         @sections << SectionDocumentSequence.new(
@@ -153,16 +157,25 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
     end
   end
 
+  # APM copy of the command or reply. Must not mutate the live body
+  # (`BSON.new(BSON)` is a no-op).
   def safe_payload(command)
     cached_body = body
     if command.is_a?(Commands::Hello) && cached_body["speculativeAuthenticate"]?
       BSON.new
     else
-      payload = BSON.new(cached_body)
-      each_sequence do |key, contents|
-        payload[key] = contents
+      BSON.build do |builder|
+        cached_body.each { |key, value, code|
+          if value.is_a?(BSON) && code.array?
+            builder.append_array(key, value)
+          else
+            builder[key] = value
+          end
+        }
+        each_sequence do |key, contents|
+          builder[key] = contents
+        end
       end
-      payload
     end
   end
 end

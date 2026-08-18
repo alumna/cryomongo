@@ -17,7 +17,7 @@ What is already in place:
 
 * **MongoDB 8.0:** `hello`, sessions, transactions, retryable reads and writes, Versioned API, and a Unified Test Format (UTF) runner.
 * **Crystal 1.21:** `Sync::Mutex`, `Time.instant`, no `spawn(same_thread:)`. Execution contexts are on by default.
-* **BSON:** `alumna/bson.cr` with native Decimal128 and Vector. The driver does not use Vector / ExtJSON on the hot path yet.
+* **BSON:** `alumna/bson.cr` 0.8.0. Commands use `BSON.build` / `append`. Receive uses `BSON.view`. Dates decode as `BSON::DateTime` (model fields of type `Time` still convert). Vector / ExtJSON are not on the hot path.
 * **Auth:** SCRAM-SHA-1, SCRAM-SHA-256 (no SASLprep), X509, and PLAIN.
 
 The UTF runner is **clear**: unknown operations become Crystal `pending`, they do not fake a pass. Many official suites are not wired yet. See [ROADMAP.md](ROADMAP.md).
