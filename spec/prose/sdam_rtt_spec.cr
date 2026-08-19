@@ -3,8 +3,7 @@ require "../spec_helper"
 describe "SDAM prose: RTT is updated by the monitor" do
   it "keeps a non-zero RTT after heartbeats" do
     uri = ENV["MONGODB_URI"]
-    separator = uri.includes?("?") ? "&" : "?"
-    client = Mongo::Client.new("#{uri}#{separator}heartbeatFrequencyMS=500&appname=streamingRttTest&serverSelectionTimeoutMS=5000")
+    client = Mongo::Client.new(mongodb_uri_with(uri, "heartbeatFrequencyMS=500&appname=streamingRttTest&serverSelectionTimeoutMS=5000"))
     begin
       client.command(Mongo::Commands::Ping)
     rescue e : Mongo::Error::ServerSelection

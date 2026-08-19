@@ -12,8 +12,7 @@ describe "Unified Test Runner" do
 
   it "bootstraps the environment successfully" do
     uri = ENV["MONGODB_URI"]
-    separator = uri.includes?("?") ? "&" : "?"
-    client = Mongo::Client.new("#{uri}#{separator}serverSelectionTimeoutMS=3000")
+    client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=3000"))
     begin
       response = client.command(Mongo::Commands::Ping)
       if response

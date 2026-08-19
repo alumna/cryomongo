@@ -1,6 +1,6 @@
 require "json"
 require "semantic_version"
-require "../../src/cryomongo"
+require "../spec_helper"
 require "./schema"
 require "./registry"
 require "./dispatcher"
@@ -66,8 +66,7 @@ module Mongo::Unified
       @@shared_lock.synchronize do
         @@shared_client ||= begin
           uri = ENV["MONGODB_URI"]
-          separator = uri.includes?("?") ? "&" : "?"
-          Mongo::Client.new("#{uri}#{separator}serverSelectionTimeoutMS=3000")
+          Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=3000"))
         end
       end
     end
@@ -345,10 +344,7 @@ module Mongo::Unified
             end
 
             uri = ENV["MONGODB_URI"]
-            unless query_parts.empty?
-              uri += uri.includes?("?") ? "&" : "/?"
-              uri += query_parts.join("&")
-            end
+            uri = mongodb_uri_with(uri, query_parts.join("&")) unless query_parts.empty?
 
             options = Mongo::Options.new
             if server_api_json = req.serverApi

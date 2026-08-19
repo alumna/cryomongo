@@ -36,4 +36,36 @@ describe Mongo::Options do
     _, options, _, _ = Mongo::URI.parse("mongodb://localhost/?maxAdaptiveRetries=1", Mongo::Options.new)
     options.max_adaptive_retries.should eq 1
   end
+
+  it "parses options when the delimiting slash is omitted" do
+    seeds, options, _, db = Mongo::URI.parse("mongodb://localhost:27017?serverSelectionTimeoutMS=2000", Mongo::Options.new)
+    seeds.size.should eq 1
+    seeds[0].host.should eq "localhost"
+    seeds[0].port.should eq 27017
+    options.server_selection_timeout.should eq 2000.milliseconds
+    db.should eq ""
+  end
+
+  it "parses tls when the delimiting slash is omitted" do
+    _, options, _, _ = Mongo::URI.parse("mongodb://example.com?tls=true", Mongo::Options.new)
+    options.tls.should eq true
+  end
+end
+
+describe "mongodb_uri_with" do
+  it "inserts /? when the URI has no query" do
+    mongodb_uri_with("mongodb://localhost:27017", "serverSelectionTimeoutMS=2000").should eq(
+      "mongodb://localhost:27017/?serverSelectionTimeoutMS=2000"
+    )
+  end
+
+  it "appends with & when the URI already has a query" do
+    mongodb_uri_with("mongodb://localhost:27017/?replicaSet=rs0", "serverSelectionTimeoutMS=2000").should eq(
+      "mongodb://localhost:27017/?replicaSet=rs0&serverSelectionTimeoutMS=2000"
+    )
+  end
+
+  it "does not add a second slash when the URI already ends with /" do
+    mongodb_uri_with("mongodb://localhost:27017/", "a=1").should eq("mongodb://localhost:27017/?a=1")
+  end
 end

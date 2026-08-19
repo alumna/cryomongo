@@ -17,10 +17,23 @@ Log.setup(:info)
 
 SYSTEM_DATABASES = {"admin", "local", "config"}
 
+# mongodb://host:port plus options must use /? not ?. The driver accepts the
+# slash-less form, but Crystal's URI type would otherwise keep a trailing slash
+# in the last option if a caller reconstructs the string the wrong way.
+def mongodb_uri_with(uri : String, options : String) : String
+  return uri if options.empty?
+  if uri.includes?('?')
+    "#{uri}&#{options}"
+  elsif uri.ends_with?('/')
+    "#{uri}?#{options}"
+  else
+    "#{uri}/?#{options}"
+  end
+end
+
 private def drop_user_databases
   uri = ENV["MONGODB_URI"]
-  separator = uri.includes?("?") ? "&" : "?"
-  client = Mongo::Client.new("#{uri}#{separator}serverSelectionTimeoutMS=2000")
+  client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=2000"))
   begin
     result = client.list_databases
     result.databases.try &.each do |db|

@@ -17,6 +17,10 @@ Phase 1 of the MongoDB 8.0 / Crystal 1.21 roadmap.
 ### Changed
 * Network errors on a command now request an immediate monitor scan so the server can be rediscovered faster.
 
+### Fixed
+* **uri:** Options after the host with no delimiting slash parse correctly (`mongodb://localhost:27017?k=v`). The connection-string spec allows that form. The old parse kept a trailing `/` in the last option value.
+* **ci:** mongos no longer receives `transactionLifetimeLimitSeconds` (mongod-only; mongos exits with "Unknown --setParameter"). Spec helpers append `/?` when they add URI options.
+
 ## 0.14.0 - 2026-08-19
 
 Updating driver implementation with the recent and more efficient BSON v0.8.1

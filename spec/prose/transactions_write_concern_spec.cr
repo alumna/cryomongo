@@ -5,7 +5,7 @@ describe "Transactions prose: write concern is not inherited from the collection
     pending! "standalone has no transactions" if ENV["TOPOLOGY"]? == "standalone"
 
     uri = ENV["MONGODB_URI"]
-    client = Mongo::Client.new("#{uri}#{uri.includes?('?') ? "&" : "?"}serverSelectionTimeoutMS=3000")
+    client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=3000"))
     begin
       client.command(Mongo::Commands::Ping)
     rescue e : Mongo::Error::ServerSelection
