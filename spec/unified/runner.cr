@@ -178,14 +178,14 @@ module Mongo::Unified
           disable_fail_points
           create_entities(@test_file.createEntities)
 
-          # Do not delete this.
-          # Collections can be created dynamically by tests and they
-          # also need to be deleted, not only the explicit ones.
+          # Drop leftover collections on the internal client. The test client
+          # must keep an empty pool (CMAP) and an unused session pool (txnNumber).
           @registry.collections.each_value do |coll|
-            coll.database.command(Mongo::Commands::Drop, name: coll.name) rescue nil
+            internal_client[coll.database.name].command(Mongo::Commands::Drop, name: coll.name) rescue nil
           end
 
           setup_initial_data(@test_file.initialData)
+          gossip_after_setup
 
           # Setup (drop/create/insert) must not appear in expectEvents.
           @registry.command_events.each_value(&.clear)
@@ -206,7 +206,7 @@ module Mongo::Unified
             test_aborted = true
             skipped += 1
           else
-            raise e
+            raise Exception.new("#{test.description}: #{e.message}", cause: e)
           end
         ensure
           disable_fail_points
@@ -571,14 +571,59 @@ module Mongo::Unified
       end
     end
 
+    private def gossip_after_setup
+      # Drop/create can leave a mongos catalog cache stale (SERVER-39704).
+      # Touch each mongos on the internal client only. Entity clients must not
+      # get extra connections (CMAP tests) or extra implicit sessions (txnNumber).
+      servers = begin
+        internal_client.topology.servers.dup
+      rescue
+        [] of Mongo::SDAM::ServerDescription
+      end
+
+      data_sets = @test_file.initialData
+      if data_sets && !data_sets.empty? && !servers.empty?
+        data_sets.each do |data|
+          servers.each do |server|
+            begin
+              internal_client.command(
+                Mongo::Commands::Distinct,
+                database: data.databaseName,
+                collection: data.collectionName,
+                key: "_id",
+                server_description: server,
+                options: {query: BSON.new}
+              )
+            rescue
+            end
+          end
+        end
+      else
+        servers.each do |server|
+          begin
+            internal_client.command(Mongo::Commands::Ping, server_description: server)
+          rescue
+          end
+        end
+      end
+
+      if ct = internal_client.cluster_time
+        @registry.clients.each_value { |c| c.advance_cluster_time(ct) }
+        @registry.sessions.each_value { |s| s.advance_cluster_time(ct) }
+      end
+    end
+
     private def setup_initial_data(initial_data : Array(CollectionData)?)
       return unless initial_data
 
+      # Separate client so setup does not fill the test client's session pool
+      # (implicit retryable writes would leave txnNumber > 0).
+      client = internal_client
       # Majority so mongos catalog and snapshot reads see the new collection.
       majority = Mongo::WriteConcern.new(w: "majority")
 
       initial_data.each do |data|
-        db = internal_client[data.databaseName]
+        db = client[data.databaseName]
         coll = db[data.collectionName]
 
         db.command(Mongo::Commands::Drop, name: data.collectionName, write_concern: majority) rescue nil

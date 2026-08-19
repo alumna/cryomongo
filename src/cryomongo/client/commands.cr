@@ -21,6 +21,15 @@ class Mongo::Client
     owns_session = session.nil?
     session ||= Session::ClientSession.new(self)
 
+    # After commit the session stays pinned so commit can be retried on the
+    # same mongos. Any other operation must unpin.
+    if (s = session)
+      st = s.transaction_state
+      unless st.starting? || st.in_progress? || command.is_a?(Commands::CommitTransaction) || command.is_a?(Commands::AbortTransaction)
+        s.unpin
+      end
+    end
+
     result = begin
       if session && session.is_transaction? && !command.is_a?(Commands::CommitTransaction) && !command.is_a?(Commands::AbortTransaction)
         session.insert_transaction {
@@ -302,9 +311,7 @@ class Mongo::Client
 
     # Update the stored cluster time.
     if cluster_time = base_result.cluster_time
-      @cluster_time_lock.synchronize do
-        @cluster_time = cluster_time if !@cluster_time || @cluster_time.try &.< cluster_time
-      end
+      advance_cluster_time(cluster_time)
       session.advance_cluster_time(cluster_time) if session
     end
 
@@ -372,7 +379,9 @@ class Mongo::Client
         error.add_transient_transaction_label
       end
 
-      if error.transient_transaction? || error.unknown_transaction?
+      # Stay pinned after UnknownTransactionCommitResult so commit retries on
+      # the same mongos. Unpin only on TransientTransactionError.
+      if error.transient_transaction?
         session.try &.unpin
       end
     end

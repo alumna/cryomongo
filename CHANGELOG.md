@@ -22,7 +22,8 @@ Phase 1 of the MongoDB 8.0 / Crystal 1.21 roadmap.
 * **ci:** mongos no longer receives `transactionLifetimeLimitSeconds` (mongod-only; mongos exits with "Unknown --setParameter"). Spec helpers append `/?` when they add URI options.
 * **testing:** Map CI `TOPOLOGY=standalone` to UTF topology `single`. Skip or split `useMultipleMongoses` from the URI. Sharded CI starts two mongos. Prose tests use one mongos so failCommand matches the operation. Turn failCommand off on every mongos in `ensure`. UTF setup uses majority write concern.
 * **transactions:** Copy `errorLabels` from the reply and from `writeConcernError` so a retryable write-concern error is retried.
-* **retryable reads:** Catch wrapped `Error::Network` as `Mongo::Error` so standalone retries after failCommand closeConnection.
+* **retryable reads:** After a retryable error on a standalone, do not abort the retry just because the only server is temporarily Unknown. Handshake rediscovers it. Catch wrapped `Error::Network` as `Mongo::Error`.
+* **transactions:** Unpin a mongos session when startTransaction runs, when a non-transaction operation uses the session, and when commit fails with TransientTransactionError. Stay pinned after UnknownTransactionCommitResult. After closeConnection, wait for that mongos to be rediscovered instead of skipping the commit retry. UTF setup uses the internal client and majority writes, then copies cluster time and refreshes each mongos catalog so test-client pools stay empty.
 
 ## 0.14.0 - 2026-08-19
 

@@ -10,7 +10,12 @@ class Mongo::Client
     **args,
   )
     provided_server = server_description
-    server_description ||= server_selection(command, args, read_preference)
+    server_description = live_retryable_write_server(
+      provided_server || session.server_description,
+      command,
+      args,
+      read_preference
+    )
 
     if !topology.supports_sessions? || !server_description.supports_retryable_writes?
       connection = get_connection(server_description)
@@ -26,8 +31,11 @@ class Mongo::Client
 
     loop do
       begin
-        server_description = provided_server || session.server_description || server_selection(command, args, read_preference)
-        if !topology.supports_sessions? || !server_description.supports_retryable_writes?
+        preferred = provided_server || session.server_description
+        server_description = live_retryable_write_server(preferred, command, args, read_preference)
+        if original_error && server_description.type.unknown?
+          # TopologyType Single returns Unknown immediately; handshake rediscovers.
+        elsif !topology.supports_sessions? || !server_description.supports_retryable_writes?
           raise original_error if original_error
           raise Mongo::Error.new("Sessions or retryable writes not supported")
         end
@@ -62,7 +70,7 @@ class Mongo::Client
         end
 
         original_error = error
-        session.unpin if error.transient_transaction? || error.unknown_transaction?
+        session.unpin if error.transient_transaction?
         apply_overload_backoff(attempt, error) if overload
       rescue error : Mongo::Client::NetworkError
         wrapped = Error::Network.new(error)
@@ -72,6 +80,29 @@ class Mongo::Client
         raise wrapped if attempt > allowed_retries
       end
     end
+  end
+
+  # Prefer a live copy of the pinned server. After closeConnection that
+  # address is Unknown; wait for a suitable server instead of using the stale
+  # pin (which would skip retries). The session stays pinned; pin() refreshes
+  # the description after connect.
+  private def live_retryable_write_server(
+    preferred : SDAM::ServerDescription?,
+    command,
+    args,
+    read_preference : ReadPreference,
+  ) : SDAM::ServerDescription
+    if preferred
+      live = topology.servers.find { |s| s.address == preferred.address }
+      if live && !live.type.unknown? && live.supports_retryable_writes?
+        return live
+      end
+      # TopologyType Single returns Unknown immediately. Handshake rediscovers.
+      if live && live.type.unknown? && topology.type.single?
+        return live
+      end
+    end
+    server_selection(command, args, read_preference)
   end
 
   private def apply_retryable_write_body(body, command, session, attempt, *, overload = false)

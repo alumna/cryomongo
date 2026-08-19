@@ -26,7 +26,12 @@ class Mongo::Client
     loop do
       begin
         server_description = provided_server || session.server_description || server_selection(command, args, read_preference)
-        if !topology.supports_sessions? || !server_description.supports_retryable_reads?
+        # TopologyType Single returns an Unknown server immediately. Connecting
+        # runs hello and rediscovers. Do not abort the retry just because
+        # sessions dropped while the only server was Unknown.
+        if original_error && server_description.type.unknown?
+          # Handshake on get_connection rediscovers standalone.
+        elsif !topology.supports_sessions? || !server_description.supports_retryable_reads?
           raise original_error if original_error
           raise Mongo::Error.new("Sessions or retryable reads not supported")
         end

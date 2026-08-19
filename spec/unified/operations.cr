@@ -116,7 +116,9 @@ module Mongo::Unified::Operations
   private def execute_assert_session_pinned(args, registry)
     if args && (session_id = args["session"]?.try(&.as_s))
       if session_ent = registry.sessions[session_id]?
-        raise "TEST_FAILED: Expected session #{session_id} to be pinned" unless session_ent.server_description
+        unless session_ent.server_description
+          raise "TEST_FAILED: Expected session #{session_id} to be pinned, txn=#{session_ent.transaction_state}"
+        end
       end
     end
   end
@@ -124,7 +126,9 @@ module Mongo::Unified::Operations
   private def execute_assert_session_unpinned(args, registry)
     if args && (session_id = args["session"]?.try(&.as_s))
       if session_ent = registry.sessions[session_id]?
-        raise "TEST_FAILED: Expected session #{session_id} to be unpinned" if session_ent.server_description
+        if desc = session_ent.server_description
+          raise "TEST_FAILED: Expected session #{session_id} to be unpinned, still pinned to #{desc.address} type=#{desc.type} txn=#{session_ent.transaction_state}"
+        end
       end
     end
   end

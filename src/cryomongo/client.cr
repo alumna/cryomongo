@@ -458,6 +458,16 @@ class Mongo::Client
     end
   end
 
+  # Keep the highest cluster time this client has seen.
+  def advance_cluster_time(cluster_time : Session::ClusterTime) : Nil
+    @cluster_time_lock.synchronize do
+      current = @cluster_time
+      if current.nil? || current < cluster_time
+        @cluster_time = cluster_time
+      end
+    end
+  end
+
   private def gossip_cluster_time(session : Session::ClientSession? = nil)
     # see: https://github.com/mongodb/specifications/blob/master/source/sessions/driver-sessions.rst#gossipping-the-cluster-time
     @cluster_time_lock.synchronize do
