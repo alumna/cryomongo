@@ -136,16 +136,16 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
   def error? : Exception?
     cached_body = body
 
-    err_label_set = cached_body["errorLabels"]?.try { |labels|
-      Set(String).new(Array(String).from_bson(labels))
-    } || Set(String).new
+    err_label_set = labels_from(cached_body["errorLabels"]?)
 
     if cached_body["ok"] == 1
       topology_version = cached_body["topologyVersion"]?.try(&.as(BSON))
       if errors = cached_body["writeErrors"]?
         Mongo::Error::CommandWrite.new(errors.as(BSON), error_labels: err_label_set, topology_version: topology_version)
       elsif write_error = cached_body["writeConcernError"]?
-        Mongo::Error::WriteConcern.new(write_error.as(BSON), error_labels: err_label_set, topology_version: topology_version)
+        wc = write_error.as(BSON)
+        labels_from(wc["errorLabels"]?).each { |label| err_label_set << label }
+        Mongo::Error::WriteConcern.new(wc, error_labels: err_label_set, topology_version: topology_version)
       end
     else
       err_msg = cached_body["errmsg"]?.try(&.as(String))
@@ -158,6 +158,17 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
       }
       Mongo::Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: err_label_set, topology_version: topology_version, base_backoff_ms: base_backoff_ms)
     end
+  end
+
+  # failCommand may put labels on the reply or inside writeConcernError.
+  private def labels_from(value) : Set(String)
+    labels = Set(String).new
+    if bson = value.as?(BSON)
+      bson.each do |_, item|
+        labels << item if item.is_a?(String)
+      end
+    end
+    labels
   end
 
   # APM copy of the command or reply. Must not mutate the live body

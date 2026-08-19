@@ -56,7 +56,9 @@ module Mongo::Unified::Dispatcher
                when "assertSameLsidOnLastTwoCommands"          then execute_assert_same_lsid(args, registry)
                when "assertDifferentLsidOnLastTwoCommands"     then execute_assert_different_lsid(args, registry)
                when "getSnapshotTime"                          then execute_get_snapshot_time(op, registry)
-               when "targetedFailPoint"                        then execute_targeted_fail_point(args, registry)
+               when "targetedFailPoint"
+                 runner.fail_point_active = true
+                 execute_targeted_fail_point(args, registry)
                when "assertCollectionExists"                   then execute_assert_collection_exists(args, internal_client)
                when "assertCollectionNotExists"                then execute_assert_collection_not_exists(args, internal_client)
                when "assertIndexExists"                        then execute_assert_index_exists(args, internal_client)

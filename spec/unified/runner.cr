@@ -83,19 +83,30 @@ module Mongo::Unified
     end
 
     private def disable_fail_points
-      return unless @fail_point_active == true
-
-      ["failCommand", "onPrimaryTransactionalWrite"].each do |fp|
-        begin
-          internal_client["admin"].command(
-            Mongo::Commands::ConfigureFailPoint,
-            fail_point: fp,
-            mode: "off"
-          )
-        rescue
+      # Always send "off". A failed test used to skip this and leave failCommand
+      # on mongos, which broke later files. targetedFailPoint is per mongos, so
+      # turn it off on every mongos we know.
+      client = @internal_client || Runner.shared_client
+      servers = begin
+        client.topology.servers.select { |s| s.type.mongos? || s.type.rs_primary? || s.type.standalone? }
+      rescue
+        [] of Mongo::SDAM::ServerDescription
+      end
+      targets = servers.empty? ? [nil] of Mongo::SDAM::ServerDescription? : servers.map { |s| s.as(Mongo::SDAM::ServerDescription?) }
+      targets.each do |server|
+        ["failCommand", "onPrimaryTransactionalWrite"].each do |fp|
+          begin
+            client.command(
+              Mongo::Commands::ConfigureFailPoint,
+              database: "admin",
+              fail_point: fp,
+              mode: "off",
+              server_description: server
+            )
+          rescue
+          end
         end
       end
-
       @fail_point_active = false
     end
 
@@ -153,30 +164,35 @@ module Mongo::Unified
           next
         end
 
-        disable_fail_points
-
-        create_entities(@test_file.createEntities)
-
-        # Do not delete this.
-        # Collections can be created dynamically by tests and they
-        # also need to be deleted, not only the explicit ones.
-        @registry.collections.each_value do |coll|
-          coll.database.command(Mongo::Commands::Drop, name: coll.name) rescue nil
-        end
-
-        setup_initial_data(@test_file.initialData)
-
-        # Setup (drop/create/insert) must not appear in expectEvents.
-        @registry.command_events.each_value(&.clear)
-        @registry.cmap_events.each_value(&.clear)
-        @registry.sdam_events.each_value(&.clear)
-
         test_aborted = false
 
         begin
+          disable_fail_points
+          create_entities(@test_file.createEntities)
+
+          # Do not delete this.
+          # Collections can be created dynamically by tests and they
+          # also need to be deleted, not only the explicit ones.
+          @registry.collections.each_value do |coll|
+            coll.database.command(Mongo::Commands::Drop, name: coll.name) rescue nil
+          end
+
+          setup_initial_data(@test_file.initialData)
+
+          # Setup (drop/create/insert) must not appear in expectEvents.
+          @registry.command_events.each_value(&.clear)
+          @registry.cmap_events.each_value(&.clear)
+          @registry.sdam_events.each_value(&.clear)
+
           test.operations.each do |op|
             Dispatcher.execute(op, @registry, client, self)
           end
+          verify_outcome(test.outcome)
+          verify_events(test.expectEvents)
+          executed += 1
+        rescue e : Skip
+          test_aborted = true
+          skipped += 1
         rescue e : Exception
           if e.message == "SKIP_TEST"
             test_aborted = true
@@ -184,17 +200,11 @@ module Mongo::Unified
           else
             raise e
           end
+        ensure
+          disable_fail_points
+          @registry.close_all
+          @registry = Registry.new
         end
-
-        unless test_aborted
-          verify_outcome(test.outcome)
-          verify_events(test.expectEvents)
-          executed += 1
-        end
-
-        disable_fail_points
-        @registry.close_all
-        @registry = Registry.new
 
         test_ms = Timing.elapsed_ms(test_started)
         Timing.record_test(@file_path, test.description, test_ms)
@@ -234,20 +244,63 @@ module Mongo::Unified
                 end
       @@mongo_version = version
 
-      @@topology = ENV["TOPOLOGY"]? || begin
-        case internal_client.topology.type
-        when .replica_set_with_primary?, .replica_set_no_primary?
-          "replicaset"
-        when .sharded?
-          "sharded"
-        when .load_balanced?
-          "load-balanced"
-        when .single?
-          "single"
-        else
-          "single"
-        end
+      @@topology = if env_topology = ENV["TOPOLOGY"]?
+                     Runner.utf_topology_name(env_topology)
+                   else
+                     case internal_client.topology.type
+                     when .replica_set_with_primary?, .replica_set_no_primary?
+                       "replicaset"
+                     when .sharded?
+                       "sharded"
+                     when .load_balanced?
+                       "load-balanced"
+                     when .single?
+                       "single"
+                     else
+                       "single"
+                     end
+                   end
+    end
+
+    # CI uses TOPOLOGY=standalone. Official UTF files say "single".
+    def self.utf_topology_name(value : String) : String
+      case value
+      when "standalone"    then "single"
+      when "replica_set"   then "replicaset"
+      when "load_balanced" then "load-balanced"
+      else                      value
       end
+    end
+
+    private def sharded_uri_for_client(uri : String, use_multiple : Bool?) : String
+      topology = @@topology || ENV["TOPOLOGY"]? || ""
+      mapped = Runner.utf_topology_name(topology)
+      return uri unless mapped == "sharded" || mapped == "load-balanced"
+
+      hosts = mongodb_uri_hosts(uri)
+      if use_multiple == true
+        if hosts.size < 2
+          raise Skip.new("useMultipleMongoses requires two mongos hosts in MONGODB_URI")
+        end
+        uri
+      elsif use_multiple == false && hosts.size > 1
+        mongodb_uri_single_host(uri, hosts[0])
+      else
+        uri
+      end
+    end
+
+    private def mongodb_uri_hosts(uri : String) : Array(String)
+      rest = uri.split("://", 2)[1]? || ""
+      host_part = rest.split('/', 2)[0].split('?', 2)[0]
+      host_part.split(',').reject(&.empty?)
+    end
+
+    private def mongodb_uri_single_host(uri : String, host : String) : String
+      scheme, rest = uri.split("://", 2)
+      suffix_idx = rest.index('/') || rest.index('?')
+      suffix = suffix_idx ? rest[suffix_idx..] : ""
+      "#{scheme}://#{host}#{suffix}"
     end
 
     private def parse_semver(value : String) : SemanticVersion
@@ -262,7 +315,7 @@ module Mongo::Unified
       return true if requirements.nil? || requirements.empty?
 
       mongo_version = @@mongo_version || SemanticVersion.new(8, 0, 0)
-      topology = @@topology || ENV["TOPOLOGY"]? || "replicaset"
+      topology = @@topology || Runner.utf_topology_name(ENV["TOPOLOGY"]? || "replicaset")
 
       requirements.any? do |req|
         ok = true
@@ -344,6 +397,7 @@ module Mongo::Unified
             end
 
             uri = ENV["MONGODB_URI"]
+            uri = sharded_uri_for_client(uri, req.useMultipleMongoses)
             uri = mongodb_uri_with(uri, query_parts.join("&")) unless query_parts.empty?
 
             options = Mongo::Options.new

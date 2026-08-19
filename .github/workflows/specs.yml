@@ -17,7 +17,7 @@ jobs:
           - topology: replicaset
             uri: mongodb://localhost:27017/?replicaSet=rs0
           - topology: sharded
-            uri: mongodb://localhost:27017
+            uri: mongodb://localhost:27017,localhost:27016
     runs-on: ubuntu-24.04
     name: MongoDB 8.0 ${{ matrix.topology }}
     steps:
@@ -101,6 +101,10 @@ jobs:
                 mongos --configdb cfg/cfg:27019 --bind_ip_all $MONGOS_PARAMS
               wait_running mongos
               docker exec mongos mongosh --eval 'sh.addShard("shard0/shard:27018")'
+              # Pin / recovery-token UTF needs two mongos (useMultipleMongoses: true).
+              docker run -d --name mongos2 --network mongo-test -p 27016:27017 mongo:8.0 \
+                mongos --configdb cfg/cfg:27019 --bind_ip_all $MONGOS_PARAMS
+              wait_running mongos2
               ;;
           esac
 
