@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+Phase 1 of the MongoDB 8.0 / Crystal 1.21 roadmap.
+
+### Added
+* **security:** Redact `authenticate`, `saslStart`, `saslContinue`, `createUser`, `updateUser`, `getnonce`, `copydb*`, and hello with `speculativeAuthenticate` in APM events and `Log.trace`.
+* **handshake:** Send `backpressure: "2"`, OS name / architecture / version, platform, and optional env metadata. First handshake uses legacy hello when Server API and load-balanced are unset. `Client#append_metadata` for wrapping libraries.
+* **cursors:** `#each` and block `Collection#find` close the cursor. Do not rely on `finalize` for `killCursors`.
+* **backpressure:** Retry `SystemOverloadedError` + `RetryableError` with exponential backoff. URI option `maxAdaptiveRetries` (default 2).
+* **cmap:** Pool events (`poolClearedEvent`, checkout / checkin). Retry `PoolClearedError` on retryable writes and reads.
+* **selection:** Shared `Mongo::SDAM::Selector` plus official server-selection, max-staleness, and RTT JSON tests (no mongod).
+* **testing:** Prose tests for transaction write concern, SDAM RTT, PoolCleared retry, backpressure, and find/getMore. UTF `waitForEvent`, `assertEventCount`, `wait`, `close`, `appendMetadata`.
+* **ci:** GitHub Actions matrix for standalone, replica set, and sharded. Local `scripts/mongo-topology.sh`. `TOPOLOGY` selects the default URI.
+
+### Changed
+* Network errors on a command now request an immediate monitor scan so the server can be rediscovered faster.
+
+### Fixed
+* **uri:** Options after the host with no delimiting slash parse correctly (`mongodb://localhost:27017?k=v`). The connection-string spec allows that form. The old parse kept a trailing `/` in the last option value.
+* **ci:** mongos no longer receives `transactionLifetimeLimitSeconds` (mongod-only; mongos exits with "Unknown --setParameter"). Spec helpers append `/?` when they add URI options.
+* **testing:** Map CI `TOPOLOGY=standalone` to UTF topology `single`. Skip or split `useMultipleMongoses` from the URI. Sharded CI starts two mongos. Prose tests use one mongos so failCommand matches the operation. Turn failCommand off on every mongos in `ensure`. UTF setup uses majority write concern.
+* **transactions:** Copy `errorLabels` from the reply and from `writeConcernError` so a retryable write-concern error is retried.
+* **retryable reads:** After a retryable error on a standalone, do not abort the retry just because the only server is temporarily Unknown. Handshake rediscovers it. Catch wrapped `Error::Network` as `Mongo::Error`.
+* **transactions:** Unpin a mongos session when startTransaction runs, when a non-transaction operation uses the session, and when commit fails with TransientTransactionError. Stay pinned after UnknownTransactionCommitResult. After closeConnection, wait for that mongos to be rediscovered instead of skipping the commit retry. UTF setup uses the internal client and majority writes, then copies cluster time and refreshes each mongos catalog so test-client pools stay empty. The UTF runner runs `killAllSessions` on every mongos after each test, as the spec asks, so a leftover sharded txn does not block the next drop for `transactionLifetimeLimitSeconds`.
+* **sdam:** An immediate monitor scan is not dropped when the monitor is already in `hello`. A flag makes the next loop check again instead of waiting a full heartbeat.
+* **sessions:** `Session::Pool#close` no longer holds the pool mutex while sending `endSessions`. That nested lock plus IO made GitHub sharded CI crash (`signal 11` in `Sync::Mutex#unlock`).
+
 ## 0.14.0 - 2026-08-19
 
 Updating driver implementation with the recent and more efficient BSON v0.8.1

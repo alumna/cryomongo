@@ -7,13 +7,13 @@ This roadmap defines the implementation checklist to achieve 100% compliance wit
 This phase focuses on ensuring the driver is safe, doesn't leak resources, and passes all baseline tests across all topologies.
 
 ### Security & Resource Management
-- [ ] **Command Logging and Monitoring:** Implement a redaction helper to prevent `Log.trace` and APM events from logging plaintext passwords and PII (e.g., redact `authenticate`, `saslStart`, `createUser` bodies).
-- [ ] **Cursors & Deterministic Cleanup:** Ensure Cursors don't rely solely on the Boehm GC (`finalize`) for sending `OP_KILL_CURSORS`. Implement block-based iteration or clear documentation for manual `.close`. 
+- [x] **Command Logging and Monitoring:** Redact `authenticate`, `saslStart`, `createUser`, and the other sensitive commands in `Log.trace` and APM events.
+- [x] **Cursors & Deterministic Cleanup:** `#each` and block `find` close the cursor. `finalize` is only a last resort. Call `#close` if you iterate with `#next`.
 
 ### Testing Infrastructure
-- [ ] **Strict UTF Dispatcher:** Update `spec/unified/dispatcher.cr` to explicitly `raise SKIP_TEST` for unknown operations instead of silently ignoring them, ensuring no false positives.
-- [ ] **Topology CI Matrix:** Expand GitHub Actions to test against `Standalone`, `ReplicaSet`, and `Sharded` (mongos) topologies.
-- [ ] **Dynamic Test Skipping:** Refactor the test runner to use the `runOnRequirements` topology field against the CI environment variable, removing hardcoded test skips.
+- [x] **Strict UTF Dispatcher:** Unknown operations raise `SKIP_TEST` (no silent pass).
+- [x] **Topology CI Matrix:** GitHub Actions runs standalone, replica set, and sharded. Push a PR to run that matrix.
+- [x] **Dynamic Test Skipping:** `runOnRequirements` uses live topology or `TOPOLOGY`. A few files stay skipped because the feature is not implemented (`interruptInUseConnections`, most unified SDAM).
 
 ### Core Specifications (JSON & Legacy)
 - [x] CRUD, Retryable Reads, Retryable Writes (UTF)
@@ -22,21 +22,21 @@ This phase focuses on ensuring the driver is safe, doesn't leak resources, and p
 - [x] Server Discovery and Monitoring (SDAM) (Legacy state-machine tests)
 - [x] Versioned API (UTF)
 - [x] OP_MSG (Implemented)
-- [ ] Handshake / Hello (Wire up UTF tests)
-- [ ] Server Selection & Max Staleness (Wire up spec tests)
-- [ ] Find, GetMore, KillCursors Commands (Wire up spec tests)
+- [x] Handshake / Hello (metadata, `backpressure: "2"`, UTF `metadata-not-propagated`)
+- [x] Server Selection & Max Staleness (offline JSON)
+- [x] Find, GetMore, KillCursors Commands (prose + live APM)
 
 ### Mandatory Prose Tests
-- [ ] **Client Backpressure:** Implement `SystemOverloadedError` exponential backoff prose tests.
-- [ ] **SDAM RTT:** Ensure Round Trip Time is continuously updated by monitor fibers.
-- [ ] **Transactions:** Implement "Write concern not inherited from collection object inside transaction" prose test.
-- [ ] **CMAP:** Implement `PoolClearedError` retryability prose test.
+- [x] **Client Backpressure:** `SystemOverloadedError` backoff. UTF retry-loop / max-attempts files pass.
+- [x] **SDAM RTT:** Monitor updates RTT. Prose test checks a non-zero RTT after heartbeats.
+- [x] **Transactions:** Write concern is not inherited from the collection inside a transaction.
+- [x] **CMAP:** `PoolClearedError` is retried. Prose test passes. The unified `pool-cleared-error.json` file is still skipped (rediscovery race).
 
 ---
 
 ## Phase 2: Cloud, Enterprise & Advanced Features
 
-This phase addresses the complexities of running in modern cloud environments (like Atlas), handling dynamic scaling, and verifying advanced MongoDB features.
+This phase addresses the complexities of running in modern cloud environments, handling dynamic scaling, and verifying advanced MongoDB features.
 
 ### Cloud Architecture Specs
 - [ ] **SRV Polling:** Spawn a background fiber for `mongodb+srv://` connections to poll DNS records periodically and dynamically add/remove `mongos` routers from the topology.
@@ -51,8 +51,6 @@ This phase addresses the complexities of running in modern cloud environments (l
 
 ### Advanced Authentication Specs
 - [x] Basic Auth (SCRAM-SHA-1/256, X509, PLAIN)
-- [ ] `MONGODB-AWS` (Requires AWS SigV4 signing)
-- [ ] `MONGODB-OIDC` (Machine-flow auth)
 
 ---
 
@@ -68,6 +66,7 @@ This phase optimizes the driver to take full advantage of Crystal's new `-Dprevi
 - [ ] **Compression (OP_COMPRESSED):** Implement wire protocol compression (zlib, snappy, or zstd) to drastically reduce bandwidth on large queries.
 - [ ] **Greedy Network Reads:** Upgrade socket reading to use Crystal 1.20's `IO#read_greedy` combined with a `Channel(Bytes)` buffer pool to eliminate repetitive `Bytes` slice allocations per incoming `OP_MSG`.
 - [ ] **SDAM Event Optimization:** Ensure APM/SDAM `Monitoring::Observable` broadcasts do not allocate intermediate arrays or closure objects in the hot path.
+- [ ] **Reduced or zero-allocation:** Check the codebase for all possible opportunities to reduce allocations even more, including zero-allocation operations whenever possible.
 
 ### Validation
 - [ ] **Benchmarking:** Implement the official MongoDB Driver Benchmarking spec to formally measure and prove the performance gains of the zero-allocation BSON and Crystal 1.21 optimizations.
@@ -77,3 +76,11 @@ This phase optimizes the driver to take full advantage of Crystal's new `-Dprevi
 ## Phase 4: The Final Boss (Post-1.0)
 
 - [ ] **Client-Side Field Level Encryption (CSFLE / Queryable Encryption):** Write Crystal bindings for the `libmongocrypt` C library, intercept queries, encrypt fields locally, and implement the associated legacy CSFLE test suite.
+
+## Phase 5: Cloud and External Authentication
+
+This phase will be done with the help of the community, because it requires external services and accounts, in order to be done.
+
+### Cloud Authentication Specs
+- [ ] `MONGODB-OIDC` (Machine-flow auth)
+- [ ] `MONGODB-AWS` (Requires AWS SigV4 signing)

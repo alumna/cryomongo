@@ -19,15 +19,31 @@ module Mongo::URI
 
     raise Mongo::Error.new("Invalid scheme") unless scheme == "mongodb" || scheme == "mongodb+srv"
 
-    path_split = scheme_rest.split('/', limit: 2)
-    seeds = path_split[0].split(",")
-    rest = path_split[1]?
+    # Hosts end at the first '/' that comes before any '?', or at '?' when the
+    # delimiting slash is omitted. The connection-string spec allows both
+    # mongodb://host/?k=v and mongodb://host?k=v (2023-08-02). Crystal's URI
+    # parser treats everything after '?' as the query, so reconstructing
+    # mongodb://host?k=v/ would keep a trailing slash in the last option value.
+    query_idx = scheme_rest.index('?')
+    slash_idx = scheme_rest.index('/')
+    host_part : String
+    rest : String?
 
+    if slash_idx && (query_idx.nil? || slash_idx < query_idx)
+      host_part = scheme_rest[0, slash_idx]
+      rest = scheme_rest[(slash_idx + 1)..]
+    elsif query_idx
+      host_part = scheme_rest[0, query_idx]
+      rest = scheme_rest[query_idx..]
+    else
+      host_part = scheme_rest
+      rest = nil
+    end
+
+    seeds = host_part.split(",")
     raise Mongo::Error.new("Invalid host") if seeds.any?(&.empty?)
 
     parsed_uri = ::URI.parse("#{scheme}://#{seeds[0]}/#{rest}")
-
-    raise Mongo::Error.new("Trailing slash is required with options.") if !parsed_uri.query.nil? && rest && rest.empty?
 
     if parsed_uri.userinfo && (parsed_uri.user.nil? || parsed_uri.user.try(&.empty?))
       raise Mongo::Error.new("Userinfo provided but username is empty")

@@ -8,31 +8,105 @@ on:
 
 jobs:
   tests:
-    # Use the matrix strategy when needing to split/shard the tests
-    # to reduce the total execution time by running tests in parallel
-
-    #strategy:
-    #  fail-fast: false
-    #  matrix:
-    #    part: [0, 1, 2, 3, 4] # This creates 5 concurrent jobs (0/5 … 4/5)
-
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - topology: standalone
+            uri: mongodb://localhost:27017
+          - topology: replicaset
+            uri: mongodb://localhost:27017/?replicaSet=rs0
+          - topology: sharded
+            uri: mongodb://localhost:27017,localhost:27016
     runs-on: ubuntu-24.04
-    name: MongoDB 8.0 replica set
+    name: MongoDB 8.0 ${{ matrix.topology }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Start MongoDB ReplicaSet (8.0)
+      - name: Start MongoDB ${{ matrix.topology }} (8.0)
+        env:
+          TOPOLOGY: ${{ matrix.topology }}
         run: |
-          # One-node replica set. Same topology as local scripts/mongo-rs.sh.
-          docker run --name mongo -d -p 27017:27017 --tmpfs /data/db mongo:8.0 \
-            --replSet rs0 \
-            --setParameter enableTestCommands=1 \
-            --setParameter acceptApiVersion2=1 \
-            --setParameter transactionLifetimeLimitSeconds=20
-          sleep 5
-          docker exec mongo mongosh --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]})'
-          sleep 5
+          set -euo pipefail
+          MONGOD_PARAMS="--setParameter enableTestCommands=1 --setParameter acceptApiVersion2=1 --setParameter transactionLifetimeLimitSeconds=20"
+          # mongos rejects mongod-only parameters such as transactionLifetimeLimitSeconds
+          MONGOS_PARAMS="--setParameter enableTestCommands=1 --setParameter acceptApiVersion2=1"
+
+          dump_logs() {
+            local name="$1"
+            echo "----- docker logs: $name -----" >&2
+            docker logs "$name" >&2 || true
+          }
+
+          wait_running() {
+            local name="$1"
+            local extra=()
+            if [ -n "${2:-}" ]; then
+              extra=(--port "$2")
+            fi
+            for _ in $(seq 1 40); do
+              if docker exec "$name" mongosh "${extra[@]}" --quiet --eval 'db.runCommand({ping:1}).ok' >/dev/null 2>&1; then
+                return 0
+              fi
+              if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || echo false)" != "true" ]; then
+                echo "$name is not running" >&2
+                dump_logs "$name"
+                return 1
+              fi
+              sleep 1
+            done
+            echo "timed out waiting for $name" >&2
+            dump_logs "$name"
+            return 1
+          }
+
+          wait_primary() {
+            local name="$1" port="$2"
+            for _ in $(seq 1 40); do
+              if docker exec "$name" mongosh --port "$port" --quiet --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)' >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep 1
+            done
+            echo "$name did not become primary" >&2
+            dump_logs "$name"
+            return 1
+          }
+
+          case "$TOPOLOGY" in
+            standalone)
+              docker run --name mongo -d -p 27017:27017 --tmpfs /data/db mongo:8.0 $MONGOD_PARAMS
+              wait_running mongo
+              ;;
+            replicaset)
+              docker run --name mongo -d -p 27017:27017 --tmpfs /data/db mongo:8.0 --replSet rs0 $MONGOD_PARAMS
+              wait_running mongo
+              docker exec mongo mongosh --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]})'
+              wait_primary mongo 27017
+              ;;
+            sharded)
+              docker network create mongo-test
+              docker run -d --name cfg --network mongo-test --network-alias cfg --tmpfs /data/db mongo:8.0 \
+                mongod --configsvr --replSet cfg --port 27019 --bind_ip_all $MONGOD_PARAMS
+              docker run -d --name shard --network mongo-test --network-alias shard --tmpfs /data/db mongo:8.0 \
+                mongod --shardsvr --replSet shard0 --port 27018 --bind_ip_all $MONGOD_PARAMS
+              wait_running cfg 27019
+              wait_running shard 27018
+              docker exec cfg mongosh --port 27019 --eval 'rs.initiate({_id:"cfg",configsvr:true,members:[{_id:0,host:"cfg:27019"}]})'
+              docker exec shard mongosh --port 27018 --eval 'rs.initiate({_id:"shard0",members:[{_id:0,host:"shard:27018"}]})'
+              wait_primary cfg 27019
+              wait_primary shard 27018
+              docker run -d --name mongos --network mongo-test -p 27017:27017 mongo:8.0 \
+                mongos --configdb cfg/cfg:27019 --bind_ip_all $MONGOS_PARAMS
+              wait_running mongos
+              docker exec mongos mongosh --eval 'sh.addShard("shard0/shard:27018")'
+              # Pin / recovery-token UTF needs two mongos (useMultipleMongoses: true).
+              docker run -d --name mongos2 --network mongo-test -p 27016:27017 mongo:8.0 \
+                mongos --configdb cfg/cfg:27019 --bind_ip_all $MONGOS_PARAMS
+              wait_running mongos2
+              ;;
+          esac
 
       - name: Install Crystal
         uses: crystal-lang/install-crystal@v1
@@ -43,11 +117,7 @@ jobs:
         run: shards install
 
       - name: Run Specs
-        # The full suite is about 6–7 minutes. Do not set CI_SHARD.
-        # spec/sharding.cr still honors CI_SHARD="N/M" if the suite grows
-        # and you add a matrix again.
+        env:
+          TOPOLOGY: ${{ matrix.topology }}
+          MONGODB_URI: ${{ matrix.uri }}
         run: crystal spec
-
-        # SHARDED TEST EXECUTION
-        # Pass the matrix part into the custom sharding logic
-        # run: CI_SHARD="${{ matrix.part }}/5" crystal spec

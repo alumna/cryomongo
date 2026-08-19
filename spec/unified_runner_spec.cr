@@ -10,10 +10,16 @@ describe "Unified Test Runner" do
     Mongo::Unified::Runner.close_shared_client
   end
 
+  it "maps CI topology names to official UTF topology names" do
+    Mongo::Unified::Runner.utf_topology_name("standalone").should eq "single"
+    Mongo::Unified::Runner.utf_topology_name("replicaset").should eq "replicaset"
+    Mongo::Unified::Runner.utf_topology_name("sharded").should eq "sharded"
+    Mongo::Unified::Runner.utf_topology_name("single").should eq "single"
+  end
+
   it "bootstraps the environment successfully" do
     uri = ENV["MONGODB_URI"]
-    separator = uri.includes?("?") ? "&" : "?"
-    client = Mongo::Client.new("#{uri}#{separator}serverSelectionTimeoutMS=3000")
+    client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=3000"))
     begin
       response = client.command(Mongo::Commands::Ping)
       if response

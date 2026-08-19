@@ -8,28 +8,19 @@ module Mongo::Commands::Hello
   extend Command
   extend self
 
-  OS_TYPE = {% if host_flag?(:linux) %} "Linux" {% elsif host_flag?(:darwin) %} "Darwin" {% elsif host_flag?(:win32) %} "Windows" {% else %} "Unknown" {% end %}
-
   # Returns a pair of OP_MSG body and sequences associated with the command and arguments.
-  def command(appname : String? = nil, legacy : Bool = false)
+  # *client* is the handshake metadata document. Omit it on later heartbeats.
+  def command(appname : String? = nil, legacy : Bool = false, *, client : BSON? = nil, load_balanced : Bool = false)
     cmd_name = legacy ? "isMaster" : "hello"
-    {BSON.new({
-      cmd_name  => 1,
-      "$db"     => "admin",
-      "helloOk" => true,
-      "client"  => {
-        application: {
-          name: appname || "cryomongo",
-        },
-        driver: {
-          name:    "cryomongo",
-          version: Mongo::VERSION,
-        },
-        os: {
-          type: OS_TYPE,
-        },
-      },
-    }), nil}
+    body = BSON.build do |builder|
+      builder[cmd_name] = 1
+      builder["$db"] = "admin"
+      builder["helloOk"] = true
+      builder["backpressure"] = "2"
+      builder["loadBalanced"] = true if load_balanced
+      builder["client"] = client if client
+    end
+    {body, nil}
   end
 
   Common.result(Result) {
@@ -72,6 +63,7 @@ module Mongo::Commands::Hello
     property last_write : LastWrite?
     property isreplicaset : Bool?
     property topology_version : BSON?
+    property helloOk : Bool?
   }
 
   # Transforms the server result.

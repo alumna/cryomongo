@@ -7,6 +7,8 @@ require "./concerns"
 require "./read_preference"
 require "./sdam/**"
 require "./uri"
+require "./handshake"
+require "./backoff"
 require "./monitoring"
 require "./client/*"
 
@@ -52,6 +54,9 @@ class Mongo::Client
   @topology_update = Channel(Bool).new(1)
   @commands_observable = Monitoring::Observable(Monitoring::Commands::Event).new
   @sdam_observable = Monitoring::Observable(Monitoring::SDAM::Event).new
+  @cmap_observable = Monitoring::Observable(Monitoring::CMAP::Event).new
+  @handshake_extra = [] of Handshake::DriverInfo
+  @handshake_client : BSON? = nil
 
   # The default auth database is optionally provided as a part of the connection string uri.
   #
@@ -80,6 +85,13 @@ class Mongo::Client
 
     if read_concern_level = @options.read_concern_level
       @read_concern = ReadConcern.new(level: read_concern_level)
+    end
+
+    if (max_s = @options.max_staleness_seconds) && max_s > 0
+      pref_mode = @options.read_preference
+      if pref_mode.nil? || pref_mode == "primary"
+        raise Mongo::Error.new("maxStalenessSeconds cannot be used with read preference primary")
+      end
     end
 
     if read_pref = @options.read_preference
@@ -172,6 +184,34 @@ class Mongo::Client
   # Unsubscribes from SDAM events.
   def unsubscribe_sdam(callback : Monitoring::SDAM::Event -> Nil) : Nil
     @sdam_observable.unsubscribe(callback)
+  end
+
+  # Subscribes to connection pool (CMAP) events.
+  def subscribe_cmap(&callback : Monitoring::CMAP::Event -> Nil) : Monitoring::CMAP::Event -> Nil
+    @cmap_observable.subscribe(&callback)
+  end
+
+  # Unsubscribes from CMAP events.
+  def unsubscribe_cmap(callback : Monitoring::CMAP::Event -> Nil) : Nil
+    @cmap_observable.unsubscribe(callback)
+  end
+
+  # Handshake `client` metadata sent on new connections.
+  def handshake_client_document : BSON
+    @handshake_client ||= Handshake.client_document(@options.appname, extra: @handshake_extra)
+  end
+
+  # Append wrapping-library info to handshake metadata. Existing sockets are not closed.
+  def append_metadata(name : String, version : String? = nil, platform : String? = nil) : Nil
+    info = Handshake::DriverInfo.new(name, version, platform)
+    return if @handshake_extra.includes?(info)
+    @handshake_extra << info
+    @handshake_client = nil
+  end
+
+  # Latest RTT for a server. Used by the SDAM RTT prose test (events skip equal descriptions).
+  def server_round_trip_time(address : String) : Time::Span?
+    topology.servers.find { |s| s.address == address }.try(&.round_trip_time)
   end
 
   protected def emit_sdam_event(event : Monitoring::SDAM::Event)
@@ -338,9 +378,18 @@ class Mongo::Client
             max_idle_time: @options.max_idle_time
           ) do
             connection = Mongo::Connection.new(server_description, @credentials, @options, is_monitor: false)
-            result, round_trip_time = connection.handshake(send_metadata: true, appname: @options.appname)
+            emit_cmap_event(Monitoring::CMAP::ConnectionCreatedEvent.new(server_description.address, connection.connection_id))
+            legacy = @options.server_api.nil? && !@options.load_balanced
+            result, round_trip_time = connection.handshake(
+              send_metadata: true,
+              appname: @options.appname,
+              legacy: legacy,
+              client_metadata: handshake_client_document,
+              load_balanced: @options.load_balanced == true
+            )
             connection.authenticate
-            new_rtt = Connection.average_round_trip_time(round_trip_time, server_description.round_trip_time)
+            old_rtt = server_description.type.unknown? ? nil : server_description.round_trip_time
+            new_rtt = Connection.average_round_trip_time(round_trip_time, old_rtt)
             new_description = SDAM::ServerDescription.new(server_description.address, result, new_rtt)
             topology.update(server_description, new_description)
             server_description.update(new_description)
@@ -356,12 +405,24 @@ class Mongo::Client
       end
     end
 
-    pool.checkout
+    emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutStartedEvent.new(server_description.address))
+    begin
+      conn = pool.checkout
+      emit_cmap_event(Monitoring::CMAP::ConnectionCheckedOutEvent.new(server_description.address, conn.connection_id))
+      conn
+    rescue error : Mongo::Error::PoolCleared
+      emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+      raise error
+    rescue error : Mongo::Error::Connection
+      emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "timeout"))
+      raise error
+    end
   end
 
   private def release_connection(connection : Mongo::Connection)
     pool = @connection_pool_lock.synchronize { @pools[connection.server_description.address]? }
     pool.try &.release(connection)
+    emit_cmap_event(Monitoring::CMAP::ConnectionCheckedInEvent.new(connection.server_description.address, connection.connection_id))
   end
 
   protected def close_connection_pool(server_description : SDAM::ServerDescription)
@@ -369,7 +430,15 @@ class Mongo::Client
       @pool_locks.delete(server_description.address)
       @pools.delete(server_description.address)
     end
-    pool_to_close.try(&.close)
+    if pool_to_close
+      emit_cmap_event(Monitoring::CMAP::PoolClearedEvent.new(server_description.address))
+      pool_to_close.close
+      emit_cmap_event(Monitoring::CMAP::PoolClosedEvent.new(server_description.address))
+    end
+  end
+
+  protected def emit_cmap_event(event : Monitoring::CMAP::Event)
+    @cmap_observable.broadcast(event) if @cmap_observable.has_subscribers?
   end
 
   protected def on_topology_update
@@ -385,6 +454,16 @@ class Mongo::Client
           monitor.server_description.address == server.address
         }
         add_monitor(server, start_monitoring: @monitoring_enabled) if no_monitor
+      end
+    end
+  end
+
+  # Keep the highest cluster time this client has seen.
+  def advance_cluster_time(cluster_time : Session::ClusterTime) : Nil
+    @cluster_time_lock.synchronize do
+      current = @cluster_time
+      if current.nil? || current < cluster_time
+        @cluster_time = cluster_time
       end
     end
   end

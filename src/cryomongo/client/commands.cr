@@ -18,8 +18,24 @@ class Mongo::Client
   )
     # Create an implicit session only when the caller did not pass one.
     # The caller (bulk, change stream, cursor) owns ending a session it created.
+    # endSessions during pool close must not check out from the pool.
     owns_session = session.nil?
-    session ||= Session::ClientSession.new(self)
+    if session.nil?
+      session = if command.is_a?(Commands::EndSessions)
+                  Session::ClientSession.new(self, pooled: false)
+                else
+                  Session::ClientSession.new(self)
+                end
+    end
+
+    # After commit the session stays pinned so commit can be retried on the
+    # same mongos. Any other operation must unpin.
+    if (s = session)
+      st = s.transaction_state
+      unless st.starting? || st.in_progress? || command.is_a?(Commands::CommitTransaction) || command.is_a?(Commands::AbortTransaction)
+        s.unpin
+      end
+    end
 
     result = begin
       if session && session.is_transaction? && !command.is_a?(Commands::CommitTransaction) && !command.is_a?(Commands::AbortTransaction)
@@ -139,22 +155,11 @@ class Mongo::Client
         **args
       )
     else
-      # Select a suitable server and retrieve the underlying connection.
-      server_description ||= server_selection(command, args, read_preference)
-
-      if session.options.snapshot && server_description.max_wire_version < 13
-        raise Error::Client.new("Snapshot reads require MongoDB 5.0 or later")
-      end
-
-      connection = get_connection(server_description)
-      session.pin(server_description)
-
-      execute_command(
+      execute_once_or_overload_retry(
         command,
         session,
         read_preference,
         server_description,
-        connection,
         operation_id,
         end_implicit_session,
         **args
@@ -293,7 +298,7 @@ class Mongo::Client
             address: address,
             duration: duration,
             reply: op_msg.safe_payload(command),
-            failure: error
+            failure: Monitoring::Redact.failure(command_name, error, op_msg.body)
           ))
         else
           @commands_observable.broadcast(Monitoring::Commands::CommandSucceededEvent.new(
@@ -313,9 +318,7 @@ class Mongo::Client
 
     # Update the stored cluster time.
     if cluster_time = base_result.cluster_time
-      @cluster_time_lock.synchronize do
-        @cluster_time = cluster_time if !@cluster_time || @cluster_time.try &.< cluster_time
-      end
+      advance_cluster_time(cluster_time)
       session.advance_cluster_time(cluster_time) if session
     end
 
@@ -358,6 +361,7 @@ class Mongo::Client
         description.last_update_time = desc.last_update_time
         topology.update(desc, description)
         close_connection_pool(desc)
+        @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
       }
       session.try &.dirty = true
       error = Error::Network.new(error)
@@ -382,7 +386,9 @@ class Mongo::Client
         error.add_transient_transaction_label
       end
 
-      if error.transient_transaction? || error.unknown_transaction?
+      # Stay pinned after UnknownTransactionCommitResult so commit retries on
+      # the same mongos. Unpin only on TransientTransactionError.
+      if error.transient_transaction?
         session.try &.unpin
       end
     end

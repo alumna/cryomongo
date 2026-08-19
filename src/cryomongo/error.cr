@@ -17,6 +17,10 @@ module Mongo
       has_error_label?("RetryableWriteError")
     end
 
+    def retryable_overload?
+      has_error_label?("SystemOverloadedError") && has_error_label?("RetryableError")
+    end
+
     def retryable_read?
       self.is_a?(Error::Network) || (
         self.is_a?(Error::Command) && self.retryable_read_code?
@@ -104,6 +108,8 @@ module Mongo
     getter code_name : String?
     getter details : BSON?
     getter topology_version : BSON?
+    # Server-supplied backoff for SystemOverloadedError, in milliseconds.
+    getter base_backoff_ms : Int64? = nil
 
     # See: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#not-master-and-node-is-recovering
     RECOVERING_CODES    = {11600, 11602, 13436, 189, 91}
@@ -119,7 +125,7 @@ module Mongo
     # CursorNotFound (43) is always resumable for change streams.
     RESUMABLE_CODES = {43, 63, 150, 234, 13388, 133} + RETRYABLE_CODES
 
-    def initialize(code, @code_name, message, @details, *, @error_labels = Set(String).new, @topology_version : BSON? = nil)
+    def initialize(code, @code_name, message, @details, *, @error_labels = Set(String).new, @topology_version : BSON? = nil, @base_backoff_ms : Int64? = nil)
       @code = code.try &.as(Int32) || 0
       @message = message.try(&.as(String)) || ""
     end

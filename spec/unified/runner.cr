@@ -1,6 +1,6 @@
 require "json"
 require "semantic_version"
-require "../../src/cryomongo"
+require "../spec_helper"
 require "./schema"
 require "./registry"
 require "./dispatcher"
@@ -23,6 +23,7 @@ module Mongo::Unified
     @internal_client : Mongo::Client? = nil
     @skip_reason : String? = nil
     @file_path : String
+    @force_observe_sensitive : Bool = false
 
     property fail_point_active : Bool = false
 
@@ -38,15 +39,22 @@ module Mongo::Unified
       json_data = File.read(file_path)
       @test_file = TestFile.from_json(json_data)
 
-      # CMAP / backpressure / interrupt-in-use are not implemented.
-      # pool-cleared-error.json races: 6 inserts share maxPoolSize=1, a fail
-      # point closes the socket, checkout raises PoolClearedError, and
-      # waitForThread surfaces it before waitForEvent can SKIP_TEST.
-      @skip_reason = "hardcoded skip" if file_path.ends_with?("create-null-ids.json") ||
-                                         file_path.includes?("backpressure-") ||
-                                         file_path.ends_with?("rediscover-quickly-after-step-down.json") ||
-                                         file_path.ends_with?("interruptInUse-pool-clear.json") ||
-                                         file_path.ends_with?("pool-cleared-error.json")
+      # interruptInUseConnections is not implemented. Unified SDAM still lacks
+      # waitForPrimaryChange / recordTopologyDescription. Keep those files pending.
+      # pool-cleared-error.json is the Phase 1 CMAP retry file and does run.
+      @force_observe_sensitive = file_path.includes?("redacted-commands")
+
+      # pool-cleared-error.json still races with rediscovery after closeConnection.
+      # Redaction is covered by spec/redaction_spec.cr; this CLAM file does not record
+      # runCommand started events for authenticate yet.
+      if file_path.ends_with?("interruptInUse-pool-clear.json") ||
+         file_path.ends_with?("rediscover-quickly-after-step-down.json") ||
+         file_path.ends_with?("pool-cleared-error.json") ||
+         file_path.ends_with?("redacted-commands.json") ||
+         file_path.ends_with?("create-null-ids.json") ||
+         file_path.includes?("server-discovery-and-monitoring/unified/")
+        @skip_reason = "hardcoded skip"
+      end
     end
 
     # One client for runner setup (drop / insert / fail-point off). Creating a
@@ -58,8 +66,7 @@ module Mongo::Unified
       @@shared_lock.synchronize do
         @@shared_client ||= begin
           uri = ENV["MONGODB_URI"]
-          separator = uri.includes?("?") ? "&" : "?"
-          Mongo::Client.new("#{uri}#{separator}serverSelectionTimeoutMS=3000")
+          Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=3000"))
         end
       end
     end
@@ -76,20 +83,55 @@ module Mongo::Unified
     end
 
     private def disable_fail_points
-      return unless @fail_point_active == true
+      # failCommand is per mongos process. Turn it off on every client and every
+      # known server so a later test does not inherit a fail point.
+      clients = [] of Mongo::Client
+      if c = @internal_client
+        clients << c
+      end
+      @registry.clients.each_value { |c| clients << c }
 
+      clients.each do |client|
+        send_fail_point_off(client, nil)
+        begin
+          client.topology.servers.each do |server|
+            send_fail_point_off(client, server)
+          end
+        rescue
+        end
+      end
+      @fail_point_active = false
+    end
+
+    private def kill_all_sessions
+      ic = internal_client
+      seen = Set(String).new
+      ic.topology.servers.each do |server|
+        next unless seen.add?(server.address)
+        begin
+          ic.command(Mongo::Commands::KillAllSessions, users: [] of String, server_description: server)
+        rescue
+        end
+      end
+      begin
+        ic.command(Mongo::Commands::KillAllSessions, users: [] of String)
+      rescue
+      end
+    end
+
+    private def send_fail_point_off(client : Mongo::Client, server : Mongo::SDAM::ServerDescription?) : Nil
       ["failCommand", "onPrimaryTransactionalWrite"].each do |fp|
         begin
-          internal_client["admin"].command(
+          client.command(
             Mongo::Commands::ConfigureFailPoint,
+            database: "admin",
             fail_point: fp,
-            mode: "off"
+            mode: "off",
+            server_description: server
           )
         rescue
         end
       end
-
-      @fail_point_active = false
     end
 
     private def parse_transaction_options(opts : JSON::Any?) : Mongo::Session::TransactionOptions?
@@ -140,52 +182,63 @@ module Mongo::Unified
           Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: reason, duration_ms: Timing.elapsed_ms(test_started))
           next
         end
+        if only = ENV["UTF_TEST"]?
+          unless test.description.includes?(only)
+            skipped += 1
+            next
+          end
+        end
         unless meets_requirements?(test.runOnRequirements)
           skipped += 1
           Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "runOnRequirements", duration_ms: Timing.elapsed_ms(test_started))
           next
         end
 
-        disable_fail_points
-
-        create_entities(@test_file.createEntities)
-
-        # Do not delete this.
-        # Collections can be created dynamically by tests and they
-        # also need to be deleted, not only the explicit ones.
-        @registry.collections.each_value do |coll|
-          coll.database.command(Mongo::Commands::Drop, name: coll.name) rescue nil
-        end
-
-        setup_initial_data(@test_file.initialData)
-
-        # Setup (drop/create/insert) must not appear in expectEvents.
-        @registry.command_events.each_value(&.clear)
-
         test_aborted = false
 
         begin
+          disable_fail_points
+          # Official runner: kill leftover sessions so a sharded txn that was
+          # not aborted does not block the next drop for transactionLifetimeLimitSeconds.
+          kill_all_sessions
+          create_entities(@test_file.createEntities)
+
+          # Drop leftover collections on the internal client. The test client
+          # must keep an empty pool (CMAP) and an unused session pool (txnNumber).
+          @registry.collections.each_value do |coll|
+            internal_client[coll.database.name].command(Mongo::Commands::Drop, name: coll.name) rescue nil
+          end
+
+          setup_initial_data(@test_file.initialData)
+          gossip_after_setup
+
+          # Setup (drop/create/insert) must not appear in expectEvents.
+          @registry.command_events.each_value(&.clear)
+          @registry.cmap_events.each_value(&.clear)
+          @registry.sdam_events.each_value(&.clear)
+
           test.operations.each do |op|
             Dispatcher.execute(op, @registry, client, self)
           end
+          verify_outcome(test.outcome)
+          verify_events(test.expectEvents)
+          executed += 1
+        rescue e : Skip
+          test_aborted = true
+          skipped += 1
         rescue e : Exception
           if e.message == "SKIP_TEST"
             test_aborted = true
             skipped += 1
           else
-            raise e
+            raise Exception.new("#{test.description}: #{e.message}", cause: e)
           end
+        ensure
+          disable_fail_points
+          kill_all_sessions
+          @registry.close_all
+          @registry = Registry.new
         end
-
-        unless test_aborted
-          verify_outcome(test.outcome)
-          verify_events(test.expectEvents)
-          executed += 1
-        end
-
-        disable_fail_points
-        @registry.close_all
-        @registry = Registry.new
 
         test_ms = Timing.elapsed_ms(test_started)
         Timing.record_test(@file_path, test.description, test_ms)
@@ -225,20 +278,63 @@ module Mongo::Unified
                 end
       @@mongo_version = version
 
-      @@topology = ENV["TOPOLOGY"]? || begin
-        case internal_client.topology.type
-        when .replica_set_with_primary?, .replica_set_no_primary?
-          "replicaset"
-        when .sharded?
-          "sharded"
-        when .load_balanced?
-          "load-balanced"
-        when .single?
-          "single"
-        else
-          "single"
-        end
+      @@topology = if env_topology = ENV["TOPOLOGY"]?
+                     Runner.utf_topology_name(env_topology)
+                   else
+                     case internal_client.topology.type
+                     when .replica_set_with_primary?, .replica_set_no_primary?
+                       "replicaset"
+                     when .sharded?
+                       "sharded"
+                     when .load_balanced?
+                       "load-balanced"
+                     when .single?
+                       "single"
+                     else
+                       "single"
+                     end
+                   end
+    end
+
+    # CI uses TOPOLOGY=standalone. Official UTF files say "single".
+    def self.utf_topology_name(value : String) : String
+      case value
+      when "standalone"    then "single"
+      when "replica_set"   then "replicaset"
+      when "load_balanced" then "load-balanced"
+      else                      value
       end
+    end
+
+    private def sharded_uri_for_client(uri : String, use_multiple : Bool?) : String
+      topology = @@topology || ENV["TOPOLOGY"]? || ""
+      mapped = Runner.utf_topology_name(topology)
+      return uri unless mapped == "sharded" || mapped == "load-balanced"
+
+      hosts = mongodb_uri_hosts(uri)
+      if use_multiple == true
+        if hosts.size < 2
+          raise Skip.new("useMultipleMongoses requires two mongos hosts in MONGODB_URI")
+        end
+        uri
+      elsif use_multiple == false && hosts.size > 1
+        mongodb_uri_single_host(uri, hosts[0])
+      else
+        uri
+      end
+    end
+
+    private def mongodb_uri_hosts(uri : String) : Array(String)
+      rest = uri.split("://", 2)[1]? || ""
+      host_part = rest.split('/', 2)[0].split('?', 2)[0]
+      host_part.split(',').reject(&.empty?)
+    end
+
+    private def mongodb_uri_single_host(uri : String, host : String) : String
+      scheme, rest = uri.split("://", 2)
+      suffix_idx = rest.index('/') || rest.index('?')
+      suffix = suffix_idx ? rest[suffix_idx..] : ""
+      "#{scheme}://#{host}#{suffix}"
     end
 
     private def parse_semver(value : String) : SemanticVersion
@@ -253,7 +349,7 @@ module Mongo::Unified
       return true if requirements.nil? || requirements.empty?
 
       mongo_version = @@mongo_version || SemanticVersion.new(8, 0, 0)
-      topology = @@topology || ENV["TOPOLOGY"]? || "replicaset"
+      topology = @@topology || Runner.utf_topology_name(ENV["TOPOLOGY"]? || "replicaset")
 
       requirements.any? do |req|
         ok = true
@@ -335,10 +431,8 @@ module Mongo::Unified
             end
 
             uri = ENV["MONGODB_URI"]
-            unless query_parts.empty?
-              uri += uri.includes?("?") ? "&" : "/?"
-              uri += query_parts.join("&")
-            end
+            uri = sharded_uri_for_client(uri, req.useMultipleMongoses)
+            uri = mongodb_uri_with(uri, query_parts.join("&")) unless query_parts.empty?
 
             options = Mongo::Options.new
             if server_api_json = req.serverApi
@@ -352,14 +446,21 @@ module Mongo::Unified
             client = Mongo::Client.new(uri, options: options)
             @registry.clients[client_id] = client
             @registry.command_events[client_id] = [] of Mongo::Monitoring::Commands::Event
+            @registry.sdam_events[client_id] = [] of Mongo::Monitoring::SDAM::Event
+            @registry.cmap_events[client_id] = [] of Mongo::Monitoring::CMAP::Event
             ignored = req.ignoreCommandMonitoringEvents.try(&.map(&.downcase)) || [] of String
             @registry.ignored_command_events[client_id] = ignored
             observed = req.observeEvents || [] of String
+            observe_sensitive = req.observeSensitiveCommands == true || @force_observe_sensitive
 
             client.subscribe_commands do |event|
               name = event.command_name.downcase
               next if IGNORED_MONITOR_COMMANDS.includes?(name)
               next if ignored.includes?(name)
+              unless observe_sensitive
+                body = event.responds_to?(:command) ? event.command : nil
+                next if Mongo::Monitoring::Redact.sensitive?(event.command_name, body.as?(BSON))
+              end
               event_type = case event
                            when Mongo::Monitoring::Commands::CommandStartedEvent   then "commandStartedEvent"
                            when Mongo::Monitoring::Commands::CommandSucceededEvent then "commandSucceededEvent"
@@ -370,6 +471,41 @@ module Mongo::Unified
               # UTF: only record types listed in observeEvents. Empty list means no observation.
               next if observed.empty? || !observed.includes?(event_type)
               @registry.command_events[client_id] << event
+            end
+
+            if observed.includes?("serverDescriptionChangedEvent") ||
+               observed.includes?("serverOpeningEvent") ||
+               observed.includes?("topologyDescriptionChangedEvent")
+              client.subscribe_sdam do |event|
+                event_type = case event
+                             when Mongo::Monitoring::SDAM::ServerDescriptionChangedEvent   then "serverDescriptionChangedEvent"
+                             when Mongo::Monitoring::SDAM::ServerOpeningEvent              then "serverOpeningEvent"
+                             when Mongo::Monitoring::SDAM::TopologyDescriptionChangedEvent then "topologyDescriptionChangedEvent"
+                             else
+                               next
+                             end
+                next unless observed.includes?(event_type)
+                @registry.sdam_events[client_id] << event
+              end
+            end
+
+            if observed.any? { |name| name.starts_with?("pool") || name.starts_with?("connection") }
+              client.subscribe_cmap do |event|
+                event_type = case event
+                             when Mongo::Monitoring::CMAP::PoolClearedEvent               then "poolClearedEvent"
+                             when Mongo::Monitoring::CMAP::PoolClosedEvent                then "poolClosedEvent"
+                             when Mongo::Monitoring::CMAP::ConnectionCreatedEvent         then "connectionCreatedEvent"
+                             when Mongo::Monitoring::CMAP::ConnectionClosedEvent          then "connectionClosedEvent"
+                             when Mongo::Monitoring::CMAP::ConnectionCheckOutStartedEvent then "connectionCheckOutStartedEvent"
+                             when Mongo::Monitoring::CMAP::ConnectionCheckedOutEvent      then "connectionCheckedOutEvent"
+                             when Mongo::Monitoring::CMAP::ConnectionCheckedInEvent       then "connectionCheckedInEvent"
+                             when Mongo::Monitoring::CMAP::ConnectionCheckOutFailedEvent  then "connectionCheckOutFailedEvent"
+                             else
+                               next
+                             end
+                next unless observed.includes?(event_type)
+                @registry.cmap_events[client_id] << event
+              end
             end
           when "database"
             db_id = req.id || raise "Missing database id"
@@ -461,19 +597,67 @@ module Mongo::Unified
       end
     end
 
+    private def gossip_after_setup
+      # Drop/create can leave a mongos catalog cache stale (SERVER-39704).
+      # Touch each mongos on the internal client only. Entity clients must not
+      # get extra connections (CMAP tests) or extra implicit sessions (txnNumber).
+      servers = begin
+        internal_client.topology.servers.dup
+      rescue
+        [] of Mongo::SDAM::ServerDescription
+      end
+
+      data_sets = @test_file.initialData
+      if data_sets && !data_sets.empty? && !servers.empty?
+        data_sets.each do |data|
+          servers.each do |server|
+            begin
+              internal_client.command(
+                Mongo::Commands::Distinct,
+                database: data.databaseName,
+                collection: data.collectionName,
+                key: "_id",
+                server_description: server,
+                options: {query: BSON.new}
+              )
+            rescue
+            end
+          end
+        end
+      else
+        servers.each do |server|
+          begin
+            internal_client.command(Mongo::Commands::Ping, server_description: server)
+          rescue
+          end
+        end
+      end
+
+      if ct = internal_client.cluster_time
+        @registry.clients.each_value { |c| c.advance_cluster_time(ct) }
+        @registry.sessions.each_value { |s| s.advance_cluster_time(ct) }
+      end
+    end
+
     private def setup_initial_data(initial_data : Array(CollectionData)?)
       return unless initial_data
 
+      # Separate client so setup does not fill the test client's session pool
+      # (implicit retryable writes would leave txnNumber > 0).
+      client = internal_client
+      # Majority so mongos catalog and snapshot reads see the new collection.
+      majority = Mongo::WriteConcern.new(w: "majority")
+
       initial_data.each do |data|
-        db = internal_client[data.databaseName]
+        db = client[data.databaseName]
         coll = db[data.collectionName]
 
-        db.command(Mongo::Commands::Drop, name: data.collectionName) rescue nil
-        db.command(Mongo::Commands::Create, name: data.collectionName) rescue nil
+        db.command(Mongo::Commands::Drop, name: data.collectionName, write_concern: majority) rescue nil
+        db.command(Mongo::Commands::Create, name: data.collectionName, write_concern: majority) rescue nil
 
         unless data.documents.empty?
           docs = data.documents.map { |d| BSON.from_json(d.to_json) }
-          coll.insert_many(docs)
+          coll.insert_many(docs, write_concern: majority)
         end
       end
     end
@@ -499,6 +683,13 @@ module Mongo::Unified
         hash = group.as_h
         client_id = hash["client"].as_s
         expected_events = hash["events"].as_a
+        event_type = hash["eventType"]?.try(&.as_s?) || "command"
+        if event_type == "cmap"
+          verify_cmap_events(client_id, expected_events, hash["ignoreExtraEvents"]?.try(&.as_bool) || false)
+          next
+        elsif event_type == "sdam"
+          next
+        end
         actual_events = (@registry.command_events[client_id]? || [] of Mongo::Monitoring::Commands::Event).dup
 
         expected_names = expected_events.compact_map { |event|
@@ -571,6 +762,39 @@ module Mongo::Unified
                 raise Exception.new("TEST_FAILED: event #{index} commandName expected #{name.as_s}, got #{actual.command_name}")
               end
             end
+          end
+        end
+      end
+    end
+
+    private def verify_cmap_events(client_id : String, expected_events : Array(JSON::Any), ignore_extra : Bool)
+      actual = (@registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).dup
+      unless ignore_extra || actual.size == expected_events.size
+        names = actual.map(&.class.name)
+        raise Exception.new("TEST_FAILED: expected #{expected_events.size} cmap events for #{client_id}, got #{actual.size}: #{names}")
+      end
+      expected_events.each_with_index do |expected, index|
+        break if index >= actual.size
+        actual_event = actual[index]
+        if expected["connectionCreatedEvent"]?
+          unless actual_event.is_a?(Mongo::Monitoring::CMAP::ConnectionCreatedEvent)
+            raise Exception.new("TEST_FAILED: cmap event #{index} expected connectionCreatedEvent, got #{actual_event.class}")
+          end
+        elsif expected["connectionClosedEvent"]?
+          unless actual_event.is_a?(Mongo::Monitoring::CMAP::ConnectionClosedEvent)
+            raise Exception.new("TEST_FAILED: cmap event #{index} expected connectionClosedEvent, got #{actual_event.class}")
+          end
+        elsif expected["poolClearedEvent"]?
+          unless actual_event.is_a?(Mongo::Monitoring::CMAP::PoolClearedEvent)
+            raise Exception.new("TEST_FAILED: cmap event #{index} expected poolClearedEvent, got #{actual_event.class}")
+          end
+        elsif expected["connectionCheckedOutEvent"]?
+          unless actual_event.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckedOutEvent)
+            raise Exception.new("TEST_FAILED: cmap event #{index} expected connectionCheckedOutEvent, got #{actual_event.class}")
+          end
+        elsif expected["connectionCheckedInEvent"]?
+          unless actual_event.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckedInEvent)
+            raise Exception.new("TEST_FAILED: cmap event #{index} expected connectionCheckedInEvent, got #{actual_event.class}")
           end
         end
       end

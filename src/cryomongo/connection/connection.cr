@@ -4,10 +4,15 @@ require "./auth"
 
 # :nodoc:
 struct Mongo::Connection
+  @@next_connection_id = Atomic(Int64).new(1)
+
   getter server_description : SDAM::ServerDescription
   getter credentials : Mongo::Credentials
   getter socket : IO
+  getter connection_id : Int64
   @sasl_supported_mechs : Array(String)? = nil
+  # After the first handshake, later hellos follow helloOk from the server.
+  getter? use_hello : Bool = false
 
   def initialize(@server_description : SDAM::ServerDescription, @credentials : Mongo::Credentials, @options : Mongo::Options, is_monitor : Bool = false)
     if @server_description.address.ends_with? ".sock"
@@ -69,17 +74,28 @@ struct Mongo::Connection
     end
 
     @socket = socket
+    @connection_id = @@next_connection_id.add(1)
   end
 
-  def handshake(*, send_metadata = false, appname = nil, legacy = false)
+  def handshake(*, send_metadata = false, appname = nil, legacy = false, client_metadata : BSON? = nil, load_balanced : Bool = false)
+    # First handshake uses legacy hello unless Server API or load-balanced is set.
+    # Later heartbeats use hello when the server sent helloOk: true.
+    use_legacy = legacy
     if send_metadata
-      body, _ = Commands::Hello.command(appname: appname, legacy: legacy)
+      metadata = client_metadata
+      if metadata.nil? && appname
+        metadata = Handshake.client_document(appname)
+      elsif metadata.nil?
+        metadata = Handshake.client_document(nil)
+      end
+      body, _ = Commands::Hello.command(appname: appname, legacy: use_legacy, client: metadata, load_balanced: load_balanced)
     else
-      cmd_name = legacy ? "isMaster" : "hello"
+      cmd_name = use_legacy ? "isMaster" : "hello"
       body = BSON.build do |builder|
         builder[cmd_name] = 1
         builder["$db"] = "admin"
         builder["helloOk"] = true
+        builder["backpressure"] = "2"
       end
     end
 
@@ -111,8 +127,8 @@ struct Mongo::Connection
     if error = response.error?
       # Fallback to legacy isMaster if 'hello' command is not found (Mongo < 4.4)
       # The Versioned API spec mandates NOT using legacy commands if an API is requested.
-      if !legacy && error.is_a?(Mongo::Error::Command) && error.code == 59 && @options.server_api.nil?
-        return handshake(send_metadata: send_metadata, appname: appname, legacy: true)
+      if !use_legacy && error.is_a?(Mongo::Error::Command) && error.code == 59 && @options.server_api.nil?
+        return handshake(send_metadata: send_metadata, appname: appname, legacy: true, client_metadata: client_metadata, load_balanced: load_balanced)
       end
       raise error
     end
@@ -122,6 +138,8 @@ struct Mongo::Connection
     if result.sasl_supported_mechs
       @sasl_supported_mechs = result.sasl_supported_mechs
     end
+
+    @use_hello = !use_legacy || result.helloOk == true
 
     {result, round_trip_time}
   end
@@ -181,7 +199,9 @@ struct Mongo::Connection
     } if log
 
     Log.trace {
-      "(#{server_description.address}) >> #{"[#{message.header.request_id}]".ljust(8)} Body: #{op_msg.body.to_json}"
+      name = command.responds_to?(:name) ? command.name : ""
+      logged = Mongo::Monitoring::Redact.body(name, op_msg.body)
+      "(#{server_description.address}) >> #{"[#{message.header.request_id}]".ljust(8)} Body: #{logged.to_json}"
     } if log
     op_msg.each_sequence { |key, contents|
       Log.trace {
@@ -212,6 +232,7 @@ struct Mongo::Connection
       Log.trace {
         "(#{server_description.address}) << #{"[#{message.header.response_to}]".ljust(8)} Body: #{op_msg.body.to_json}"
       } if log
+      # Replies of sensitive commands are not printed. Command name is not on the reply path.
       op_msg.each_sequence { |key, contents|
         Log.trace {
           "(#{server_description.address}) << #{"[#{message.header.response_to}]".ljust(8)} Seq(#{key}): #{contents.to_json}"

@@ -1,4 +1,6 @@
 require "./monitoring/sdam"
+require "./monitoring/redact"
+require "./monitoring/cmap"
 
 # Provides runtime information about commands to any 3rd party APM library as well internal driver use, such as logging.
 #

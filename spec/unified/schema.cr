@@ -28,8 +28,11 @@ module Mongo::Unified
     property id : String?
     property uriOptions : JSON::Any?
     property observeEvents : Array(String)?
+    property observeSensitiveCommands : Bool?
     property ignoreCommandMonitoringEvents : Array(String)?
     property serverApi : JSON::Any?
+    # UTF: two mongos hosts when true, exactly one when false, on a sharded cluster.
+    property useMultipleMongoses : Bool?
 
     property client : String?
     property databaseName : String?

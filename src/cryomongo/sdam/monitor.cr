@@ -12,6 +12,7 @@ module Mongo::SDAM
     @connection : Mongo::Connection? = nil
     @closed : Bool = false
     @scan_started : Bool = false
+    @scan_requested = Atomic(Bool).new(false)
     @done = WaitGroup.new
 
     def initialize(
@@ -27,7 +28,14 @@ module Mongo::SDAM
       conn = @connection
       if !conn || conn.socket.closed?
         conn = Mongo::Connection.new(@server_description, @credentials, @client.options, is_monitor: true)
-        conn.handshake(send_metadata: true, appname: @client.options.appname)
+        legacy = @client.options.server_api.nil? && !@client.options.load_balanced
+        conn.handshake(
+          send_metadata: true,
+          appname: @client.options.appname,
+          legacy: legacy,
+          client_metadata: @client.handshake_client_document,
+          load_balanced: @client.options.load_balanced == true
+        )
         @connection = conn
       end
       conn
@@ -63,8 +71,14 @@ module Mongo::SDAM
           # dropped (unbuffered channel + else). Do not wait a full heartbeat.
           break if @closed
 
+          if @scan_requested.swap(false)
+            wait_cooldown(before_cooldown)
+            next
+          end
+
           select
           when resume_scan.receive
+            @scan_requested.set(false)
             break if @closed
             # Cooldown only applies to a live monitor that was asked to scan again.
             wait_cooldown(before_cooldown)
@@ -83,18 +97,21 @@ module Mongo::SDAM
     end
 
     def request_immediate_scan
+      @scan_requested.set(true)
       select
       when resume_scan.send nil
-        # Fiber.yield
-      else # Ignore - scan is in progress already
+      else
+        # Scan is in check() or already waking. The flag makes the next loop
+        # run another check instead of sleeping a full heartbeat.
       end
     end
 
     def check(server_description : ServerDescription)
       server_description.last_update_time = Time.utc
       connection = get_connection(server_description)
-      result, round_trip_time = connection.handshake
-      new_rtt = Connection.average_round_trip_time(round_trip_time, server_description.round_trip_time)
+      result, round_trip_time = connection.handshake(legacy: !connection.use_hello?)
+      old_rtt = server_description.type.unknown? ? nil : server_description.round_trip_time
+      new_rtt = Connection.average_round_trip_time(round_trip_time, old_rtt)
       ServerDescription.new(server_description.address, result, new_rtt)
     rescue error : Exception
       Mongo::Log.error { "Monitoring handshake error: #{error}" }

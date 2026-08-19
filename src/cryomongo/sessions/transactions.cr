@@ -215,16 +215,21 @@ module Mongo::Session
     def commit_transaction(*, write_concern : WriteConcern? = nil)
       state_transition(:commit, rollback_status_on_error: false) {
         skip_commit = @transitions_from.try(&.starting?) || false
-        @client.command(
-          Commands::CommitTransaction,
-          session: self,
-          options: {
-            write_concern:  write_concern || current_transaction_options.write_concern,
-            max_time_ms:    current_transaction_options.max_commit_time_ms,
-            recovery_token: recovery_token,
-          }
-        ) unless @empty_commit || skip_commit
-        @empty_commit = skip_commit
+        begin
+          @client.command(
+            Commands::CommitTransaction,
+            session: self,
+            options: {
+              write_concern:  write_concern || current_transaction_options.write_concern,
+              max_time_ms:    current_transaction_options.max_commit_time_ms,
+              recovery_token: recovery_token,
+            }
+          ) unless @empty_commit || skip_commit
+          @empty_commit = skip_commit
+        rescue e : Mongo::Error
+          unpin if e.transient_transaction?
+          raise e
+        end
       }
     end
 
@@ -254,6 +259,9 @@ module Mongo::Session
         ) unless @transitions_from.try &.starting?
         self.unpin
       }
+    rescue e : Mongo::Error
+      unpin
+      raise e
     end
 
     # Aborts any currently active transaction and ends this session.
@@ -275,12 +283,12 @@ module Mongo::Session
     end
 
     protected def pin(server_description : SDAM::ServerDescription) : Nil
-      if is_transaction? && server_description.type.mongos?
+      if (transaction_state.starting? || transaction_state.in_progress?) && (server_description.type.mongos? || server_description.type.load_balancer?)
         @server_description = server_description
       end
     end
 
-    protected def unpin : Nil
+    def unpin : Nil
       @server_description = nil
     end
 
