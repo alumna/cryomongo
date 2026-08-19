@@ -83,31 +83,39 @@ module Mongo::Unified
     end
 
     private def disable_fail_points
-      # Always send "off". A failed test used to skip this and leave failCommand
-      # on mongos, which broke later files. targetedFailPoint is per mongos, so
-      # turn it off on every mongos we know.
-      client = @internal_client || Runner.shared_client
-      servers = begin
-        client.topology.servers.select { |s| s.type.mongos? || s.type.rs_primary? || s.type.standalone? }
-      rescue
-        [] of Mongo::SDAM::ServerDescription
+      # failCommand is per mongos process. Turn it off on every client and every
+      # known server so a later test does not inherit a fail point.
+      clients = [] of Mongo::Client
+      if c = @internal_client
+        clients << c
       end
-      targets = servers.empty? ? [nil] of Mongo::SDAM::ServerDescription? : servers.map { |s| s.as(Mongo::SDAM::ServerDescription?) }
-      targets.each do |server|
-        ["failCommand", "onPrimaryTransactionalWrite"].each do |fp|
-          begin
-            client.command(
-              Mongo::Commands::ConfigureFailPoint,
-              database: "admin",
-              fail_point: fp,
-              mode: "off",
-              server_description: server
-            )
-          rescue
+      @registry.clients.each_value { |c| clients << c }
+
+      clients.each do |client|
+        send_fail_point_off(client, nil)
+        begin
+          client.topology.servers.each do |server|
+            send_fail_point_off(client, server)
           end
+        rescue
         end
       end
       @fail_point_active = false
+    end
+
+    private def send_fail_point_off(client : Mongo::Client, server : Mongo::SDAM::ServerDescription?) : Nil
+      ["failCommand", "onPrimaryTransactionalWrite"].each do |fp|
+        begin
+          client.command(
+            Mongo::Commands::ConfigureFailPoint,
+            database: "admin",
+            fail_point: fp,
+            mode: "off",
+            server_description: server
+          )
+        rescue
+        end
+      end
     end
 
     private def parse_transaction_options(opts : JSON::Any?) : Mongo::Session::TransactionOptions?
@@ -566,16 +574,19 @@ module Mongo::Unified
     private def setup_initial_data(initial_data : Array(CollectionData)?)
       return unless initial_data
 
+      # Majority so mongos catalog and snapshot reads see the new collection.
+      majority = Mongo::WriteConcern.new(w: "majority")
+
       initial_data.each do |data|
         db = internal_client[data.databaseName]
         coll = db[data.collectionName]
 
-        db.command(Mongo::Commands::Drop, name: data.collectionName) rescue nil
-        db.command(Mongo::Commands::Create, name: data.collectionName) rescue nil
+        db.command(Mongo::Commands::Drop, name: data.collectionName, write_concern: majority) rescue nil
+        db.command(Mongo::Commands::Create, name: data.collectionName, write_concern: majority) rescue nil
 
         unless data.documents.empty?
           docs = data.documents.map { |d| BSON.from_json(d.to_json) }
-          coll.insert_many(docs)
+          coll.insert_many(docs, write_concern: majority)
         end
       end
     end

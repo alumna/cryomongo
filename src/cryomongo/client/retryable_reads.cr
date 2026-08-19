@@ -34,19 +34,16 @@ class Mongo::Client
         connection = get_connection(server_description)
         session.pin(server_description)
         return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, **args)
-      rescue error : NetworkError
-        error = Error::Network.new(error)
-        original_error = error
-      rescue error : Mongo::Error::Network
-        original_error = error
-      rescue error : Mongo::Error::Command
-        if error.retryable_read? || error.retryable_overload?
+      rescue error : Mongo::Error
+        # execute_command wraps IO errors as Error::Network before raise.
+        # Catch Mongo::Error first, same as execute_retryable_write.
+        if error.retryable_read? || error.retryable_overload? || error.is_a?(Error::PoolCleared)
           original_error = error
         else
           raise error
         end
-      rescue error : Mongo::Error::PoolCleared
-        original_error = error
+      rescue error : NetworkError
+        original_error = Error::Network.new(error)
       end
 
       overload = original_error.try(&.retryable_overload?) || false

@@ -68,4 +68,11 @@ describe "mongodb_uri_with" do
   it "does not add a second slash when the URI already ends with /" do
     mongodb_uri_with("mongodb://localhost:27017/", "a=1").should eq("mongodb://localhost:27017/?a=1")
   end
+
+  it "keeps only the first host" do
+    mongodb_uri_one_host("mongodb://localhost:27017,localhost:27016/?replicaSet=rs0").should eq(
+      "mongodb://localhost:27017/?replicaSet=rs0"
+    )
+    mongodb_uri_one_host("mongodb://localhost:27017").should eq("mongodb://localhost:27017")
+  end
 end

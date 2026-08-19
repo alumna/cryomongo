@@ -2,7 +2,7 @@ require "../spec_helper"
 
 describe "Find, getMore and killCursors commands" do
   it "uses find, getMore, and killCursors on the wire" do
-    uri = ENV["MONGODB_URI"]
+    uri = mongodb_uri_one_host(ENV["MONGODB_URI"])
     client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=5000"))
     begin
       client.command(Mongo::Commands::Ping)

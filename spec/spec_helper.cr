@@ -31,6 +31,20 @@ def mongodb_uri_with(uri : String, options : String) : String
   end
 end
 
+# failCommand is per mongos. Prose tests must talk to one router so the
+# fail point and the operation land on the same process.
+def mongodb_uri_one_host(uri : String) : String
+  parts = uri.split("://", 2)
+  return uri unless parts.size == 2
+  scheme, rest = parts
+  cut = rest.index('/') || rest.index('?')
+  host_part = cut ? rest[0, cut] : rest
+  suffix = cut ? rest[cut..] : ""
+  hosts = host_part.split(',').reject(&.empty?)
+  return uri if hosts.size <= 1
+  "#{scheme}://#{hosts[0]}#{suffix}"
+end
+
 private def drop_user_databases
   uri = ENV["MONGODB_URI"]
   client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=2000"))

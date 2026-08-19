@@ -2,7 +2,7 @@ require "../spec_helper"
 
 describe "Client backpressure prose" do
   it "retries overload errors at most maxAdaptiveRetries times" do
-    uri = ENV["MONGODB_URI"]
+    uri = mongodb_uri_one_host(ENV["MONGODB_URI"])
     client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=5000"))
     begin
       client.command(Mongo::Commands::Ping)
@@ -58,7 +58,7 @@ describe "Client backpressure prose" do
   end
 
   it "honors maxAdaptiveRetries=1" do
-    uri = ENV["MONGODB_URI"]
+    uri = mongodb_uri_one_host(ENV["MONGODB_URI"])
     client = Mongo::Client.new(mongodb_uri_with(uri, "maxAdaptiveRetries=1&serverSelectionTimeoutMS=5000"))
     begin
       client.command(Mongo::Commands::Ping)

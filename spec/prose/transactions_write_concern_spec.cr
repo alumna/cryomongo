@@ -4,7 +4,7 @@ describe "Transactions prose: write concern is not inherited from the collection
   it "inserts inside a transaction when the collection write concern is w: 0" do
     pending! "standalone has no transactions" if ENV["TOPOLOGY"]? == "standalone"
 
-    uri = ENV["MONGODB_URI"]
+    uri = mongodb_uri_one_host(ENV["MONGODB_URI"])
     client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=3000"))
     begin
       client.command(Mongo::Commands::Ping)

@@ -4,7 +4,7 @@ describe "CMAP prose: PoolClearedError is retryable" do
   it "retries insertOne after a pool clear" do
     pending! "needs a replica set or sharded cluster" if ENV["TOPOLOGY"]? == "standalone"
 
-    uri = ENV["MONGODB_URI"]
+    uri = mongodb_uri_one_host(ENV["MONGODB_URI"])
     client = Mongo::Client.new(mongodb_uri_with(uri, "maxPoolSize=1&retryWrites=true&serverSelectionTimeoutMS=8000&appname=poolClearedProse"))
     begin
       client.command(Mongo::Commands::Ping)
