@@ -18,8 +18,15 @@ class Mongo::Client
   )
     # Create an implicit session only when the caller did not pass one.
     # The caller (bulk, change stream, cursor) owns ending a session it created.
+    # endSessions during pool close must not check out from the pool.
     owns_session = session.nil?
-    session ||= Session::ClientSession.new(self)
+    if session.nil?
+      session = if command.is_a?(Commands::EndSessions)
+                  Session::ClientSession.new(self, pooled: false)
+                else
+                  Session::ClientSession.new(self)
+                end
+    end
 
     # After commit the session stays pinned so commit can be retried on the
     # same mongos. Any other operation must unpin.

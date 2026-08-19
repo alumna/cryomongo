@@ -25,6 +25,7 @@ Phase 1 of the MongoDB 8.0 / Crystal 1.21 roadmap.
 * **retryable reads:** After a retryable error on a standalone, do not abort the retry just because the only server is temporarily Unknown. Handshake rediscovers it. Catch wrapped `Error::Network` as `Mongo::Error`.
 * **transactions:** Unpin a mongos session when startTransaction runs, when a non-transaction operation uses the session, and when commit fails with TransientTransactionError. Stay pinned after UnknownTransactionCommitResult. After closeConnection, wait for that mongos to be rediscovered instead of skipping the commit retry. UTF setup uses the internal client and majority writes, then copies cluster time and refreshes each mongos catalog so test-client pools stay empty. The UTF runner runs `killAllSessions` on every mongos after each test, as the spec asks, so a leftover sharded txn does not block the next drop for `transactionLifetimeLimitSeconds`.
 * **sdam:** An immediate monitor scan is not dropped when the monitor is already in `hello`. A flag makes the next loop check again instead of waiting a full heartbeat.
+* **sessions:** `Session::Pool#close` no longer holds the pool mutex while sending `endSessions`. That nested lock plus IO made GitHub sharded CI crash (`signal 11` in `Sync::Mutex#unlock`).
 
 ## 0.14.0 - 2026-08-19
 

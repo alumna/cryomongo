@@ -71,7 +71,7 @@ module Mongo::Session
       @server_session.session_id
     end
 
-    protected def initialize(@client : Mongo::Client, @implicit = true, **options : **U) forall U
+    protected def initialize(@client : Mongo::Client, @implicit = true, *, pooled = true, **options : **U) forall U
       {% begin %}
       {{ @type }} # see: https://github.com/crystal-lang/crystal/issues/2731
       raw_causal = options["causal_consistency"]?
@@ -96,7 +96,12 @@ module Mongo::Session
         default_transaction_options: options["default_transaction_options"]?
       )
       @snapshot_time = raw_snapshot_time
-      @server_session = @client.session_pool.acquire(logical_timeout)
+      # endSessions during pool close must not check out from this pool.
+      @server_session = if pooled
+                          @client.session_pool.acquire(logical_timeout)
+                        else
+                          ServerSession.new
+                        end
       {% end %}
     end
 
@@ -179,9 +184,9 @@ module Mongo::Session
     @pool : Deque(ServerSession) = Deque(ServerSession).new
 
     def acquire(logical_timeout : Time::Span)
-      raise Mongo::Error.new("Client is closed.") if @closed
       # see: https://github.com/mongodb/specifications/blob/master/source/sessions/driver-sessions.rst#algorithm-to-acquire-a-serversession-instance-from-the-server-session-pool
       @lock.synchronize {
+        raise Mongo::Error.new("Client is closed.") if @closed
         loop do
           if session = @pool.shift?
             unless session.stale?(logical_timeout)
@@ -195,16 +200,12 @@ module Mongo::Session
     end
 
     def release(client : Mongo::Client, session : ServerSession, logical_timeout : Time::Span)
-      if @closed
-        begin
-          client.command(Commands::EndSessions, ids: [session.session_id])
-        rescue
-          # ignore - client could have been closed too
-        end
-        return
-      end
       # see: https://github.com/mongodb/specifications/blob/master/source/sessions/driver-sessions.rst#algorithm-to-return-a-serversession-instance-to-the-server-session-pool
       @lock.synchronize {
+        # Pool already sent endSessions. Do not send again (that command would
+        # check out a session and recurse). Discard this server session.
+        return if @closed
+
         loop do
           if (last = @pool.last?) && last.stale?(logical_timeout)
             @pool.pop
@@ -220,15 +221,24 @@ module Mongo::Session
     end
 
     def close(client : Mongo::Client)
-      return if @closed
-      # see: https://github.com/mongodb/specifications/blob/master/source/sessions/driver-sessions.rst#endsessions
-      # close the pool and end the sessions - by batches of 10_000
+      # Drain under the lock, then endSessions after unlock. Holding the lock
+      # across a network command lets another fiber wait on this mutex; Crystal
+      # then crashed in Sync::MU unlock (signal 11) on GitHub sharded CI.
+      ids = [] of SessionId
       @lock.synchronize do
-        @pool.each.map(&.session_id).each_slice(10_000) do |ids|
-          client.command(Commands::EndSessions, ids: ids)
-        end
-      ensure
+        return if @closed
         @closed = true
+        @pool.each { |s| ids << s.session_id }
+        @pool.clear
+      end
+      return if ids.empty?
+
+      # see: https://github.com/mongodb/specifications/blob/master/source/sessions/driver-sessions.rst#endsessions
+      ids.each_slice(10_000) do |batch|
+        begin
+          client.command(Commands::EndSessions, ids: batch)
+        rescue
+        end
       end
     end
   end
