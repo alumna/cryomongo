@@ -12,6 +12,7 @@ module Mongo::SDAM
     @connection : Mongo::Connection? = nil
     @closed : Bool = false
     @scan_started : Bool = false
+    @scan_requested = Atomic(Bool).new(false)
     @done = WaitGroup.new
 
     def initialize(
@@ -70,8 +71,14 @@ module Mongo::SDAM
           # dropped (unbuffered channel + else). Do not wait a full heartbeat.
           break if @closed
 
+          if @scan_requested.swap(false)
+            wait_cooldown(before_cooldown)
+            next
+          end
+
           select
           when resume_scan.receive
+            @scan_requested.set(false)
             break if @closed
             # Cooldown only applies to a live monitor that was asked to scan again.
             wait_cooldown(before_cooldown)
@@ -90,10 +97,12 @@ module Mongo::SDAM
     end
 
     def request_immediate_scan
+      @scan_requested.set(true)
       select
       when resume_scan.send nil
-        # Fiber.yield
-      else # Ignore - scan is in progress already
+      else
+        # Scan is in check() or already waking. The flag makes the next loop
+        # run another check instead of sleeping a full heartbeat.
       end
     end
 

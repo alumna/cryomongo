@@ -103,6 +103,22 @@ module Mongo::Unified
       @fail_point_active = false
     end
 
+    private def kill_all_sessions
+      ic = internal_client
+      seen = Set(String).new
+      ic.topology.servers.each do |server|
+        next unless seen.add?(server.address)
+        begin
+          ic.command(Mongo::Commands::KillAllSessions, users: [] of String, server_description: server)
+        rescue
+        end
+      end
+      begin
+        ic.command(Mongo::Commands::KillAllSessions, users: [] of String)
+      rescue
+      end
+    end
+
     private def send_fail_point_off(client : Mongo::Client, server : Mongo::SDAM::ServerDescription?) : Nil
       ["failCommand", "onPrimaryTransactionalWrite"].each do |fp|
         begin
@@ -166,6 +182,12 @@ module Mongo::Unified
           Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: reason, duration_ms: Timing.elapsed_ms(test_started))
           next
         end
+        if only = ENV["UTF_TEST"]?
+          unless test.description.includes?(only)
+            skipped += 1
+            next
+          end
+        end
         unless meets_requirements?(test.runOnRequirements)
           skipped += 1
           Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "runOnRequirements", duration_ms: Timing.elapsed_ms(test_started))
@@ -176,6 +198,9 @@ module Mongo::Unified
 
         begin
           disable_fail_points
+          # Official runner: kill leftover sessions so a sharded txn that was
+          # not aborted does not block the next drop for transactionLifetimeLimitSeconds.
+          kill_all_sessions
           create_entities(@test_file.createEntities)
 
           # Drop leftover collections on the internal client. The test client
@@ -210,6 +235,7 @@ module Mongo::Unified
           end
         ensure
           disable_fail_points
+          kill_all_sessions
           @registry.close_all
           @registry = Registry.new
         end
