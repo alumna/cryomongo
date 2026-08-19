@@ -10,10 +10,7 @@ module Mongo::Unified::Dispatcher
     "clientBulkWrite",
     "count",
     "mapReduce",
-    "waitForEvent",
-    "wait",
     "waitForPrimaryChange",
-    "close",
     "iterateUntilDocumentOrError",
     "iterateOnce",
     "createFindCursor",
@@ -102,6 +99,11 @@ module Mongo::Unified::Dispatcher
                when "withTransaction"                          then execute_with_transaction(args, target, registry, internal_client, runner)
                when "runOnThread"                              then execute_run_on_thread(args, registry, internal_client, runner)
                when "waitForThread"                            then execute_wait_for_thread(args, registry)
+               when "waitForEvent"                             then execute_wait_for_event(args, registry)
+               when "assertEventCount"                         then execute_assert_event_count(args, registry)
+               when "wait"                                     then execute_wait(args)
+               when "close"                                    then execute_close(target)
+               when "appendMetadata"                           then execute_append_metadata(args, target)
                else
                  raise Exception.new("SKIP_TEST")
                end
@@ -179,4 +181,3 @@ module Mongo::Unified::Dispatcher
     end
   end
 end
-

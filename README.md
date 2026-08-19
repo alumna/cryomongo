@@ -34,12 +34,11 @@ The driver is in **beta**. Core CRUD, sessions, and transactions work against a 
 - SCRAM, X509, PLAIN.
 
 **Not done (see ROADMAP)**
-- Command log redaction (passwords can still appear in `Log.trace`).
-- Cursor cleanup still uses `#finalize` for `killCursors`. Call `#close`.
-- Handshake metadata / `backpressure`, SRV polling, load-balancer pinning, CSOT.
+- SRV polling, load-balancer pinning, CSOT, compression.
 - Official Change Stream / GridFS / index-management UTF suites.
 - `MONGODB-AWS`, `MONGODB-OIDC`, CSFLE.
 - Connection-pool lock cleanup for true parallel execution contexts.
+- SASLprep for SCRAM-SHA-256.
 
 #### Cryomongo is a MongoDB driver written in pure Crystal (no C library).
 
@@ -122,6 +121,8 @@ end
 users.insert_many(["John", "Jane"].map { |name| User.new(name: name) })
 
 # Fetch a Cursor pointing to the users collection.
+# `#each` (and `to_a`) close the cursor when iteration ends.
+# You can also pass a block to `find`. Call `#close` if you use `#next` yourself.
 cursor = users.find
 
 # Iterate the cursor and use `.of(User)` to deserialize as the cursor gets iterated.

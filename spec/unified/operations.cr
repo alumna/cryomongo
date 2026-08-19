@@ -698,4 +698,123 @@ module Mongo::Unified::Operations
       end
     end
   end
+
+  private def execute_wait(args)
+    ms = args.try(&.["ms"]?).try { |v| v.as_i64? || v.as_i?.try(&.to_i64) } || 0_i64
+    sleep ms.milliseconds if ms > 0
+  end
+
+  private def execute_close(target)
+    if client = target.as?(Mongo::Client)
+      client.close
+    end
+  end
+
+  private def execute_append_metadata(args, target)
+    client = target.as?(Mongo::Client)
+    raise "TEST_FAILED: appendMetadata target is not a client" unless client
+    info = args.try(&.["driverInfoOptions"]?) || args
+    raise "Missing driverInfoOptions" unless info
+    name = info["name"].as_s
+    version = info["version"]?.try(&.as_s?)
+    platform = info["platform"]?.try(&.as_s?)
+    client.append_metadata(name, version, platform)
+  end
+
+  private def execute_wait_for_event(args, registry)
+    raise "Missing arguments" unless args
+    client_id = args["client"].as_s
+    event = args["event"]
+    count = args["count"].as_i
+    deadline = Time.instant + 10.seconds
+    loop do
+      return if count_matching_events(registry, client_id, event) >= count
+      if Time.instant >= deadline
+        actual = count_matching_events(registry, client_id, event)
+        raise Exception.new("TEST_FAILED: waitForEvent timed out for #{event.inspect} (got #{actual}, want #{count})")
+      end
+      sleep 50.milliseconds
+    end
+  end
+
+  private def execute_assert_event_count(args, registry)
+    raise "Missing arguments" unless args
+    client_id = args["client"].as_s
+    event = args["event"]
+    count = args["count"].as_i
+    actual = count_matching_events(registry, client_id, event)
+    unless actual == count
+      raise Exception.new("TEST_FAILED: assertEventCount expected #{count} of #{event.inspect}, got #{actual}")
+    end
+  end
+
+  private def count_matching_events(registry : Registry, client_id : String, event : JSON::Any) : Int32
+    if event["poolClearedEvent"]?
+      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::CMAP::PoolClearedEvent)
+      }
+    end
+    if event["connectionCreatedEvent"]?
+      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::CMAP::ConnectionCreatedEvent)
+      }
+    end
+    if event["connectionClosedEvent"]?
+      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::CMAP::ConnectionClosedEvent)
+      }
+    end
+    if event["connectionCheckedOutEvent"]?
+      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckedOutEvent)
+      }
+    end
+    if event["connectionCheckedInEvent"]?
+      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckedInEvent)
+      }
+    end
+    if expected = event["serverDescriptionChangedEvent"]?
+      return (registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).count { |e|
+        match_server_description_changed?(e, expected)
+      }
+    end
+    if expected = event["commandStartedEvent"]?
+      return (registry.command_events[client_id]? || [] of Mongo::Monitoring::Commands::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::Commands::CommandStartedEvent) &&
+          command_name_match?(e, expected)
+      }
+    end
+    if expected = event["commandSucceededEvent"]?
+      return (registry.command_events[client_id]? || [] of Mongo::Monitoring::Commands::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::Commands::CommandSucceededEvent) &&
+          command_name_match?(e, expected)
+      }
+    end
+    if expected = event["commandFailedEvent"]?
+      return (registry.command_events[client_id]? || [] of Mongo::Monitoring::Commands::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::Commands::CommandFailedEvent) &&
+          command_name_match?(e, expected)
+      }
+    end
+    0
+  end
+
+  private def command_name_match?(event, expected : JSON::Any) : Bool
+    if name = expected["commandName"]?.try(&.as_s?)
+      event.command_name == name
+    else
+      true
+    end
+  end
+
+  private def match_server_description_changed?(event, expected : JSON::Any) : Bool
+    return false unless event.is_a?(Mongo::Monitoring::SDAM::ServerDescriptionChangedEvent)
+    if new_desc = expected["newDescription"]?
+      if type = new_desc["type"]?.try(&.as_s?)
+        return event.new_description.type.to_s == type
+      end
+    end
+    true
+  end
 end

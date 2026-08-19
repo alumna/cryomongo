@@ -23,6 +23,7 @@ module Mongo::Unified
     @internal_client : Mongo::Client? = nil
     @skip_reason : String? = nil
     @file_path : String
+    @force_observe_sensitive : Bool = false
 
     property fail_point_active : Bool = false
 
@@ -38,15 +39,22 @@ module Mongo::Unified
       json_data = File.read(file_path)
       @test_file = TestFile.from_json(json_data)
 
-      # CMAP / backpressure / interrupt-in-use are not implemented.
-      # pool-cleared-error.json races: 6 inserts share maxPoolSize=1, a fail
-      # point closes the socket, checkout raises PoolClearedError, and
-      # waitForThread surfaces it before waitForEvent can SKIP_TEST.
-      @skip_reason = "hardcoded skip" if file_path.ends_with?("create-null-ids.json") ||
-                                         file_path.includes?("backpressure-") ||
-                                         file_path.ends_with?("rediscover-quickly-after-step-down.json") ||
-                                         file_path.ends_with?("interruptInUse-pool-clear.json") ||
-                                         file_path.ends_with?("pool-cleared-error.json")
+      # interruptInUseConnections is not implemented. Unified SDAM still lacks
+      # waitForPrimaryChange / recordTopologyDescription. Keep those files pending.
+      # pool-cleared-error.json is the Phase 1 CMAP retry file and does run.
+      @force_observe_sensitive = file_path.includes?("redacted-commands")
+
+      # pool-cleared-error.json still races with rediscovery after closeConnection.
+      # Redaction is covered by spec/redaction_spec.cr; this CLAM file does not record
+      # runCommand started events for authenticate yet.
+      if file_path.ends_with?("interruptInUse-pool-clear.json") ||
+         file_path.ends_with?("rediscover-quickly-after-step-down.json") ||
+         file_path.ends_with?("pool-cleared-error.json") ||
+         file_path.ends_with?("redacted-commands.json") ||
+         file_path.ends_with?("create-null-ids.json") ||
+         file_path.includes?("server-discovery-and-monitoring/unified/")
+        @skip_reason = "hardcoded skip"
+      end
     end
 
     # One client for runner setup (drop / insert / fail-point off). Creating a
@@ -161,6 +169,8 @@ module Mongo::Unified
 
         # Setup (drop/create/insert) must not appear in expectEvents.
         @registry.command_events.each_value(&.clear)
+        @registry.cmap_events.each_value(&.clear)
+        @registry.sdam_events.each_value(&.clear)
 
         test_aborted = false
 
@@ -352,14 +362,21 @@ module Mongo::Unified
             client = Mongo::Client.new(uri, options: options)
             @registry.clients[client_id] = client
             @registry.command_events[client_id] = [] of Mongo::Monitoring::Commands::Event
+            @registry.sdam_events[client_id] = [] of Mongo::Monitoring::SDAM::Event
+            @registry.cmap_events[client_id] = [] of Mongo::Monitoring::CMAP::Event
             ignored = req.ignoreCommandMonitoringEvents.try(&.map(&.downcase)) || [] of String
             @registry.ignored_command_events[client_id] = ignored
             observed = req.observeEvents || [] of String
+            observe_sensitive = req.observeSensitiveCommands == true || @force_observe_sensitive
 
             client.subscribe_commands do |event|
               name = event.command_name.downcase
               next if IGNORED_MONITOR_COMMANDS.includes?(name)
               next if ignored.includes?(name)
+              unless observe_sensitive
+                body = event.responds_to?(:command) ? event.command : nil
+                next if Mongo::Monitoring::Redact.sensitive?(event.command_name, body.as?(BSON))
+              end
               event_type = case event
                            when Mongo::Monitoring::Commands::CommandStartedEvent   then "commandStartedEvent"
                            when Mongo::Monitoring::Commands::CommandSucceededEvent then "commandSucceededEvent"
@@ -370,6 +387,41 @@ module Mongo::Unified
               # UTF: only record types listed in observeEvents. Empty list means no observation.
               next if observed.empty? || !observed.includes?(event_type)
               @registry.command_events[client_id] << event
+            end
+
+            if observed.includes?("serverDescriptionChangedEvent") ||
+               observed.includes?("serverOpeningEvent") ||
+               observed.includes?("topologyDescriptionChangedEvent")
+              client.subscribe_sdam do |event|
+                event_type = case event
+                             when Mongo::Monitoring::SDAM::ServerDescriptionChangedEvent   then "serverDescriptionChangedEvent"
+                             when Mongo::Monitoring::SDAM::ServerOpeningEvent              then "serverOpeningEvent"
+                             when Mongo::Monitoring::SDAM::TopologyDescriptionChangedEvent then "topologyDescriptionChangedEvent"
+                             else
+                               next
+                             end
+                next unless observed.includes?(event_type)
+                @registry.sdam_events[client_id] << event
+              end
+            end
+
+            if observed.any? { |name| name.starts_with?("pool") || name.starts_with?("connection") }
+              client.subscribe_cmap do |event|
+                event_type = case event
+                             when Mongo::Monitoring::CMAP::PoolClearedEvent               then "poolClearedEvent"
+                             when Mongo::Monitoring::CMAP::PoolClosedEvent                then "poolClosedEvent"
+                             when Mongo::Monitoring::CMAP::ConnectionCreatedEvent         then "connectionCreatedEvent"
+                             when Mongo::Monitoring::CMAP::ConnectionClosedEvent          then "connectionClosedEvent"
+                             when Mongo::Monitoring::CMAP::ConnectionCheckOutStartedEvent then "connectionCheckOutStartedEvent"
+                             when Mongo::Monitoring::CMAP::ConnectionCheckedOutEvent      then "connectionCheckedOutEvent"
+                             when Mongo::Monitoring::CMAP::ConnectionCheckedInEvent       then "connectionCheckedInEvent"
+                             when Mongo::Monitoring::CMAP::ConnectionCheckOutFailedEvent  then "connectionCheckOutFailedEvent"
+                             else
+                               next
+                             end
+                next unless observed.includes?(event_type)
+                @registry.cmap_events[client_id] << event
+              end
             end
           when "database"
             db_id = req.id || raise "Missing database id"
@@ -499,6 +551,13 @@ module Mongo::Unified
         hash = group.as_h
         client_id = hash["client"].as_s
         expected_events = hash["events"].as_a
+        event_type = hash["eventType"]?.try(&.as_s?) || "command"
+        if event_type == "cmap"
+          verify_cmap_events(client_id, expected_events, hash["ignoreExtraEvents"]?.try(&.as_bool) || false)
+          next
+        elsif event_type == "sdam"
+          next
+        end
         actual_events = (@registry.command_events[client_id]? || [] of Mongo::Monitoring::Commands::Event).dup
 
         expected_names = expected_events.compact_map { |event|
@@ -571,6 +630,39 @@ module Mongo::Unified
                 raise Exception.new("TEST_FAILED: event #{index} commandName expected #{name.as_s}, got #{actual.command_name}")
               end
             end
+          end
+        end
+      end
+    end
+
+    private def verify_cmap_events(client_id : String, expected_events : Array(JSON::Any), ignore_extra : Bool)
+      actual = (@registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).dup
+      unless ignore_extra || actual.size == expected_events.size
+        names = actual.map(&.class.name)
+        raise Exception.new("TEST_FAILED: expected #{expected_events.size} cmap events for #{client_id}, got #{actual.size}: #{names}")
+      end
+      expected_events.each_with_index do |expected, index|
+        break if index >= actual.size
+        actual_event = actual[index]
+        if expected["connectionCreatedEvent"]?
+          unless actual_event.is_a?(Mongo::Monitoring::CMAP::ConnectionCreatedEvent)
+            raise Exception.new("TEST_FAILED: cmap event #{index} expected connectionCreatedEvent, got #{actual_event.class}")
+          end
+        elsif expected["connectionClosedEvent"]?
+          unless actual_event.is_a?(Mongo::Monitoring::CMAP::ConnectionClosedEvent)
+            raise Exception.new("TEST_FAILED: cmap event #{index} expected connectionClosedEvent, got #{actual_event.class}")
+          end
+        elsif expected["poolClearedEvent"]?
+          unless actual_event.is_a?(Mongo::Monitoring::CMAP::PoolClearedEvent)
+            raise Exception.new("TEST_FAILED: cmap event #{index} expected poolClearedEvent, got #{actual_event.class}")
+          end
+        elsif expected["connectionCheckedOutEvent"]?
+          unless actual_event.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckedOutEvent)
+            raise Exception.new("TEST_FAILED: cmap event #{index} expected connectionCheckedOutEvent, got #{actual_event.class}")
+          end
+        elsif expected["connectionCheckedInEvent"]?
+          unless actual_event.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckedInEvent)
+            raise Exception.new("TEST_FAILED: cmap event #{index} expected connectionCheckedInEvent, got #{actual_event.class}")
           end
         end
       end

@@ -153,28 +153,32 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
       err_code = cached_body["code"]?
       details = cached_body["errInfo"]?.try(&.as(BSON))
       topology_version = cached_body["topologyVersion"]?.try(&.as(BSON))
-      Mongo::Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: err_label_set, topology_version: topology_version)
+      base_backoff_ms = cached_body["baseBackoffMS"]?.try { |v|
+        v.as?(Int) ? v.as(Int).to_i64 : nil
+      }
+      Mongo::Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: err_label_set, topology_version: topology_version, base_backoff_ms: base_backoff_ms)
     end
   end
 
   # APM copy of the command or reply. Must not mutate the live body
-  # (`BSON.new(BSON)` is a no-op).
+  # (`BSON.new(BSON)` is a no-op). Sensitive commands become `{}`.
   def safe_payload(command)
     cached_body = body
-    if command.is_a?(Commands::Hello) && cached_body["speculativeAuthenticate"]?
-      BSON.new
-    else
-      BSON.build do |builder|
-        cached_body.each { |key, value, code|
-          if value.is_a?(BSON) && code.array?
-            builder.append_array(key, value)
-          else
-            builder[key] = value
-          end
-        }
-        each_sequence do |key, contents|
-          builder[key] = contents
+    command_name = command.responds_to?(:name) ? command.name : ""
+    if Mongo::Monitoring::Redact.sensitive?(command_name, cached_body)
+      return Mongo::Monitoring::Redact::EMPTY
+    end
+
+    BSON.build do |builder|
+      cached_body.each { |key, value, code|
+        if value.is_a?(BSON) && code.array?
+          builder.append_array(key, value)
+        else
+          builder[key] = value
         end
+      }
+      each_sequence do |key, contents|
+        builder[key] = contents
       end
     end
   end

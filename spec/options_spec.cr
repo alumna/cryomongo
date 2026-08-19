@@ -31,4 +31,9 @@ describe Mongo::Options do
     _, options, _, _ = Mongo::URI.parse("mongodb://localhost/?maxIdleTimeMS=1500", Mongo::Options.new)
     options.max_idle_time.should eq 1500.milliseconds
   end
+
+  it "parses maxAdaptiveRetries from the URI" do
+    _, options, _, _ = Mongo::URI.parse("mongodb://localhost/?maxAdaptiveRetries=1", Mongo::Options.new)
+    options.max_adaptive_retries.should eq 1
+  end
 end

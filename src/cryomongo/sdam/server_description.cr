@@ -18,8 +18,8 @@ class Mongo::SDAM::ServerDescription
   getter address : String
   # Information about the last error related to this server
   property error : String? = nil
-  # The duration of the ismaster call.
-  getter round_trip_time : Time::Span = 0.seconds
+  # The duration of the hello call.
+  property round_trip_time : Time::Span = 0.seconds
   # A 64-bit BSON datetime or null. The "lastWriteDate" from the server's most recent ismaster response.
   property last_write_date : Time? = nil
   # An opaque value representing the position in the oplog of the most recently seen write.

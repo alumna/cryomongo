@@ -139,22 +139,11 @@ class Mongo::Client
         **args
       )
     else
-      # Select a suitable server and retrieve the underlying connection.
-      server_description ||= server_selection(command, args, read_preference)
-
-      if session.options.snapshot && server_description.max_wire_version < 13
-        raise Error::Client.new("Snapshot reads require MongoDB 5.0 or later")
-      end
-
-      connection = get_connection(server_description)
-      session.pin(server_description)
-
-      execute_command(
+      execute_once_or_overload_retry(
         command,
         session,
         read_preference,
         server_description,
-        connection,
         operation_id,
         end_implicit_session,
         **args
@@ -293,7 +282,7 @@ class Mongo::Client
             address: address,
             duration: duration,
             reply: op_msg.safe_payload(command),
-            failure: error
+            failure: Monitoring::Redact.failure(command_name, error, op_msg.body)
           ))
         else
           @commands_observable.broadcast(Monitoring::Commands::CommandSucceededEvent.new(
@@ -358,6 +347,7 @@ class Mongo::Client
         description.last_update_time = desc.last_update_time
         topology.update(desc, description)
         close_connection_pool(desc)
+        @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
       }
       session.try &.dirty = true
       error = Error::Network.new(error)

@@ -84,6 +84,10 @@ struct Mongo::Options
   getter w_timeout : Time::Span? = nil
   # Specifies the level of compression when using zlib to compress wire protocol messages; -1 signifies the default level, 0 signifies no compression, 1 signifies the fastest speed, and 9 signifies the best compression
   getter zlib_compression_level : Int32? = nil
+  # Max retries for SystemOverloadedError (client backpressure). Default 2.
+  getter max_adaptive_retries : Int32 = 2
+  # When true, overload retries deprioritize the last server. Default false.
+  getter enable_overload_retargeting : Bool = false
 
   # The requested Server API version and strictness options.
   property server_api : ServerApi? = nil

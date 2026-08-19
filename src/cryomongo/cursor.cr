@@ -75,6 +75,20 @@ class Mongo::Cursor
     @cursor_id == 0
   end
 
+  # Iterate documents then close the cursor. Prefer this (or a block `find`)
+  # over relying on `finalize` to send killCursors.
+  def each(&)
+    begin
+      loop do
+        value = self.next
+        break if value.is_a?(Iterator::Stop)
+        yield value
+      end
+    ensure
+      close
+    end
+  end
+
   def next
     loop do
       if (limit = @limit) && @yielded >= limit
@@ -245,7 +259,7 @@ class Mongo::Cursor
   end
 
   # Last-resort cleanup. finalize can run on a GC thread and must not be
-  # the only way to send killCursors. Call `#close` (or iterate to the end).
+  # the only way to send killCursors. Call `#close`, `#each`, or a block `find`.
   def finalize
     close
   end
@@ -259,6 +273,18 @@ class Mongo::Cursor::Wrapper(T)
 
   # :nodoc:
   def initialize(@cursor : Cursor)
+  end
+
+  def each(&)
+    begin
+      loop do
+        value = self.next
+        break if value.is_a?(Iterator::Stop)
+        yield value
+      end
+    ensure
+      close
+    end
   end
 
   def next
