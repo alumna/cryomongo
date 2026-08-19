@@ -11,31 +11,35 @@
 
 This is a fork of `elbywan/cryomongo`. The goal is to make the driver ready for **MongoDB 8.0** and **Crystal 1.21**. We plan to merge back to the original project when that work is done.
 
-The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0).
+The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). **Phase 1** of [ROADMAP.md](ROADMAP.md) is done. GitHub Actions runs standalone, replica set, and sharded.
 
 What is already in place:
 
 * **MongoDB 8.0:** `hello`, sessions, transactions, retryable reads and writes, Versioned API, and a Unified Test Format (UTF) runner.
 * **Crystal 1.21:** `Sync::Mutex`, `Time.instant`, no `spawn(same_thread:)`. Execution contexts are on by default.
-* **BSON:** `alumna/bson.cr` 0.8.0. Commands use `BSON.build` / `append`. Receive uses `BSON.view`. Dates decode as `BSON::DateTime` (model fields of type `Time` still convert). Vector / ExtJSON are not on the hot path.
+* **BSON:** `alumna/bson.cr` 0.8.1. Commands use `BSON.build` / `append`. Receive uses `BSON.view`. Dates decode as `BSON::DateTime` (model fields of type `Time` still convert). Vector / ExtJSON are not on the hot path.
 * **Auth:** SCRAM-SHA-1, SCRAM-SHA-256 (no SASLprep), X509, and PLAIN.
 
 The UTF runner is **clear**: unknown operations become Crystal `pending`, they do not fake a pass. Many official suites are not wired yet. See [ROADMAP.md](ROADMAP.md).
 
 ### Where the work stands
 
-The driver is in **beta**. Core CRUD, sessions, and transactions work against a replica set.
+The driver is in **beta**. Core CRUD, sessions, and transactions work on standalone, replica set, and sharded MongoDB 8.0.
 
-**Done enough to build apps**
+**Done enough to build apps (Phase 1)**
 - CRUD helpers, bulk, aggregation (no mapReduce).
 - Sessions, causal consistency, transactions, convenient `with_transaction`.
 - Retryable reads and writes (including `insertMany` as one command).
-- Legacy SDAM state-machine tests.
+- Command redaction in APM / `Log.trace`. Handshake metadata. Cursor `#each` / block `find` close the cursor.
+- Backpressure retry and `PoolClearedError` retry.
+- Legacy SDAM state-machine tests. Versioned API.
 - SCRAM, X509, PLAIN.
+- CI matrix: standalone, replica set, sharded.
 
-**Not done (see ROADMAP)**
+**Not done (see ROADMAP Phase 2+)**
 - SRV polling, load-balancer pinning, CSOT, compression.
 - Official Change Stream / GridFS / index-management UTF suites.
+- Unified `pool-cleared-error.json` (still skipped).
 - `MONGODB-AWS`, `MONGODB-OIDC`, CSFLE.
 - Connection-pool lock cleanup for true parallel execution contexts.
 - SASLprep for SCRAM-SHA-256.
@@ -164,10 +168,11 @@ puts cursor.of(User).to_a.to_pretty_json
 - **[Tailable and Awaitable cursors](https://docs.mongodb.com/manual/core/tailable-cursors/index.html)**
 - **[Collation](https://docs.mongodb.com/manual/reference/collation/index.html)**
 - **Standalone, [Sharded](https://docs.mongodb.com/manual/sharding/) or [ReplicaSet](https://docs.mongodb.com/manual/replication/) topologies**
-- **[Command monitoring](https://github.com/mongodb/specifications/blob/master/source/command-monitoring/command-monitoring.rst)**
+- **[Command monitoring](https://github.com/mongodb/specifications/blob/master/source/command-monitoring/command-monitoring.rst)** (sensitive commands are redacted)
 - **Retryable [reads](https://docs.mongodb.com/manual/core/retryable-reads/) and [writes](https://docs.mongodb.com/manual/core/retryable-writes/)**
 - **[Causal consistency](https://docs.mongodb.com/manual/core/read-isolation-consistency-recency/#client-sessions-and-causal-consistency-guarantees)**
 - **[Transactions](https://docs.mongodb.com/manual/core/transactions/)**
+- **[Versioned API](https://www.mongodb.com/docs/manual/reference/versioned-api/)**
 
 ## Conventions
 
@@ -187,8 +192,9 @@ require "cryomongo"
 # It is responsible for monitoring the cluster, routing the requests and managing the socket pools.
 
 # A client can be instantiated using a standard mongodb connection string.
-# Against a replica set (this is what the tests use):
+# Against a replica set:
 #   Mongo::Client.new("mongodb://localhost:27017/?replicaSet=rs0")
+# GitHub Actions also runs standalone and sharded.
 
 # Client options can be passed as query parameters…
 client = Mongo::Client.new("mongodb://address:port/database?appname=MyApp")
@@ -559,6 +565,7 @@ client = Mongo::Client.new
 
 # 1. Command Monitoring Subscriber
 # Tracks the execution of database commands (e.g., find, insert, aggregate).
+# Sensitive commands (authenticate, saslStart, createUser, …) are redacted.
 
 cmd_subscription = client.subscribe_commands { |event|
   case event

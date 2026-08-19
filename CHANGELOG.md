@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.15.0 - 2026-08-20
 
-Phase 1 of the MongoDB 8.0 / Crystal 1.21 roadmap.
+Phase 1 of the roadmap completed
 
 ### Added
 * **security:** Redact `authenticate`, `saslStart`, `saslContinue`, `createUser`, `updateUser`, `getnonce`, `copydb*`, and hello with `speculativeAuthenticate` in APM events and `Log.trace`.
