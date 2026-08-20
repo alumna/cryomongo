@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+Phase 2 of the roadmap started (cloud, GridFS UTF, SASLprep).
+
+### Added
+* **auth:** SASLprep (RFC 4013) for SCRAM-SHA-256 passwords. Printable ASCII is unchanged (no extra allocation). Usernames are not prepared.
+* **uri:** `timeoutMS` (CSOT deadline), `srvMaxHosts`, `srvServiceName`. `mongodb+srv` URI validation for `loadBalanced`, `replicaSet`, and `directConnection`.
+* **sdam:** SRV polling fiber for `mongodb+srv://` on Sharded or Unknown. Adds and removes mongos hosts. Does not run in load-balanced mode.
+* **load balancer:** Do not pre-create `minPoolSize` sockets. Require `serviceId` on hello. Pin the TCP socket for a transaction and for an open cursor. Unpin returns the socket to the pool.
+* **testing:** UTF ops `iterateUntilDocumentOrError`, `iterateOnce`, `createFindCursor`, GridFS `upload` / `delete` / `rename`, `dropIndex` / `dropIndexes`. Official GridFS, collection-management, and index-management JSON. CLAM `redacted-commands.json` and CRUD `create-null-ids.json` now run.
+
+### Changed
+* Cursor `finalize` no longer sends `killCursors` or touches the pool (GC thread). Call `#close`, `#each`, or a block `find`.
+* Load-balanced topology does not start monitor sockets. Sessions are always supported in that mode.
+
+### Fixed
+* Upsert reply with `_id: null` deserializes. Duplicate-key write errors expose `code`.
+* GridFS `rename` errors when the file id is missing. UTF `downloadByName` honors `revision`.
+* UTF matcher: `$date` canonical vs relaxed, `$$type` int/long with `$numberInt`.
+
 ## 0.15.0 - 2026-08-20
 
 Phase 1 of the roadmap completed

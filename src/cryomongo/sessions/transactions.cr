@@ -39,6 +39,10 @@ module Mongo::Session
     property? apply_transaction_read_concern : Bool = false
     # Server description if the session is pinned to a specific mongos.
     getter server_description : SDAM::ServerDescription? = nil
+    # Load-balanced: the TCP socket this transaction must keep using.
+    getter pinned_connection : Mongo::Connection? = nil
+    # Load-balanced: socket from the last cursor-opening command, taken by Cursor#bind.
+    property pending_cursor_connection : Mongo::Connection? = nil
     # Server that executed the most recent command. Used to pin cursors; not the same as transaction mongos pin.
     # :nodoc:
     property last_operation_server : SDAM::ServerDescription? = nil
@@ -288,8 +292,30 @@ module Mongo::Session
       end
     end
 
+    protected def pin_connection(connection : Mongo::Connection) : Nil
+      @pinned_connection = connection
+    end
+
+    protected def drop_dead_pin : Nil
+      conn = @pinned_connection
+      return unless conn
+      return unless conn.socket.closed?
+      @pinned_connection = nil
+      @client.discard_connection(conn)
+    end
+
     def unpin : Nil
       @server_description = nil
+      if conn = @pinned_connection
+        @pinned_connection = nil
+        @client.checkin_connection(conn)
+      end
+    end
+
+    def take_pending_cursor_connection : Mongo::Connection?
+      conn = @pending_cursor_connection
+      @pending_cursor_connection = nil
+      conn
     end
 
     # -- Private

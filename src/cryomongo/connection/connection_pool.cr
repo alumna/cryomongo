@@ -157,6 +157,16 @@ class Mongo::Connection::Pool(T)
     {resource, candidates.any? { |ref| ref.value == resource }}
   end
 
+  # Remove a checked-out connection that can no longer be used (dead socket).
+  def drop(resource : T) : Nil
+    sync do
+      resource.close
+      @total.delete(resource)
+      @idle.delete(resource)
+      forget_idle_time(resource)
+    end
+  end
+
   def release(resource : T) : Nil
     sync do
       if @closed

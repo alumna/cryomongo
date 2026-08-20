@@ -7,6 +7,8 @@ class Mongo::Client
     server_description : SDAM::ServerDescription? = nil,
     operation_id : Int64? = nil,
     end_implicit_session : Bool = true,
+    provided_connection : Mongo::Connection? = nil,
+    deadline : Mongo::Deadline? = nil,
     **args,
   )
     provided_server = server_description
@@ -18,9 +20,9 @@ class Mongo::Client
     )
 
     if !topology.supports_sessions? || !server_description.supports_retryable_writes?
-      connection = get_connection(server_description)
+      connection, owns = checkout_for_command(server_description, session, provided_connection, deadline)
       session.pin(server_description)
-      return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, **args)
+      return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, deadline, owns, **args)
     end
 
     session.increment_txn_number unless session.is_transaction?
@@ -40,10 +42,10 @@ class Mongo::Client
           raise Mongo::Error.new("Sessions or retryable writes not supported")
         end
 
-        connection = get_connection(server_description)
+        connection, owns = checkout_for_command(server_description, session, provided_connection, deadline)
         session.pin(server_description)
         overload_retry = original_error.try(&.retryable_overload?) || false
-        return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, **args) { |body|
+        return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, deadline, owns, **args) { |body|
           apply_retryable_write_body(body, command, session, attempt, overload: overload_retry)
         }
       rescue error : Mongo::Error
@@ -134,6 +136,8 @@ class Mongo::Client
     server_description : SDAM::ServerDescription? = nil,
     operation_id : Int64? = nil,
     end_implicit_session : Bool = true,
+    provided_connection : Mongo::Connection? = nil,
+    deadline : Mongo::Deadline? = nil,
     **args,
   )
     provided_server = server_description
@@ -149,7 +153,7 @@ class Mongo::Client
           raise Error::Client.new("Snapshot reads require MongoDB 5.0 or later")
         end
 
-        connection = get_connection(selected)
+        connection, owns = checkout_for_command(selected, session, provided_connection, deadline)
         session.pin(selected)
         return execute_command(
           command,
@@ -159,6 +163,8 @@ class Mongo::Client
           connection,
           operation_id,
           end_implicit_session,
+          deadline,
+          owns,
           **args
         )
       rescue error : Mongo::Error

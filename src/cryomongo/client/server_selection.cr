@@ -4,6 +4,11 @@ class Mongo::Client
     # Use a monotonic clock. Wall time can jump and would shorten or stretch the wait.
     selection_start = Time.instant
     selection_timeout = @options.server_selection_timeout
+    if deadline = Mongo::Deadline.from_options(@options)
+      left = deadline.remaining
+      selection_timeout = left if left < selection_timeout
+      raise Error::Timeout.new("timed out during server selection") if selection_timeout <= Time::Span.zero
+    end
     # Crystal is concurrent (and can be parallel). The multi-threaded default is false:
     # keep scanning until the timeout. true = one extra scan, then raise.
     try_once = @options.server_selection_try_once

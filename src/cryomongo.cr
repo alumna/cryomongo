@@ -3,6 +3,7 @@ require "bson"
 require "./cryomongo/ext/*"
 require "./cryomongo/messages/**"
 require "./cryomongo/server_api"
+require "./cryomongo/deadline"
 require "./cryomongo/client"
 require "./cryomongo/gridfs"
 

@@ -119,13 +119,19 @@ module Mongo::Commands
       property post_batch_resume_token : BSON?
     }
 
-    # Upserted bson sub-document.
-    result(Upserted, root: false) {
-      property index : Int32
-      property _id : BSON::Value
+    # Upserted bson sub-document. Hand-written so `_id: null` can deserialize.
+    struct Upserted
+      getter index : Int32
+      getter _id : BSON::Value?
 
       def initialize(@index, @_id); end
-    }
+
+      def self.from_bson(bson : BSON) : self
+        raw = bson["index"]?
+        index = raw.as?(Int32) || raw.as?(Int64).try(&.to_i32) || 0
+        new(index, bson["_id"]?)
+      end
+    end
 
     # In response to query commands.
     result(QueryResult) {

@@ -11,15 +11,9 @@ module Mongo::Unified::Dispatcher
     "count",
     "mapReduce",
     "waitForPrimaryChange",
-    "iterateUntilDocumentOrError",
-    "iterateOnce",
-    "createFindCursor",
     "recordTopologyDescription",
     "assertTopologyType",
     "assertNumberConnectionsCheckedOut",
-    "upload",
-    "delete",
-    "rename",
     "createSearchIndex",
     "createSearchIndexes",
     "dropSearchIndex",
@@ -65,6 +59,14 @@ module Mongo::Unified::Dispatcher
                when "assertIndexNotExists"                     then execute_assert_index_not_exists(args, internal_client)
                when "download"                                 then execute_download(args, target)
                when "downloadByName"                           then execute_download_by_name(args, target)
+               when "upload"                                   then execute_upload(args, target)
+               when "delete"                                   then execute_gridfs_delete(args, target)
+               when "rename"                                   then execute_gridfs_rename(args, target)
+               when "iterateUntilDocumentOrError"              then execute_iterate_until_document_or_error(target)
+               when "iterateOnce"                              then execute_iterate_once(target)
+               when "createFindCursor"                         then execute_create_find_cursor(args, target, session, op, registry)
+               when "dropIndex"                                then execute_drop_index(args, target, session)
+               when "dropIndexes"                              then execute_drop_indexes(args, target, session)
                when "createCollection"                         then execute_create_collection(args, target, session)
                when "dropCollection"                           then execute_drop_collection(args, target, session)
                when "createIndex"                              then execute_create_index(args, target, session)
@@ -116,6 +118,14 @@ module Mongo::Unified::Dispatcher
 
       if expected_error
         raise Exception.new("TEST_FAILED: Expected operation #{op.name} to fail, but it succeeded.")
+      end
+
+      if (entity_name = op.saveResultAsEntity) && result
+        if result.is_a?(Mongo::Cursor)
+          registry.cursors[entity_name] = result
+        elsif result.is_a?(BSON::Value)
+          registry.entities[entity_name] = result
+        end
       end
 
       if expected = op.expectResult

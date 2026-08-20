@@ -22,6 +22,17 @@ module Mongo::Unified::Matcher
       return en == an
     end
 
+    expected_h = expected.as_h?
+    actual_h = actual.as_h?
+    if expected_h && actual_h
+      if expected_h.has_key?("$date") && actual_h.has_key?("$date")
+        return date_ms(expected_h["$date"]) == date_ms(actual_h["$date"])
+      end
+      if expected_h.has_key?("$oid") && actual_h.has_key?("$oid")
+        return expected_h["$oid"] == actual_h["$oid"]
+      end
+    end
+
     if expected_h = expected.as_h?
       return false unless actual_h = actual.as_h?
       expected_h.each do |key, exp_val|
@@ -147,8 +158,8 @@ module Mongo::Unified::Matcher
     when "date"                    then raw.is_a?(Hash) && actual.as_h.has_key?("$date")
     when "null"                    then raw.nil?
     when "regex"                   then raw.is_a?(Hash) && actual.as_h.has_key?("$regularExpression")
-    when "int", "int32"            then raw.is_a?(Int32) || (raw.is_a?(Int64) && raw.as(Int64) >= Int32::MIN && raw.as(Int64) <= Int32::MAX)
-    when "long", "int64"           then raw.is_a?(Int) || (raw.is_a?(Hash) && actual.as_h.has_key?("$numberLong"))
+    when "int", "int32"            then raw.is_a?(Int32) || (raw.is_a?(Int64) && raw.as(Int64) >= Int32::MIN && raw.as(Int64) <= Int32::MAX) || (raw.is_a?(Hash) && (actual.as_h.has_key?("$numberInt") || actual.as_h.has_key?("$numberLong")))
+    when "long", "int64"           then raw.is_a?(Int) || (raw.is_a?(Hash) && (actual.as_h.has_key?("$numberLong") || actual.as_h.has_key?("$numberInt")))
     when "decimal", "decimal128"   then raw.is_a?(Hash) && actual.as_h.has_key?("$numberDecimal")
     when "timestamp"               then raw.is_a?(Hash) && actual.as_h.has_key?("$timestamp")
     when "number"                  then raw.is_a?(Number) || (raw.is_a?(Hash) && (actual.as_h.has_key?("$numberLong") || actual.as_h.has_key?("$numberDecimal") || actual.as_h.has_key?("$numberInt") || actual.as_h.has_key?("$numberDouble")))

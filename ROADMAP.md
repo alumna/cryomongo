@@ -39,18 +39,18 @@ This phase focuses on ensuring the driver is safe, doesn't leak resources, and p
 This phase addresses the complexities of running in modern cloud environments, handling dynamic scaling, and verifying advanced MongoDB features.
 
 ### Cloud Architecture Specs
-- [ ] **SRV Polling:** Spawn a background fiber for `mongodb+srv://` connections to poll DNS records periodically and dynamically add/remove `mongos` routers from the topology.
-- [ ] **Load Balancers:** Implement the Load Balancer spec (disable `minPoolSize` background creation, and pin consecutive transaction/cursor operations to the exact same TCP socket).
-- [ ] **Client-Side Operations Timeout (CSOT):** Implement the modern `timeoutMS` specification to unify connection, handshake, and execution timeouts into a single deadline.
+- [x] **SRV Polling:** Background fiber for `mongodb+srv://` (Sharded or Unknown). Adds and removes mongos hosts. `srvMaxHosts` / `srvServiceName`. No polling when `loadBalanced=true`.
+- [x] **Load Balancers:** No `minPoolSize` pre-create. Hello must return `serviceId`. Pin the TCP socket for a transaction and for an open cursor. Official load-balancer UTF is not copied yet (needs a real load balancer).
+- [ ] **Client-Side Operations Timeout (CSOT):** URI `timeoutMS` starts a deadline used for server selection and socket wait. Full CSOT (maxTimeMS rules, UTF) is still open.
 
 ### Advanced Application Features (Needs Test Hookup)
-- [ ] **Change Streams:** Run the official JSON/YAML spec tests to verify resume token and failover logic.
-- [ ] **GridFS:** Wire up and pass official GridFS spec tests.
-- [ ] **Index Management:** Wire up and pass official Index Management spec tests.
-- [ ] **Enumerate Collections & Databases:** Wire up and pass official spec tests.
+- [ ] **Change Streams:** Iterate helpers exist. `clusterTime`, `errors`, and `resume-allowlist` pass on sharded. Four files are skipped (`showExpandedEvents`, pre/post images, resume errorLabels). `change-streams.json` asks for replica set.
+- [x] **GridFS:** Official UTF `upload` / `download` / `downloadByName` / `delete` / `rename` pass on sharded 8.0.
+- [x] **Index Management:** Official `index-rawdata.json` runs (`rawData` ignored on 8.0). Search-index ops still `SKIP_TEST`.
+- [x] **Enumerate Collections & Databases:** Official collection-management UTF runs (create / collMod / listCollections / timeseries / clustered index).
 
 ### Advanced Authentication Specs
-- [x] Basic Auth (SCRAM-SHA-1/256, X509, PLAIN)
+- [x] Basic Auth (SCRAM-SHA-1/256 with SASLprep on SHA-256 passwords, X509, PLAIN)
 
 ---
 

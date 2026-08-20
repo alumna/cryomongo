@@ -13,6 +13,8 @@ class Mongo::Client
     server_description : SDAM::ServerDescription? = nil,
     session : Session::ClientSession? = nil,
     operation_id : Int64? = nil,
+    connection : Mongo::Connection? = nil,
+    deadline : Mongo::Deadline? = nil,
     **args,
     &block
   )
@@ -49,6 +51,8 @@ class Mongo::Client
             server_description: server_description,
             session: session,
             operation_id: operation_id,
+            connection: connection,
+            deadline: deadline || Mongo::Deadline.from_options(@options),
             end_implicit_session: owns_session,
           )
         }
@@ -62,6 +66,8 @@ class Mongo::Client
           server_description: server_description,
           session: session,
           operation_id: operation_id,
+          connection: connection,
+          deadline: deadline || Mongo::Deadline.from_options(@options),
           end_implicit_session: owns_session,
         )
       end
@@ -88,9 +94,11 @@ class Mongo::Client
     server_description : SDAM::ServerDescription? = nil,
     session : Session::ClientSession? = nil,
     operation_id : Int64? = nil,
+    connection : Mongo::Connection? = nil,
+    deadline : Mongo::Deadline? = nil,
     **args,
   )
-    self.command(cmd, write_concern, read_concern, read_preference, server_description, session, operation_id, **args) { |result|
+    self.command(cmd, write_concern, read_concern, read_preference, server_description, session, operation_id, connection, deadline, **args) { |result|
       result
     }
   end
@@ -103,6 +111,8 @@ class Mongo::Client
     server_description : SDAM::ServerDescription? = nil,
     session : Session::ClientSession? = nil,
     operation_id : Int64? = nil,
+    connection : Mongo::Connection? = nil,
+    deadline : Mongo::Deadline? = nil,
     end_implicit_session : Bool = true,
     **args,
   )
@@ -142,6 +152,8 @@ class Mongo::Client
         server_description,
         operation_id,
         end_implicit_session,
+        connection,
+        deadline,
         **args
       )
     elsif retryable_command && @options.retry_reads && command.is_a?(Commands::ReadCommand) && command.read_command?
@@ -152,6 +164,8 @@ class Mongo::Client
         server_description,
         operation_id,
         end_implicit_session,
+        connection,
+        deadline,
         **args
       )
     else
@@ -162,6 +176,8 @@ class Mongo::Client
         server_description,
         operation_id,
         end_implicit_session,
+        connection,
+        deadline,
         **args
       )
     end
@@ -175,9 +191,11 @@ class Mongo::Client
     connection : Mongo::Connection,
     operation_id : Int64? = nil,
     end_implicit_session : Bool = true,
+    deadline : Mongo::Deadline? = nil,
+    owns_connection : Bool = true,
     **args,
   )
-    execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, **args) { }
+    execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, deadline, owns_connection, **args) { }
   end
 
   private def execute_command(
@@ -188,9 +206,15 @@ class Mongo::Client
     connection : Mongo::Connection,
     operation_id : Int64? = nil,
     end_implicit_session : Bool = true,
+    deadline : Mongo::Deadline? = nil,
+    owns_connection : Bool = true,
     **args,
     &
   )
+    deadline.try(&.check!)
+    remaining = deadline.try(&.remaining)
+    connection.apply_timeout(remaining || @options.socket_timeout)
+
     if session.options.snapshot && server_description.max_wire_version < 13
       raise Error::Client.new("Snapshot reads require MongoDB 5.0 or later")
     end
@@ -349,6 +373,15 @@ class Mongo::Client
     # Parse and return the body as a custom Result type.
     result = command.result(op_msg.body)
     session.last_operation_server = server_description
+    if @options.load_balanced && owns_connection
+      if session.is_transaction? && (session.transaction_state.starting? || session.transaction_state.in_progress?)
+        session.pin_connection(connection)
+        owns_connection = false
+      elsif (cid = cursor_id_of(result)) && cid != 0
+        session.pending_cursor_connection = connection
+        owns_connection = false
+      end
+    end
     result
   rescue error
     if error.is_a?(NetworkError)
@@ -395,7 +428,7 @@ class Mongo::Client
 
     raise error
   ensure
-    release_connection(connection) if connection
+    release_connection(connection) if connection && owns_connection
     if end_implicit_session && !keeps_implicit_session?(result)
       session.try &.end if session.try(&.implicit?)
     end
@@ -511,6 +544,17 @@ class Mongo::Client
       true
     else
       false
+    end
+  end
+
+  private def cursor_id_of(result) : Int64?
+    case result
+    when Commands::Common::QueryResult
+      result.cursor.id
+    when Commands::GetMore::Result
+      result.cursor.id
+    else
+      nil
     end
   end
 end

@@ -126,7 +126,7 @@ class Mongo::SDAM::ServerDescription
     @primary, @logical_session_timeout_minutes, @topology_version
 
   def data_bearing?
-    @type.mongos? || @type.rs_primary? || @type.rs_secondary? || @type.standalone?
+    @type.mongos? || @type.rs_primary? || @type.rs_secondary? || @type.standalone? || @type.load_balancer?
   end
 
   def primary_or_possible?

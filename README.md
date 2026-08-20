@@ -11,14 +11,14 @@
 
 This is a fork of `elbywan/cryomongo`. The goal is to make the driver ready for **MongoDB 8.0** and **Crystal 1.21**. We plan to merge back to the original project when that work is done.
 
-The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). **Phase 1** of [ROADMAP.md](ROADMAP.md) is done. GitHub Actions runs standalone, replica set, and sharded.
+The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). **Phase 1** of [ROADMAP.md](ROADMAP.md) is done. **Phase 2** is in progress (SASLprep, SRV polling, load-balancer pin, GridFS UTF). GitHub Actions runs standalone, replica set, and sharded.
 
 What is already in place:
 
 * **MongoDB 8.0:** `hello`, sessions, transactions, retryable reads and writes, Versioned API, and a Unified Test Format (UTF) runner.
 * **Crystal 1.21:** `Sync::Mutex`, `Time.instant`, no `spawn(same_thread:)`. Execution contexts are on by default.
 * **BSON:** `alumna/bson.cr` 0.8.1. Commands use `BSON.build` / `append`. Receive uses `BSON.view`. Dates decode as `BSON::DateTime` (model fields of type `Time` still convert). Vector / ExtJSON are not on the hot path.
-* **Auth:** SCRAM-SHA-1, SCRAM-SHA-256 (no SASLprep), X509, and PLAIN.
+* **Auth:** SCRAM-SHA-1, SCRAM-SHA-256 (SASLprep on the password), X509, and PLAIN.
 
 The UTF runner is **clear**: unknown operations become Crystal `pending`, they do not fake a pass. Many official suites are not wired yet. See [ROADMAP.md](ROADMAP.md).
 
@@ -37,12 +37,12 @@ The driver is in **beta**. Core CRUD, sessions, and transactions work on standal
 - CI matrix: standalone, replica set, sharded.
 
 **Not done (see ROADMAP Phase 2+)**
-- SRV polling, load-balancer pinning, CSOT, compression.
-- Official Change Stream / GridFS / index-management UTF suites.
+- Full CSOT (`timeoutMS` deadline exists; maxTimeMS rules and CSOT UTF are still open).
+- Official Change Stream resume UTF on a replica set. Load-balancer UTF (needs a real load balancer).
 - Unified `pool-cleared-error.json` (still skipped).
 - `MONGODB-AWS`, `MONGODB-OIDC`, CSFLE.
 - Connection-pool lock cleanup for true parallel execution contexts.
-- SASLprep for SCRAM-SHA-256.
+- Compression.
 
 #### Cryomongo is a MongoDB driver written in pure Crystal (no C library).
 
@@ -159,7 +159,7 @@ puts cursor.of(User).to_a.to_pretty_json
 - **[Bulk](https://docs.mongodb.com/manual/reference/method/Bulk/index.html)**
 - **[Read](https://docs.mongodb.com/manual/reference/read-concern/index.html) and [Write](https://docs.mongodb.com/manual/reference/write-concern/) Concerns**
 - **[Read Preference](https://docs.mongodb.com/manual/core/read-preference/index.html)**
-- **[Authentication](https://docs.mongodb.com/manual/core/authentication/index.html)** — SCRAM-SHA-1/256 (no SASLprep), X509, PLAIN
+- **[Authentication](https://docs.mongodb.com/manual/core/authentication/index.html)** — SCRAM-SHA-1/256 (SASLprep on SHA-256 passwords), X509, PLAIN
 - **[TLS encryption](https://docs.mongodb.com/manual/core/security-transport-encryption/)**
 - **[Indexes](https://docs.mongodb.com/manual/indexes/index.html)**
 - **[GridFS](https://docs.mongodb.com/manual/core/gridfs/index.html)** (methods accept `session:`)
@@ -230,7 +230,7 @@ ssl_client = Mongo::Client.new uri
 
 ### Authentication
 
-Supported: **SCRAM-SHA-1**, **SCRAM-SHA-256** (no SASLprep), **X509**, and **PLAIN**.
+Supported: **SCRAM-SHA-1**, **SCRAM-SHA-256** (SASLprep on the password), **X509**, and **PLAIN**.
 
 Not supported yet: `MONGODB-AWS`, `MONGODB-OIDC`.
 

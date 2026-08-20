@@ -50,9 +50,11 @@ module Mongo::Unified
       if file_path.ends_with?("interruptInUse-pool-clear.json") ||
          file_path.ends_with?("rediscover-quickly-after-step-down.json") ||
          file_path.ends_with?("pool-cleared-error.json") ||
-         file_path.ends_with?("redacted-commands.json") ||
-         file_path.ends_with?("create-null-ids.json") ||
-         file_path.includes?("server-discovery-and-monitoring/unified/")
+         file_path.includes?("server-discovery-and-monitoring/unified/") ||
+         file_path.ends_with?("change-streams-disambiguatedPaths.json") ||
+         file_path.ends_with?("change-streams-pre_and_post_images.json") ||
+         file_path.ends_with?("change-streams-resume-errorLabels.json") ||
+         file_path.ends_with?("change-streams-showExpandedEvents.json")
         @skip_reason = "hardcoded skip"
       end
     end
@@ -455,7 +457,12 @@ module Mongo::Unified
 
             client.subscribe_commands do |event|
               name = event.command_name.downcase
-              next if IGNORED_MONITOR_COMMANDS.includes?(name)
+              # Handshake sasl/hello is not part of UTF expectEvents, except when
+              # the test watches sensitive runCommand bodies (redacted-commands).
+              next if name == "endsessions"
+              unless observe_sensitive
+                next if IGNORED_MONITOR_COMMANDS.includes?(name)
+              end
               next if ignored.includes?(name)
               unless observe_sensitive
                 body = event.responds_to?(:command) ? event.command : nil
@@ -541,7 +548,17 @@ module Mongo::Unified
             bucket_id = req.id || raise "Missing bucket id"
             if db_name = req.database
               if parent_db = @registry.databases[db_name]?
-                bucket = parent_db.grid_fs
+                bucket_name = "fs"
+                chunk = 255 * 1024
+                if opts = req.bucketOptions.try(&.as_h?)
+                  if n = opts["bucketName"]?.try(&.as_s?)
+                    bucket_name = n
+                  end
+                  if c = opts["chunkSizeBytes"]?
+                    chunk = c.as_i? || c.as_i64?.try(&.to_i32) || chunk
+                  end
+                end
+                bucket = parent_db.grid_fs(bucket_name, chunk_size_bytes: chunk)
                 @registry.buckets[bucket_id] = bucket
               else
                 raise "Parent database '#{db_name}' not found for bucket entity #{bucket_id}"

@@ -201,7 +201,8 @@ class Mongo::Auth::Scram
       # See: https://github.com/mongodb/specifications/blob/master/source/auth/auth.rst#scram-sha-1
       hi(mongo_hashed_password, safe_salt, safe_iterations)
     else
-      hi(@credentials.password || "", safe_salt, safe_iterations)
+      # SCRAM-SHA-256: SASLprep the password. Usernames are not prepared.
+      hi(Mongo::Auth::Saslprep.prepare(@credentials.password || ""), safe_salt, safe_iterations)
     end
   end
 

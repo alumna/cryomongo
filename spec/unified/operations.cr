@@ -226,8 +226,9 @@ module Mongo::Unified::Operations
   private def execute_download_by_name(args, target)
     raise "Missing arguments" unless args
     filename = args["filename"].as_s
+    revision = args["revision"]?.try { |v| v.as_i? || v.as_i64?.try(&.to_i32) } || -1
     stream = IO::Memory.new
-    target.as(Mongo::GridFS::Bucket).download_to_stream_by_name(filename, stream)
+    target.as(Mongo::GridFS::Bucket).download_to_stream_by_name(filename, stream, revision: revision)
     stream.rewind.to_slice
   end
 
@@ -236,9 +237,17 @@ module Mongo::Unified::Operations
     coll_name = args["collection"].as_s
     view_on = args["viewOn"]?.try(&.as_s)
     pipeline = args["pipeline"]?.try(&.as_a).try { |stages| stages.map { |s| BSON.from_json(s.to_json) } }
+    clustered = args["clusteredIndex"]?.try { |v| BSON.from_json(v.to_json) }
+    timeseries = args["timeseries"]?.try { |v| BSON.from_json(v.to_json) }
+    expire = args["expireAfterSeconds"]?.try { |v| v.as_i64? || v.as_i?.try(&.to_i64) }
+    pre_post = args["changeStreamPreAndPostImages"]?.try { |v| BSON.from_json(v.to_json) }
     target.as(Mongo::Database).command(Mongo::Commands::Create, name: coll_name, session: session, options: {
-      view_on:  view_on,
-      pipeline: pipeline,
+      view_on:                         view_on,
+      pipeline:                        pipeline,
+      clustered_index:                 clustered,
+      timeseries:                      timeseries,
+      expire_after_seconds:            expire,
+      change_stream_pre_and_post_images: pre_post,
     })
   end
 
@@ -253,7 +262,7 @@ module Mongo::Unified::Operations
     keys = BSON.from_json(args["keys"].to_json)
     opts_bson = BSON.new
     args.as_h.each do |k, v|
-      next if k == "keys" || k == "session"
+      next if k == "keys" || k == "session" || k == "rawData"
       opts_bson[k] = json_to_bson_value(v)
     end
     model = BSON.new({"keys" => keys, "options" => opts_bson})
@@ -266,15 +275,19 @@ module Mongo::Unified::Operations
     validator = args["validator"]? ? json_to_bson_value(args["validator"]) : nil
     validation_level = args["validationLevel"]? ? args["validationLevel"].as_s : nil
     validation_action = args["validationAction"]? ? args["validationAction"].as_s : nil
+    pre_post = args["changeStreamPreAndPostImages"]?.try { |v| BSON.from_json(v.to_json) }
+    index = args["index"]?.try { |v| BSON.from_json(v.to_json) }
 
     target.as(Mongo::Database).command(
       Mongo::Commands::CollMod,
       collection: coll_name,
       session: session,
       options: {
-        validator:         validator,
-        validation_level:  validation_level,
-        validation_action: validation_action,
+        validator:                           validator,
+        validation_level:                    validation_level,
+        validation_action:                   validation_action,
+        change_stream_pre_and_post_images:   pre_post,
+        index:                               index,
       }
     )
   end
@@ -438,12 +451,15 @@ module Mongo::Unified::Operations
 
   private def execute_create_change_stream(args, target, session)
     pipeline = args && args["pipeline"]? ? args["pipeline"].as_a.map { |p| BSON.from_json(p.to_json) } : [] of BSON
+    batch_size = args.try(&.["batchSize"]?).try(&.as_i)
+    max_await = args.try(&.["maxAwaitTimeMS"]?).try(&.as_i64)
+    full_document = args.try(&.["fullDocument"]?).try(&.as_s)
     if target.is_a?(Mongo::Collection)
-      target.watch(pipeline, session: session)
+      target.watch(pipeline, batch_size: batch_size, max_await_time_ms: max_await, full_document: full_document, session: session)
     elsif target.is_a?(Mongo::Database)
-      target.watch(pipeline, session: session)
+      target.watch(pipeline, batch_size: batch_size, max_await_time_ms: max_await, full_document: full_document, session: session)
     elsif target.is_a?(Mongo::Client)
-      target.watch(pipeline, session: session)
+      target.watch(pipeline, batch_size: batch_size, max_await_time_ms: max_await, full_document: full_document, session: session)
     end
   end
 
@@ -602,7 +618,7 @@ module Mongo::Unified::Operations
       "modifiedCount" => result.n_modified,
       "deletedCount"  => result.n_removed,
       "upsertedCount" => result.n_upserted,
-      "upsertedIds"   => result.upserted.each_with_object({} of String => BSON::Value) { |u, h| h[u.index.to_s] = u._id },
+      "upsertedIds"   => result.upserted.each_with_object({} of String => BSON::Value?) { |u, h| h[u.index.to_s] = u._id },
     }
   end
 
@@ -820,5 +836,90 @@ module Mongo::Unified::Operations
       end
     end
     true
+  end
+
+  private def execute_upload(args, target)
+    raise "Missing arguments" unless args
+    bucket = target.as(Mongo::GridFS::Bucket)
+    filename = args["filename"].as_s
+    source = IO::Memory.new(hex_bytes(args["source"]))
+    id = args["id"]? ? json_to_bson_value(args["id"]) : nil
+    chunk = args["chunkSizeBytes"]?.try { |v| v.as_i? || v.as_i64?.try(&.to_i32) }
+    metadata = args["metadata"]?.try { |m| BSON.from_json(m.to_json) }
+    bucket.upload_from_stream(filename, source, id: id, chunk_size_bytes: chunk, metadata: metadata)
+  end
+
+  private def execute_gridfs_delete(args, target)
+    raise "Missing arguments" unless args
+    id = json_to_bson_value(args["id"])
+    target.as(Mongo::GridFS::Bucket).delete(id)
+  end
+
+  private def execute_gridfs_rename(args, target)
+    raise "Missing arguments" unless args
+    id = json_to_bson_value(args["id"])
+    new_name = args["newFilename"].as_s
+    target.as(Mongo::GridFS::Bucket).rename(id, new_name)
+  end
+
+  private def execute_iterate_until_document_or_error(target)
+    cursor = target.as(Mongo::Cursor)
+    doc = cursor.next
+    if doc.is_a?(Iterator::Stop)
+      raise Mongo::Error.new("Cursor exhausted")
+    end
+    doc
+  end
+
+  private def execute_iterate_once(target)
+    target.as(Mongo::Cursor).try_next
+  end
+
+  private def execute_create_find_cursor(args, target, session, op, registry)
+    cursor = find_cursor(args, target, session)
+    if name = op.saveResultAsEntity
+      registry.cursors[name] = cursor
+    end
+    cursor
+  end
+
+  private def find_cursor(args, target, session)
+    filter = BSON.new
+    sort = nil; skip = nil; limit = nil; batch_size = nil
+    collation = nil; hint = nil; allow_disk_use = nil; max_time_ms = nil
+    comment = nil
+    if args
+      filter = BSON.from_json(args["filter"].to_json) if args["filter"]?
+      sort = BSON.from_json(args["sort"].to_json) if args["sort"]?
+      skip = args["skip"]?.try(&.as_i)
+      limit = args["limit"]?.try(&.as_i)
+      batch_size = args["batchSize"]?.try(&.as_i)
+      collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+      hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+      allow_disk_use = args["allowDiskUse"]?.try(&.as_bool)
+      max_time_ms = args["maxTimeMS"]?.try(&.as_i64)
+      comment = args["comment"]?.try { |c| json_to_bson_value(c) }
+    end
+    target.as(Mongo::Collection).find(filter, sort: sort, skip: skip, limit: limit, batch_size: batch_size, collation: collation, hint: hint, allow_disk_use: allow_disk_use, max_time_ms: max_time_ms, comment: comment, session: session)
+  end
+
+  private def execute_drop_index(args, target, session)
+    raise "Missing arguments" unless args
+    name = args["name"].as_s
+    target.as(Mongo::Collection).drop_index(name, session: session)
+  end
+
+  private def execute_drop_indexes(args, target, session)
+    target.as(Mongo::Collection).drop_indexes(session: session)
+  end
+
+  private def hex_bytes(json : JSON::Any) : Bytes
+    if (h = json.as_h?) && (hex = h["$$hexBytes"]?)
+      hex.as_s.hexbytes
+    elsif s = json.as_s?
+      s.hexbytes
+    else
+      raise "Missing GridFS source bytes"
+    end
   end
 end

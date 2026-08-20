@@ -505,7 +505,57 @@ class Mongo::SDAM::TopologyDescription
   end
 
   def supports_sessions?
+    return true if @type.load_balanced?
     !@type.unknown? && !@logical_session_timeout_minutes.nil?
+  end
+
+  # Add a seed from SRV polling. Returns true when the address was new.
+  def add_srv_seed(address : String) : Bool
+    added = false
+    @lock.synchronize do
+      return false if @servers.any? { |s| s.address == address }
+      previous = snapshot_for_event
+      @servers << ServerDescription.new(address)
+      @client.emit_sdam_event(Monitoring::SDAM::ServerOpeningEvent.new(@client.object_id, address))
+      emit_topology_changed(previous)
+      added = true
+    end
+    @client.on_topology_update if added
+    added
+  end
+
+  # Remove a host that SRV polling no longer lists.
+  def remove_srv_seed(address : String) : ServerDescription?
+    removed = nil.as(ServerDescription?)
+    @lock.synchronize do
+      idx = @servers.index { |s| s.address == address }
+      return nil unless idx
+      previous = snapshot_for_event
+      removed = @servers.delete_at(idx)
+      @client.emit_sdam_event(Monitoring::SDAM::ServerClosedEvent.new(@client.object_id, address))
+      emit_topology_changed(previous)
+    end
+    removed
+  end
+
+  private def snapshot_for_event : TopologyDescription
+    previous = TopologyDescription.new(@client)
+    previous.type = @type
+    previous.set_name = @set_name
+    previous.max_set_version = @max_set_version
+    previous.max_election_id = @max_election_id
+    previous.servers = @servers.map(&.clone)
+    previous.stale = @stale
+    previous.compatible = @compatible
+    previous.compatibility_error = @compatibility_error
+    previous.logical_session_timeout_minutes = @logical_session_timeout_minutes
+    previous
+  end
+
+  private def emit_topology_changed(previous : TopologyDescription) : Nil
+    @client.emit_sdam_event(Monitoring::SDAM::TopologyDescriptionChangedEvent.new(
+      @client.object_id, previous, self.clone
+    ))
   end
 
   def supports_cluster_time?

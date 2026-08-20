@@ -27,6 +27,7 @@ class Mongo::Cursor
 
   protected property server_description : SDAM::ServerDescription? = nil
   protected property session : Session::ClientSession?
+  @pinned_connection : Mongo::Connection? = nil
 
   # :nodoc:
   def initialize(
@@ -65,6 +66,9 @@ class Mongo::Cursor
   protected def bind(session : Session::ClientSession?) : self
     @session = session
     @server_description = session.try(&.last_operation_server)
+    if session
+      @pinned_connection = session.take_pending_cursor_connection
+    end
     self
   end
 
@@ -176,15 +180,20 @@ class Mongo::Cursor
 
   protected def kill
     return if @cursor_id == 0
-    @client.command(
-      Commands::KillCursors,
-      database: @database,
-      collection: @collection,
-      cursor_ids: [@cursor_id],
-      server_description: @server_description,
-      session: @session
-    )
-    @cursor_id = 0_i64
+    begin
+      @client.command(
+        Commands::KillCursors,
+        database: @database,
+        collection: @collection,
+        cursor_ids: [@cursor_id],
+        server_description: @server_description,
+        session: @session,
+        connection: @pinned_connection
+      )
+    ensure
+      @cursor_id = 0_i64
+      release_pin
+    end
   end
 
   protected def end_implicit_session
@@ -207,7 +216,8 @@ class Mongo::Cursor
       max_time_ms: @await_time_ms,
       comment: @comment,
       server_description: @server_description,
-      session: @session
+      session: @session,
+      connection: @pinned_connection
     )
 
     raise Mongo::Error.new("GetMore command failed to return a result") unless reply
@@ -215,12 +225,24 @@ class Mongo::Cursor
     @cursor_id = reply.cursor.id
     @batch = reply.cursor.next_batch
     @batch_index = 0
+    release_pin if @cursor_id == 0
 
     if (session = @session) && exhausted? && session.implicit?
       session.end
     end
 
     reply
+  end
+
+  private def release_pin : Nil
+    conn = @pinned_connection
+    return unless conn
+    @pinned_connection = nil
+    if conn.socket.closed?
+      @client.discard_connection(conn)
+    else
+      @client.checkin_connection(conn)
+    end
   end
 
   # Prefer the original batchSize. 0 means "default" (omit on getMore).
@@ -258,10 +280,13 @@ class Mongo::Cursor
     {% end %}
   end
 
-  # Last-resort cleanup. finalize can run on a GC thread and must not be
-  # the only way to send killCursors. Call `#close`, `#each`, or a block `find`.
+  # Last-resort cleanup. finalize can run on a GC thread and must not send
+  # killCursors or touch the connection pool. Call `#close`, `#each`, or a
+  # block `find`. A pinned load-balanced socket is discarded with the cursor;
+  # the pool reclaims it when the client closes.
   def finalize
-    close
+    @cursor_id = 0_i64
+    @pinned_connection = nil
   end
 end
 

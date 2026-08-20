@@ -47,6 +47,7 @@ class Mongo::Client
   @pools : Hash(String, Mongo::Connection::Pool(Mongo::Connection)) = Hash(String, Mongo::Connection::Pool(Mongo::Connection)).new
 
   @monitors : Array(SDAM::Monitor) = Array(SDAM::Monitor).new
+  @srv_poller : SDAM::SrvPoller? = nil
   @socket_check_interval : Time::Span = 5.seconds
   @last_scan : Time = Time::UNIX_EPOCH
   # Capacity 1 so a topology change that happens just before server selection
@@ -127,7 +128,10 @@ class Mongo::Client
 
     new_topology.servers.each do |server|
       emit_sdam_event(Monitoring::SDAM::ServerOpeningEvent.new(self.object_id, server.address))
-      add_monitor(server, start_monitoring: @monitoring_enabled)
+      # Load-balanced mode has no monitoring sockets.
+      unless @options.load_balanced
+        add_monitor(server, start_monitoring: @monitoring_enabled)
+      end
     end
 
     # The spec mandates LoadBalanced topology starts with Unknown servers, emits the
@@ -145,10 +149,14 @@ class Mongo::Client
         self.object_id, previous_topology, new_topology.clone
       ))
     end
+
+    start_srv_poller
   end
 
   # Frees all the resources associated with a client.
   def close
+    @srv_poller.try(&.close)
+
     # End sessions while pools are still open. EndSessions needs a socket.
     begin
       @session_pool.close(self)
@@ -370,8 +378,11 @@ class Mongo::Client
       pool = addr_lock.synchronize do
         # Double-check inside the lock
         @connection_pool_lock.synchronize { @pools[server_description.address]? } || begin
+          # Load-balanced pools must not pre-create sockets (each one can pin a
+          # different mongos behind the balancer).
+          initial_size = @options.load_balanced ? 0 : @options.min_pool_size
           new_pool = Mongo::Connection::Pool(Mongo::Connection).new(
-            initial_pool_size: @options.min_pool_size,
+            initial_pool_size: initial_size,
             max_pool_size: @options.max_pool_size,
             max_idle_pool_size: @options.max_pool_size,
             checkout_timeout: @options.wait_queue_timeout.try(&.total_seconds) || 5.0,
@@ -423,6 +434,85 @@ class Mongo::Client
     pool = @connection_pool_lock.synchronize { @pools[connection.server_description.address]? }
     pool.try &.release(connection)
     emit_cmap_event(Monitoring::CMAP::ConnectionCheckedInEvent.new(connection.server_description.address, connection.connection_id))
+  end
+
+  # :nodoc:
+  def checkin_connection(connection : Mongo::Connection) : Nil
+    release_connection(connection)
+  end
+
+  # :nodoc:
+  def discard_connection(connection : Mongo::Connection) : Nil
+    pool = @connection_pool_lock.synchronize { @pools[connection.server_description.address]? }
+    pool.try &.drop(connection)
+  end
+
+  private def checkout_for_command(
+    server_description : SDAM::ServerDescription,
+    session : Session::ClientSession,
+    provided : Mongo::Connection?,
+    deadline : Mongo::Deadline?,
+  ) : {Mongo::Connection, Bool}
+    deadline.try(&.check!)
+    timeout = deadline.try(&.remaining) || @options.socket_timeout
+    if provided
+      provided.apply_timeout(timeout)
+      return {provided, false}
+    end
+    session.drop_dead_pin
+    if conn = session.pinned_connection
+      conn.apply_timeout(timeout)
+      return {conn, false}
+    end
+    conn = get_connection(server_description)
+    conn.apply_timeout(timeout)
+    {conn, true}
+  end
+
+  private def start_srv_poller : Nil
+    hostname = @options.srv_hostname
+    return unless hostname
+    return if @options.load_balanced
+    return unless @monitoring_enabled
+    poller = SDAM::SrvPoller.new(
+      self,
+      hostname,
+      @options.srv_service_name,
+      @options.heartbeat_frequency,
+      @options.srv_max_hosts
+    )
+    @srv_poller = poller
+    poller.start
+  end
+
+  # :nodoc:
+  def apply_srv_hosts(addresses : Array(String), srv_max_hosts : Int32) : Nil
+    current = topology.servers.map(&.address)
+    current_set = Set(String).new(current)
+    incoming = Set(String).new(addresses)
+
+    current.each do |addr|
+      next if incoming.includes?(addr)
+      if desc = topology.remove_srv_seed(addr)
+        stop_monitoring(desc)
+        close_connection_pool(desc)
+      end
+    end
+
+    new_hosts = addresses.reject { |addr| current_set.includes?(addr) }
+    if srv_max_hosts > 0
+      room = srv_max_hosts - topology.servers.size
+      if room <= 0
+        return
+      end
+      if new_hosts.size > room
+        new_hosts.shuffle!
+        new_hosts = new_hosts[0, room]
+      end
+    end
+    new_hosts.each do |addr|
+      topology.add_srv_seed(addr)
+    end
   end
 
   protected def close_connection_pool(server_description : SDAM::ServerDescription)

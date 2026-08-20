@@ -88,6 +88,14 @@ struct Mongo::Options
   getter max_adaptive_retries : Int32 = 2
   # When true, overload retries deprioritize the last server. Default false.
   getter enable_overload_retargeting : Bool = false
+  # Limit the number of mongos hosts taken from SRV. 0 means no limit.
+  getter srv_max_hosts : Int32 = 0
+  # SRV service name. Default mongodb, so the query is `_mongodb._tcp.{hostname}`.
+  getter srv_service_name : String = "mongodb"
+  # Client-side operations timeout (URI timeoutMS). Unifies selection, checkout, and socket wait.
+  getter timeout : Time::Span? = nil
+  # Original mongodb+srv hostname. Set by the URI parser, not a URI option.
+  property srv_hostname : String? = nil
 
   # The requested Server API version and strictness options.
   property server_api : ServerApi? = nil
@@ -111,7 +119,7 @@ struct Mongo::Options
 
     {% begin %}
       {% for ivar in @type.instance_vars %}
-        {% if ivar.name.stringify != "raw" && ivar.name.stringify != "dns_resolver" && ivar.name.stringify != "server_api" %}
+        {% if ivar.name.stringify != "raw" && ivar.name.stringify != "dns_resolver" && ivar.name.stringify != "server_api" && ivar.name.stringify != "srv_hostname" %}
           {% default_value = ivar.default_value %}
           {% types = ivar.type.union_types %}
 

@@ -417,7 +417,8 @@ module Mongo::GridFS
     # gridfs.rename(id, new_filename: "new_name.txt")
     # ```
     def rename(id : FileID, new_filename : String, *, session : Session::ClientSession? = nil) : Nil forall FileID
-      bucket.update_one({_id: id}, {"$set": {filename: new_filename}}, session: session)
+      result = bucket.update_one({_id: id}, {"$set": {filename: new_filename}}, session: session)
+      raise Mongo::Error.new "File not found." if result.try(&.n) == 0
     end
 
     # Drops the files and chunks collections associated with this bucket.

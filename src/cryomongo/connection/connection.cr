@@ -10,6 +10,7 @@ struct Mongo::Connection
   getter credentials : Mongo::Credentials
   getter socket : IO
   getter connection_id : Int64
+  getter service_id : BSON::ObjectId? = nil
   @sasl_supported_mechs : Array(String)? = nil
   # After the first handshake, later hellos follow helloOk from the server.
   getter? use_hello : Bool = false
@@ -141,7 +142,25 @@ struct Mongo::Connection
 
     @use_hello = !use_legacy || result.helloOk == true
 
+    if load_balanced
+      sid = result.serviceId
+      unless sid
+        raise Mongo::Error.new("Driver attempted to initialize in load balancing mode, but the server does not support this mode.")
+      end
+      @service_id = sid
+    end
+
     {result, round_trip_time}
+  end
+
+  def apply_timeout(span : Time::Span?) : Nil
+    socket = @socket
+    if socket.responds_to?(:read_timeout=)
+      socket.read_timeout = span
+    end
+    if socket.responds_to?(:write_timeout=)
+      socket.write_timeout = span
+    end
   end
 
   def self.average_round_trip_time(round_trip_time : Time::Span, old_rtt : Time::Span?)
