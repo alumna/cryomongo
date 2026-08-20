@@ -26,6 +26,19 @@ module Mongo::Unified::Operations
     BSON.from_json(%({"v": #{json.to_json}}))["v"]
   end
 
+  def json_i64(value : JSON::Any?) : Int64?
+    return nil unless value
+    if i = value.as_i64?
+      i
+    elsif i = value.as_i?
+      i.to_i64
+    elsif h = value.as_h?
+      if n = h["$numberLong"]? || h["$numberInt"]?
+        n.as_s.to_i64
+      end
+    end
+  end
+
   def parse_update_arg(update_json : JSON::Any)
     if update_json.as_a?
       update_json.as_a.map { |u| BSON.from_json(u.to_json) }
@@ -298,7 +311,8 @@ module Mongo::Unified::Operations
     doc["_id"] = BSON::ObjectId.new unless doc.has_key?("_id")
     comment = args["comment"]?
     bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
-    target.as(Mongo::Collection).insert_one(doc, comment: comment.try { |c| json_to_bson_value(c) }, bypass_document_validation: bypass, session: session)
+    timeout_ms = json_i64(args["timeoutMS"]?)
+    target.as(Mongo::Collection).insert_one(doc, comment: comment.try { |c| json_to_bson_value(c) }, bypass_document_validation: bypass, session: session, timeout_ms: timeout_ms)
     {"insertedId" => doc["_id"]}
   end
 
@@ -454,13 +468,15 @@ module Mongo::Unified::Operations
     batch_size = args.try(&.["batchSize"]?).try(&.as_i)
     max_await = args.try(&.["maxAwaitTimeMS"]?).try(&.as_i64)
     full_document = args.try(&.["fullDocument"]?).try(&.as_s)
+    full_before = args.try(&.["fullDocumentBeforeChange"]?).try(&.as_s)
+    show_expanded = args.try(&.["showExpandedEvents"]?).try(&.as_bool)
     comment = args.try(&.["comment"]?).try { |c| json_to_bson_value(c) }
     if target.is_a?(Mongo::Collection)
-      target.watch(pipeline, batch_size: batch_size, max_await_time_ms: max_await, full_document: full_document, comment: comment, session: session)
+      target.watch(pipeline, batch_size: batch_size, max_await_time_ms: max_await, full_document: full_document, full_document_before_change: full_before, show_expanded_events: show_expanded, comment: comment, session: session)
     elsif target.is_a?(Mongo::Database)
-      target.watch(pipeline, batch_size: batch_size, max_await_time_ms: max_await, full_document: full_document, comment: comment, session: session)
+      target.watch(pipeline, batch_size: batch_size, max_await_time_ms: max_await, full_document: full_document, full_document_before_change: full_before, show_expanded_events: show_expanded, comment: comment, session: session)
     elsif target.is_a?(Mongo::Client)
-      target.watch(pipeline, batch_size: batch_size, max_await_time_ms: max_await, full_document: full_document, comment: comment, session: session)
+      target.watch(pipeline, batch_size: batch_size, max_await_time_ms: max_await, full_document: full_document, full_document_before_change: full_before, show_expanded_events: show_expanded, comment: comment, session: session)
     end
   end
 

@@ -212,7 +212,11 @@ class Mongo::Client
     &
   )
     deadline.try(&.check!)
-    remaining = deadline.try(&.remaining)
+    remaining = if (d = deadline) && !d.infinite?
+                  d.remaining
+                else
+                  nil
+                end
     connection.apply_timeout(remaining || @options.socket_timeout)
 
     if session.options.snapshot && server_description.max_wire_version < 13
@@ -261,6 +265,7 @@ class Mongo::Client
     body = apply_session_fields(body, session, unacknowledged, command, server_description, **args)
     body = (yield body) || body
     body = apply_server_api(body)
+    body = apply_csot_max_time(body, command, deadline, server_description)
 
     # Create the OP_MSG message to send.
     op_msg = Messages::OpMsg.new(body, flag_bits: flag_bits)
@@ -367,7 +372,7 @@ class Mongo::Client
 
     # Raise if the server replied with an error.
     if error = op_msg.error?
-      raise error
+      raise wrap_csot_timeout(error, deadline)
     end
 
     # Parse and return the body as a custom Result type.
@@ -398,8 +403,14 @@ class Mongo::Client
       }
       session.try &.dirty = true
       error = Error::Network.new(error)
+      if (d = deadline) && !d.infinite?
+        cause = error.cause
+        if d.expired? || cause.is_a?(IO::TimeoutError)
+          error = Error::Timeout.new("socket timeout: #{error.message}", cause: error)
+        end
+      end
       # Only retryable writes (retryWrites enabled) get RetryableWriteError on a network error.
-      if @options.retry_writes && command.is_a?(Commands::WriteCommand) && command.write_command?(**args) && command.responds_to?(:retryable?) && command.retryable?(**args, session: session)
+      if error.is_a?(Error::Network) && @options.retry_writes && command.is_a?(Commands::WriteCommand) && command.write_command?(**args) && command.responds_to?(:retryable?) && command.retryable?(**args, session: session)
         error.add_error_label("RetryableWriteError")
       end
     end
@@ -453,6 +464,51 @@ class Mongo::Client
     topology.update(desc, description)
     close_connection_pool(desc) if error.shutdown?
     @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
+  end
+
+  # CSOT: remaining timeout minus min RTT. getMore on a non-awaitData cursor
+  # must not get maxTimeMS. AwaitData getMore already has maxTimeMS (maxAwaitTimeMS).
+  private def apply_csot_max_time(body : BSON, command, deadline : Mongo::Deadline?, server_description : SDAM::ServerDescription) : BSON
+    return body unless deadline
+    return body if deadline.infinite?
+
+    min_rtt = server_description.min_round_trip_time
+    max_time_ms = deadline.max_time_ms(min_rtt)
+    unless max_time_ms
+      raise Error::Timeout.new("remaining timeoutMS is less than server min RTT")
+    end
+
+    if command == Commands::GetMore
+      return body unless body.has_key?("maxTimeMS")
+      existing = body["maxTimeMS"]?
+      existing_ms = case existing
+                    when Int
+                      existing.to_i64
+                    else
+                      max_time_ms
+                    end
+      capped = existing_ms < max_time_ms ? existing_ms : max_time_ms
+      return body.copy_with({maxTimeMS: capped})
+    end
+
+    body.copy_with({maxTimeMS: max_time_ms})
+  end
+
+  # timeoutMS turns MaxTimeMSExpired (code 50) into Error::Timeout.
+  private def wrap_csot_timeout(error : Exception, deadline : Mongo::Deadline?) : Exception
+    return error unless deadline
+    return error if deadline.infinite?
+    case error
+    when Error::CommandWrite
+      if error.errors.any?(&.max_time_ms_expired?)
+        return Error::Timeout.new("MaxTimeMSExpired: #{error.message}", cause: error)
+      end
+    when Error::Command
+      if error.max_time_ms_expired?
+        return Error::Timeout.new("MaxTimeMSExpired: #{error.message}", cause: error)
+      end
+    end
+    error
   end
 
   # Write session fields with one builder append instead of many `[]=`.

@@ -41,20 +41,19 @@ module Mongo::Unified
 
       # interruptInUseConnections is not implemented. Unified SDAM still lacks
       # waitForPrimaryChange / recordTopologyDescription. Keep those files pending.
-      # pool-cleared-error.json is the Phase 1 CMAP retry file and does run.
+      # Load-balancer event-monitoring / sdam-error-handling / transactions / wait-queue
+      # still need pool generation per serviceId and wait-queue cursor/txn counts.
       @force_observe_sensitive = file_path.includes?("redacted-commands")
 
       # pool-cleared-error.json still races with rediscovery after closeConnection.
-      # Redaction is covered by spec/redaction_spec.cr; this CLAM file does not record
-      # runCommand started events for authenticate yet.
       if file_path.ends_with?("interruptInUse-pool-clear.json") ||
          file_path.ends_with?("rediscover-quickly-after-step-down.json") ||
          file_path.ends_with?("pool-cleared-error.json") ||
          file_path.includes?("server-discovery-and-monitoring/unified/") ||
-         file_path.ends_with?("change-streams-disambiguatedPaths.json") ||
-         file_path.ends_with?("change-streams-pre_and_post_images.json") ||
-         file_path.ends_with?("change-streams-resume-errorLabels.json") ||
-         file_path.ends_with?("change-streams-showExpandedEvents.json")
+         file_path.includes?("load-balancers/event-monitoring.json") ||
+         file_path.includes?("load-balancers/sdam-error-handling.json") ||
+         file_path.includes?("load-balancers/transactions.json") ||
+         file_path.includes?("load-balancers/wait-queue-timeouts.json")
         @skip_reason = "hardcoded skip"
       end
     end
@@ -115,10 +114,7 @@ module Mongo::Unified
         rescue
         end
       end
-      begin
-        ic.command(Mongo::Commands::KillAllSessions, users: [] of String)
-      rescue
-      end
+      # Each known server already received killAllSessions above.
     end
 
     private def send_fail_point_off(client : Mongo::Client, server : Mongo::SDAM::ServerDescription?) : Nil
@@ -311,7 +307,10 @@ module Mongo::Unified
     private def sharded_uri_for_client(uri : String, use_multiple : Bool?) : String
       topology = @@topology || ENV["TOPOLOGY"]? || ""
       mapped = Runner.utf_topology_name(topology)
-      return uri unless mapped == "sharded" || mapped == "load-balanced"
+      if mapped == "load-balanced"
+        return load_balanced_uri(use_multiple)
+      end
+      return uri unless mapped == "sharded"
 
       hosts = mongodb_uri_hosts(uri)
       if use_multiple == true
@@ -323,6 +322,28 @@ module Mongo::Unified
         mongodb_uri_single_host(uri, hosts[0])
       else
         uri
+      end
+    end
+
+    # Load-balanced UTF uses one HAProxy host. MULTI_MONGOS_LB_URI still has one
+    # host; the backend has two mongos. loadBalanced=true forbids multiple hosts.
+    private def load_balanced_uri(use_multiple : Bool?) : String
+      single = ENV["SINGLE_MONGOS_LB_URI"]? || ENV["MONGODB_URI"]
+      multi = ENV["MULTI_MONGOS_LB_URI"]? || single
+      use_multiple == true ? multi : single
+    end
+
+    # CSOT: wait until a data-bearing server exists, up to awaitMinPoolSizeMS.
+    private def wait_for_min_pool(client : Mongo::Client, wait_ms : Int32?) : Nil
+      return unless wait_ms
+      return if wait_ms <= 0
+      started = Time.utc
+      limit = wait_ms.milliseconds
+      while (Time.utc - started) < limit
+        if client.topology.servers.any?(&.data_bearing?)
+          return
+        end
+        sleep 10.milliseconds
       end
     end
 
@@ -446,6 +467,7 @@ module Mongo::Unified
             end
 
             client = Mongo::Client.new(uri, options: options)
+            wait_for_min_pool(client, req.awaitMinPoolSizeMS)
             @registry.clients[client_id] = client
             @registry.command_events[client_id] = [] of Mongo::Monitoring::Commands::Event
             @registry.sdam_events[client_id] = [] of Mongo::Monitoring::SDAM::Event

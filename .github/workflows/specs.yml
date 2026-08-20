@@ -120,4 +120,15 @@ jobs:
         env:
           TOPOLOGY: ${{ matrix.topology }}
           MONGODB_URI: ${{ matrix.uri }}
-        run: crystal spec
+          UTF_TIMING_LOG: tmp/utf-timing.log
+        run: |
+          mkdir -p tmp
+          crystal spec
+
+      - name: Upload UTF timing log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: utf-timing-${{ matrix.topology }}
+          path: tmp/utf-timing.log
+          if-no-files-found: ignore

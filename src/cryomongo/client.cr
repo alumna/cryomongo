@@ -296,6 +296,8 @@ class Mongo::Client
     pipeline : Array = [] of BSON,
     *,
     full_document : String? = nil,
+    full_document_before_change : String? = nil,
+    show_expanded_events : Bool? = nil,
     resume_after : BSON? = nil,
     max_await_time_ms : Int64? = nil,
     batch_size : Int32? = nil,
@@ -313,6 +315,8 @@ class Mongo::Client
       collection: 1,
       pipeline: pipeline.map { |elt| BSON.new(elt) },
       full_document: full_document,
+      full_document_before_change: full_document_before_change,
+      show_expanded_events: show_expanded_events,
       resume_after: resume_after,
       start_after: start_after,
       start_at_operation_time: start_at_operation_time,
@@ -404,6 +408,8 @@ class Mongo::Client
             old_rtt = server_description.type.unknown? ? nil : server_description.round_trip_time
             new_rtt = Connection.average_round_trip_time(round_trip_time, old_rtt)
             new_description = SDAM::ServerDescription.new(server_description.address, result, new_rtt)
+            # Keep the monitor RTT window. CSOT minRTT uses monitor hellos only.
+            new_description.copy_rtt_window(server_description) unless server_description.type.unknown?
             topology.update(server_description, new_description)
             server_description.update(new_description)
             connection
@@ -456,7 +462,11 @@ class Mongo::Client
     deadline : Mongo::Deadline?,
   ) : {Mongo::Connection, Bool}
     deadline.try(&.check!)
-    timeout = deadline.try(&.remaining) || @options.socket_timeout
+    timeout = if d = deadline
+                d.infinite? ? @options.socket_timeout : d.remaining
+              else
+                @options.socket_timeout
+              end
     if provided
       provided.apply_timeout(timeout)
       return {provided, false}

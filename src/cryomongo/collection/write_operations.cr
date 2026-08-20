@@ -18,9 +18,10 @@ class Mongo::Collection
   # Inserts the provided document. If the document is missing an identifier, it will be generated.
   #
   # NOTE: [for more details, please check the official documentation](https://docs.mongodb.com/manual/reference/command/insert/).
-  def insert_one(document, *, write_concern : WriteConcern? = nil, bypass_document_validation : Bool? = nil, comment = nil, session : Session::ClientSession? = nil) : Commands::Common::InsertResult?
+  def insert_one(document, *, write_concern : WriteConcern? = nil, bypass_document_validation : Bool? = nil, comment = nil, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil) : Commands::Common::InsertResult?
     docs = Commands::Insert.with_ids([document])
-    result = self.command(Commands::Insert, documents: docs, session: session, options: {
+    deadline = Mongo::Deadline.from_timeout_ms(timeout_ms)
+    result = self.command(Commands::Insert, documents: docs, session: session, deadline: deadline, options: {
       write_concern:              write_concern,
       bypass_document_validation: bypass_document_validation,
       ordered:                    true,

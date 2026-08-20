@@ -58,6 +58,20 @@ describe Mongo::Options do
     options.timeout.should eq 2500.milliseconds
   end
 
+  it "parses timeoutMS=0 as infinite (zero span, not unset)" do
+    _, options, _, _ = Mongo::URI.parse("mongodb://localhost/?timeoutMS=0", Mongo::Options.new)
+    options.timeout.should eq Time::Span.zero
+    deadline = Mongo::Deadline.from_options(options)
+    deadline.should_not be_nil
+    deadline.try(&.infinite?).should be_true
+  end
+
+  it "rejects negative timeoutMS" do
+    expect_raises(Mongo::Error, /timeoutMS/) do
+      Mongo::URI.parse("mongodb://localhost/?timeoutMS=-1", Mongo::Options.new)
+    end
+  end
+
   it "parses srvMaxHosts and srvServiceName on mongodb+srv URIs after DNS" do
     # Validation of the names themselves does not need DNS. A non-srv URI is rejected.
     expect_raises(Mongo::Error, /srvMaxHosts/) do

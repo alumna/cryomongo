@@ -16,7 +16,8 @@ class Mongo::Client
       provided_server || session.server_description,
       command,
       args,
-      read_preference
+      read_preference,
+      deadline
     )
 
     if !topology.supports_sessions? || !server_description.supports_retryable_writes?
@@ -34,7 +35,7 @@ class Mongo::Client
     loop do
       begin
         preferred = provided_server || session.server_description
-        server_description = live_retryable_write_server(preferred, command, args, read_preference)
+        server_description = live_retryable_write_server(preferred, command, args, read_preference, deadline)
         if original_error && server_description.type.unknown?
           # TopologyType Single returns Unknown immediately; handshake rediscovers.
         elsif !topology.supports_sessions? || !server_description.supports_retryable_writes?
@@ -93,6 +94,7 @@ class Mongo::Client
     command,
     args,
     read_preference : ReadPreference,
+    deadline : Mongo::Deadline? = nil,
   ) : SDAM::ServerDescription
     if preferred
       live = topology.servers.find { |s| s.address == preferred.address }
@@ -104,7 +106,7 @@ class Mongo::Client
         return live
       end
     end
-    server_selection(command, args, read_preference)
+    server_selection(command, args, read_preference, deadline)
   end
 
   private def apply_retryable_write_body(body, command, session, attempt, *, overload = false)
@@ -147,7 +149,7 @@ class Mongo::Client
 
     loop do
       begin
-        selected = provided_server || session.server_description || server_selection(command, args, read_preference)
+        selected = provided_server || session.server_description || server_selection(command, args, read_preference, deadline)
 
         if session.options.snapshot && selected.max_wire_version < 13
           raise Error::Client.new("Snapshot reads require MongoDB 5.0 or later")

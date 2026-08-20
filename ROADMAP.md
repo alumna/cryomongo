@@ -40,11 +40,11 @@ This phase addresses the complexities of running in modern cloud environments, h
 
 ### Cloud Architecture Specs
 - [x] **SRV Polling:** Background fiber for `mongodb+srv://` (Sharded or Unknown). Adds and removes mongos hosts. `srvMaxHosts` / `srvServiceName`. No polling when `loadBalanced=true`.
-- [x] **Load Balancers:** No `minPoolSize` pre-create. Hello must return `serviceId`. Pin the TCP socket for a transaction and for an open cursor. Official load-balancer UTF is not copied yet (needs a real load balancer).
-- [ ] **Client-Side Operations Timeout (CSOT):** URI `timeoutMS` starts a deadline used for server selection and socket wait. Full CSOT (maxTimeMS rules, UTF) is still open.
+- [x] **Load Balancers:** No `minPoolSize` pre-create. Hello must return `serviceId`. Pin the TCP socket for a transaction and for an open cursor. Official UTF is copied. Local HAProxy: mongos `--setParameter loadBalancerPort` plus `spec/support/run-load-balancer.sh`. Four files stay skipped (`event-monitoring` poolCleared `serviceId`, per-serviceId pool clear, pin CMAP events, wait-queue cursor/txn counts).
+- [x] **Client-Side Operations Timeout (CSOT):** URI `timeoutMS` is a deadline for selection, checkout, socket wait, and `maxTimeMS` (remaining minus min RTT). Code 50 becomes `Error::Timeout`. Official `command-execution.json` and `error-transformations.json` run. Collection/database timeout, `timeoutMode`, and the other CSOT JSON files are still open.
 
 ### Advanced Application Features (Needs Test Hookup)
-- [ ] **Change Streams:** Iterate helpers exist. `watch` sends `comment`. `change-streams.json` passes on a replica set (22 tests). `clusterTime`, `errors`, and `resume-allowlist` pass on sharded. Four files are skipped (`showExpandedEvents`, pre/post images, resume errorLabels).
+- [x] **Change Streams:** Iterate helpers exist. `watch` sends `comment`, `showExpandedEvents`, and `fullDocumentBeforeChange`. A labeled getMore error resumes with a new aggregate. `change-streams.json` passes on a replica set (22 tests). The other unified files run on replica set and sharded (`nsType` needs server 8.1).
 - [x] **GridFS:** Official UTF `upload` / `download` / `downloadByName` / `delete` / `rename` pass on sharded 8.0.
 - [x] **Index Management:** Official `index-rawdata.json` runs (`rawData` ignored on 8.0). Search-index ops still `SKIP_TEST`.
 - [x] **Enumerate Collections & Databases:** Official collection-management UTF runs (create / collMod / listCollections / timeseries / clustered index).

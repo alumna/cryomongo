@@ -92,7 +92,8 @@ struct Mongo::Options
   getter srv_max_hosts : Int32 = 0
   # SRV service name. Default mongodb, so the query is `_mongodb._tcp.{hostname}`.
   getter srv_service_name : String = "mongodb"
-  # Client-side operations timeout (URI timeoutMS). Unifies selection, checkout, and socket wait.
+  # Client-side operations timeout (URI timeoutMS). Unifies selection, checkout, socket wait, and maxTimeMS.
+  # Nil means unset (legacy timeouts). 0 means infinite.
   getter timeout : Time::Span? = nil
   # Original mongodb+srv hostname. Set by the URI parser, not a URI option.
   property srv_hostname : String? = nil
@@ -193,6 +194,9 @@ struct Mongo::Options
     end
     if raw_hash.has_key?("tls") && raw_hash.has_key?("ssl") && raw_hash["ssl"] != raw_hash["tls"]
       raise Mongo::Error.new "tls and ssl have different values"
+    end
+    if (timeout_raw = raw_hash["timeoutms"]?) && (n = timeout_raw.to_i64?) && n < 0
+      raise Mongo::Error.new("timeoutMS must not be negative")
     end
   end
 end

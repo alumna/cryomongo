@@ -13,7 +13,7 @@ class Mongo::Client
   )
     # getMore must stay on the originating server. Keep a caller pin on retry.
     provided_server = server_description
-    server_description ||= server_selection(command, args, read_preference)
+    server_description ||= server_selection(command, args, read_preference, deadline)
 
     if !topology.supports_sessions? || !server_description.supports_retryable_reads?
       connection, owns = checkout_for_command(server_description, session, provided_connection, deadline)
@@ -27,7 +27,7 @@ class Mongo::Client
 
     loop do
       begin
-        server_description = provided_server || session.server_description || server_selection(command, args, read_preference)
+        server_description = provided_server || session.server_description || server_selection(command, args, read_preference, deadline)
         # TopologyType Single returns an Unknown server immediately. Connecting
         # runs hello and rediscovers. Do not abort the retry just because
         # sessions dropped while the only server was Unknown.

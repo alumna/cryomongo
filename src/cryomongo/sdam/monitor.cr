@@ -112,7 +112,10 @@ module Mongo::SDAM
       result, round_trip_time = connection.handshake(legacy: !connection.use_hello?)
       old_rtt = server_description.type.unknown? ? nil : server_description.round_trip_time
       new_rtt = Connection.average_round_trip_time(round_trip_time, old_rtt)
-      ServerDescription.new(server_description.address, result, new_rtt)
+      new_description = ServerDescription.new(server_description.address, result, new_rtt)
+      new_description.copy_rtt_window(server_description) unless server_description.type.unknown?
+      new_description.record_rtt_sample(round_trip_time)
+      new_description
     rescue error : Exception
       Mongo::Log.error { "Monitoring handshake error: #{error}" }
       Mongo::Log.debug { error.backtrace.join("\n") }

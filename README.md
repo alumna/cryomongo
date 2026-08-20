@@ -26,19 +26,22 @@ The UTF runner is **clear**: unknown operations become Crystal `pending`, they d
 
 The driver is in **beta**. Core CRUD, sessions, and transactions work on standalone, replica set, and sharded MongoDB 8.0.
 
-**Done enough to build apps (Phase 1)**
+**Done enough to build apps (Phase 1 and Phase 2 core)**
 - CRUD helpers, bulk, aggregation (no mapReduce).
 - Sessions, causal consistency, transactions, convenient `with_transaction`.
 - Retryable reads and writes (including `insertMany` as one command).
 - Command redaction in APM / `Log.trace`. Handshake metadata. Cursor `#each` / block `find` close the cursor.
 - Backpressure retry and `PoolClearedError` retry.
 - Legacy SDAM state-machine tests. Versioned API.
-- SCRAM, X509, PLAIN.
-- CI matrix: standalone, replica set, sharded.
+- SCRAM-SHA-256 with SASLprep, X509, and PLAIN.
+- Change streams: `comment`, `showExpandedEvents`, `fullDocumentBeforeChange`, resume after a labeled getMore error.
+- CSOT `timeoutMS`: remaining time becomes `maxTimeMS`. Code 50 is `Error::Timeout`.
+- Load-balancer pin and `serviceId`. Local HAProxy UTF is wired.
+- CI matrix: standalone, replica set, and sharded.
 
-**Not done (see ROADMAP Phase 2+)**
-- Full CSOT (`timeoutMS` deadline exists; maxTimeMS rules and CSOT UTF are still open).
-- Official Change Stream resume UTF on a replica set. Load-balancer UTF (needs a real load balancer).
+**Not done (see ROADMAP Phase 2 leftovers and Phase 3+)**
+- Rest of CSOT UTF (collection/database timeout, `timeoutMode`, GridFS timeout).
+- Load-balancer CMAP leftovers (pool clear per `serviceId`, wait-queue cursor/txn counts).
 - Unified `pool-cleared-error.json` (still skipped).
 - `MONGODB-AWS`, `MONGODB-OIDC`, CSFLE.
 - Connection-pool lock cleanup for true parallel execution contexts.

@@ -196,5 +196,11 @@ module Mongo::Unified::Dispatcher
         end
       end
     end
+
+    if expected.isTimeoutError
+      unless error.is_a?(Mongo::Error::Timeout)
+        raise Exception.new("TEST_FAILED: Expected a timeout error, got #{error.class}: #{error}")
+      end
+    end
   end
 end

@@ -70,6 +70,8 @@ module Mongo::ChangeStream
     @options : NamedTuple(
       pipeline: Array(BSON),
       full_document: String?,
+      full_document_before_change: String?,
+      show_expanded_events: Bool?,
       start_at_operation_time: Time?,
       resume_after: BSON?,
       start_after: BSON?,
@@ -240,6 +242,8 @@ module Mongo::ChangeStream
     private def init(
       pipeline : Array(BSON) = [] of BSON,
       full_document : String? = nil,
+      full_document_before_change : String? = nil,
+      show_expanded_events : Bool? = nil,
       start_at_operation_time : Time? = nil,
       resume_after : BSON? = nil,
       start_after : BSON? = nil,
@@ -259,6 +263,8 @@ module Mongo::ChangeStream
       full_pipeline = self.make_pipeline(
         pipeline: pipeline,
         full_document: full_document,
+        full_document_before_change: full_document_before_change,
+        show_expanded_events: show_expanded_events,
         resume_after: resume_after,
         start_after: start_after,
         start_at_operation_time: start_at
@@ -282,13 +288,15 @@ module Mongo::ChangeStream
       )
     end
 
-    private def make_pipeline(*, pipeline, full_document, resume_after, start_after, start_at_operation_time)
+    private def make_pipeline(*, pipeline, full_document, full_document_before_change, show_expanded_events, resume_after, start_after, start_at_operation_time)
       change_stream_stage = Tools.merge_bson(NamedTuple.new, {
-        full_document:           full_document,
-        resume_after:            resume_after,
-        start_at_operation_time: start_at_operation_time,
-        start_after:             start_after,
-        allChangesForCluster:    (@options["database"]? == "admin") || nil,
+        full_document:                full_document,
+        full_document_before_change:  full_document_before_change,
+        show_expanded_events:         show_expanded_events,
+        resume_after:                 resume_after,
+        start_at_operation_time:      start_at_operation_time,
+        start_after:                  start_after,
+        allChangesForCluster:         (@options["database"]? == "admin") || nil,
       })
       [
         BSON.new({

@@ -6,15 +6,17 @@ Phase 2 of the roadmap started (cloud, GridFS UTF, SASLprep).
 
 ### Added
 * **auth:** SASLprep (RFC 4013) for SCRAM-SHA-256 passwords. Printable ASCII is unchanged (no extra allocation). Usernames are not prepared.
-* **uri:** `timeoutMS` (CSOT deadline), `srvMaxHosts`, `srvServiceName`. `mongodb+srv` URI validation for `loadBalanced`, `replicaSet`, and `directConnection`.
-* **sdam:** SRV polling fiber for `mongodb+srv://` on Sharded or Unknown. Adds and removes mongos hosts. Does not run in load-balanced mode.
-* **load balancer:** Do not pre-create `minPoolSize` sockets. Require `serviceId` on hello. Pin the TCP socket for a transaction and for an open cursor. Unpin returns the socket to the pool.
-* **testing:** UTF ops `iterateUntilDocumentOrError`, `iterateOnce`, `createFindCursor`, GridFS `upload` / `delete` / `rename`, `dropIndex` / `dropIndexes`. Official GridFS, collection-management, and index-management JSON. CLAM `redacted-commands.json` and CRUD `create-null-ids.json` now run.
-* **change streams:** `watch` sends `comment` on aggregate and getMore (string or document).
+* **uri:** `timeoutMS` (CSOT deadline), `srvMaxHosts`, `srvServiceName`. `mongodb+srv` URI validation for `loadBalanced`, `replicaSet`, and `directConnection`. `timeoutMS=0` means infinite. Negative `timeoutMS` is rejected.
+* **sdam:** SRV polling fiber for `mongodb+srv://` on Sharded or Unknown. Adds and removes mongos hosts. Does not run in load-balanced mode. Monitor hellos keep the last 10 RTT samples for CSOT min RTT.
+* **csot:** Remaining `timeoutMS` minus min RTT is sent as `maxTimeMS`. Server code 50 (`MaxTimeMSExpired`) becomes `Error::Timeout`. `insert_one(timeout_ms:)` can override the client timeout. Official `command-execution.json` and `error-transformations.json` run.
+* **load balancer:** Do not pre-create `minPoolSize` sockets. Require `serviceId` on hello. Pin the TCP socket for a transaction and for an open cursor. Unpin returns the socket to the pool. Official UTF is copied. Local HAProxy: `spec/support/run-load-balancer.sh` plus mongos `--setParameter loadBalancerPort`.
+* **testing:** UTF ops `iterateUntilDocumentOrError`, `iterateOnce`, `createFindCursor`, GridFS `upload` / `delete` / `rename`, `dropIndex` / `dropIndexes`. Official GridFS, collection-management, and index-management JSON. CLAM `redacted-commands.json` and CRUD `create-null-ids.json` now run. GitHub uploads `tmp/utf-timing.log`.
+* **change streams:** `watch` sends `comment` on aggregate and getMore (string or document). `showExpandedEvents` and `fullDocumentBeforeChange` go on `$changeStream`. A labeled getMore error resumes with a new aggregate (getMore is not a retryable read).
 
 ### Changed
 * Cursor `finalize` no longer sends `killCursors` or touches the pool (GC thread). Call `#close`, `#each`, or a block `find`.
 * Load-balanced topology does not start monitor sockets. Sessions are always supported in that mode.
+* `getMore` is not retried as a retryable read. Overload retry still runs.
 
 ### Fixed
 * Upsert reply with `_id: null` deserializes. Duplicate-key write errors expose `code`.
