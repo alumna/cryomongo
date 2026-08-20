@@ -11,7 +11,7 @@
 
 This is a fork of `elbywan/cryomongo`. The goal is to make the driver ready for **MongoDB 8.0** and **Crystal 1.21**. We plan to merge back to the original project when that work is done.
 
-The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). **Phase 1** and **Phase 2** of [ROADMAP.md](ROADMAP.md) are done. GitHub Actions runs `crystal spec` on standalone, replica set, sharded, and load-balanced.
+The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). **Phase 1** and **Phase 2** of [ROADMAP.md](ROADMAP.md) are done. GitHub Actions `crystal spec` is green on standalone, replica set, sharded, and load-balanced.
 
 What is already in place:
 

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Phase 2 of the roadmap is done (cloud, GridFS UTF, SASLprep, CSOT, load-balanced full spec).
+Phase 2 of the roadmap is done (cloud, GridFS UTF, SASLprep, CSOT, load-balanced full spec). GitHub `crystal spec` is green on standalone, replica set, sharded, and load-balanced.
 
 ### Added
 * **auth:** SASLprep (RFC 4013) for SCRAM-SHA-256 passwords. Printable ASCII is unchanged (no extra allocation). Usernames are not prepared.
