@@ -12,7 +12,7 @@ This phase focuses on ensuring the driver is safe, doesn't leak resources, and p
 
 ### Testing Infrastructure
 - [x] **Strict UTF Dispatcher:** Unknown operations raise `SKIP_TEST` (no silent pass).
-- [x] **Topology CI Matrix:** GitHub Actions runs standalone, replica set, and sharded. Push a PR to run that matrix.
+- [x] **Topology CI Matrix:** GitHub Actions runs standalone, replica set, sharded, and load-balanced. Push a PR to run that matrix.
 - [x] **Dynamic Test Skipping:** `runOnRequirements` uses live topology or `TOPOLOGY`. A few files stay skipped because the feature is not implemented (`interruptInUseConnections`, most unified SDAM).
 
 ### Core Specifications (JSON & Legacy)
@@ -40,7 +40,7 @@ This phase addresses the complexities of running in modern cloud environments, h
 
 ### Cloud Architecture Specs
 - [x] **SRV Polling:** Background fiber for `mongodb+srv://` (Sharded or Unknown). Adds and removes mongos hosts. `srvMaxHosts` / `srvServiceName`. No polling when `loadBalanced=true`.
-- [x] **Load Balancers:** No `minPoolSize` pre-create. Hello must return `serviceId`. Pin the TCP socket for a transaction and for an open cursor. Official UTF is copied. Local HAProxy: mongos `--setParameter loadBalancerPort` plus `spec/support/run-load-balancer.sh`. Four files stay skipped (`event-monitoring` poolCleared `serviceId`, per-serviceId pool clear, pin CMAP events, wait-queue cursor/txn counts).
+- [x] **Load Balancers:** No `minPoolSize` pre-create. Hello must return `serviceId`. Pin the TCP socket for a transaction and for an open cursor. Official UTF is copied. HAProxy: mongos `--setParameter loadBalancerPort` plus `spec/support/run-load-balancer.sh`. GitHub has a load-balanced job (official LB UTF + offline specs). Four files stay skipped (`event-monitoring` poolCleared `serviceId`, per-serviceId pool clear, pin CMAP events, wait-queue cursor/txn counts). A full UTF suite on load-balanced still fails failCommand / closeConnection files.
 - [x] **Client-Side Operations Timeout (CSOT):** URI `timeoutMS` is a deadline for selection, checkout, socket wait, and `maxTimeMS` (remaining minus min RTT). Code 50 becomes `Error::Timeout`. Official `command-execution.json` and `error-transformations.json` run. Collection/database timeout, `timeoutMode`, and the other CSOT JSON files are still open.
 
 ### Advanced Application Features (Needs Test Hookup)

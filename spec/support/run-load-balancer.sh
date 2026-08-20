@@ -1,14 +1,31 @@
 #!/usr/bin/env bash
 # HAProxy PROXY v2 in front of mongos load-balancer ports.
-# Official UTF uses SINGLE_MONGOS_LB_URI (one mongos) and MULTI_MONGOS_LB_URI (two).
-# Same idea as drivers-evergreen-tools/.evergreen/run-load-balancer.sh.
+#
+# Official load-balancer UTF talks to one HAProxy host with loadBalanced=true.
+# SINGLE_MONGOS_LB_URI (:8000) has one mongos behind it.
+# MULTI_MONGOS_LB_URI (:8001) has two mongos behind it. The URI still has one
+# host; loadBalanced=true cannot list two hosts.
+#
+# This matches drivers-evergreen-tools/.evergreen/run-load-balancer.sh
+# (backends 27050/27051, frontends 8000/8001, send-proxy-v2).
+#
+# mongos 8.0 must listen on those backends with:
+#   --setParameter loadBalancerPort=27050
+# not --loadBalancerPort (that flag does not exist on 8.0.29).
+#
+# GitHub Actions: .github/workflows/specs.yml starts a sharded cluster with
+# those ports, installs haproxy, then runs this script.
+#
+# Local:
+#   sudo scripts/mongo-topology.sh load-balanced
+#   source tmp/lb-uri.env
+#   crystal spec spec/unified_runner_spec.cr
 #
 # Usage:
 #   spec/support/run-load-balancer.sh start
 #   spec/support/run-load-balancer.sh stop
 #
-# Default backends: 127.0.0.1:27050 (mongos1) and 127.0.0.1:27051 (mongos2).
-# Frontends: 8000 (one mongos) and 8001 (two mongos).
+# Optional env: LB_BACKEND_1, LB_BACKEND_2, LB_FRONT_1, LB_FRONT_2.
 
 set -euo pipefail
 

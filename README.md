@@ -11,7 +11,7 @@
 
 This is a fork of `elbywan/cryomongo`. The goal is to make the driver ready for **MongoDB 8.0** and **Crystal 1.21**. We plan to merge back to the original project when that work is done.
 
-The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). **Phase 1** of [ROADMAP.md](ROADMAP.md) is done. **Phase 2** is in progress (SASLprep, SRV polling, load-balancer pin, GridFS UTF). GitHub Actions runs standalone, replica set, and sharded.
+The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). **Phase 1** of [ROADMAP.md](ROADMAP.md) is done. **Phase 2** is in progress (SASLprep, SRV polling, load-balancer pin, GridFS UTF). GitHub Actions runs standalone, replica set, sharded, and load-balanced.
 
 What is already in place:
 
@@ -37,7 +37,7 @@ The driver is in **beta**. Core CRUD, sessions, and transactions work on standal
 - Change streams: `comment`, `showExpandedEvents`, `fullDocumentBeforeChange`, resume after a labeled getMore error.
 - CSOT `timeoutMS`: remaining time becomes `maxTimeMS`. Code 50 is `Error::Timeout`.
 - Load-balancer pin and `serviceId`. Local HAProxy UTF is wired.
-- CI matrix: standalone, replica set, and sharded.
+- CI matrix: standalone, replica set, sharded, and load-balanced.
 
 **Not done (see ROADMAP Phase 2 leftovers and Phase 3+)**
 - Rest of CSOT UTF (collection/database timeout, `timeoutMode`, GridFS timeout).
