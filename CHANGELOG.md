@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.16.0 - 2026-08-20
 
 Phase 2 of the roadmap is done (cloud, GridFS UTF, SASLprep, CSOT, load-balanced full spec). GitHub `crystal spec` is green on standalone, replica set, sharded, and load-balanced.
 
