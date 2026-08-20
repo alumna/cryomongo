@@ -24,6 +24,11 @@ class Mongo::Cursor
   @batch_index : Int32 = 0
   @limit : Int32? = nil
   @comment : BSON::Value? = nil
+  @timeout_ms : Int64? = nil
+  @timeout_mode : Mongo::TimeoutMode = Mongo::TimeoutMode::CursorLifetime
+  @deadline : Mongo::Deadline? = nil
+  # Fresh timeoutMS for one next() when timeoutMode is iteration (change-stream resume uses the same deadline).
+  @iteration_deadline : Mongo::Deadline? = nil
 
   protected property server_description : SDAM::ServerDescription? = nil
   protected property session : Session::ClientSession?
@@ -41,6 +46,9 @@ class Mongo::Cursor
     @tailable : Bool = false,
     @session : Session::ClientSession? = nil,
     @comment = nil,
+    @timeout_ms : Int64? = nil,
+    @timeout_mode : Mongo::TimeoutMode = Mongo::TimeoutMode::CursorLifetime,
+    @deadline : Mongo::Deadline? = nil,
   )
     @database, @collection = namespace.split(".", 2)
   end
@@ -55,6 +63,9 @@ class Mongo::Cursor
     @tailable : Bool = false,
     @session : Session::ClientSession? = nil,
     @comment = nil,
+    @timeout_ms : Int64? = nil,
+    @timeout_mode : Mongo::TimeoutMode = Mongo::TimeoutMode::CursorLifetime,
+    @deadline : Mongo::Deadline? = nil,
   )
     @cursor_id = result.cursor.id
     @batch = result.cursor.first_batch
@@ -141,10 +152,20 @@ class Mongo::Cursor
   end
 
   # Close the cursor and frees underlying resources.
-  def close
-    unless exhausted?
-      self.kill
+  # timeout_ms, if set, is the timeout for killCursors only. Otherwise killCursors
+  # starts a fresh timeoutMS from the original find/aggregate.
+  def close(*, timeout_ms : Int64? = nil)
+    conn = @pinned_connection
+    if conn && conn.socket.closed?
+      # Dead pin: return the socket. Load-balanced killCursors must stay on the
+      # same mongos, so do not open a new socket after a network error.
+      @pinned_connection = nil
+      @client.checkin_connection(conn)
+      if @client.options.load_balanced
+        @cursor_id = 0_i64
+      end
     end
+    self.kill(timeout_ms: timeout_ms) unless exhausted?
   rescue e
     # Ignore - client might be dead
   ensure
@@ -178,9 +199,14 @@ class Mongo::Cursor
     @batch_index >= @batch.size
   end
 
-  protected def kill
+  protected def kill(*, timeout_ms : Int64? = nil)
     return if @cursor_id == 0
     begin
+      deadline = unless timeout_ms.nil?
+                   Mongo::Deadline.from_timeout_ms(timeout_ms)
+                 else
+                   kill_deadline
+                 end
       @client.command(
         Commands::KillCursors,
         database: @database,
@@ -188,7 +214,8 @@ class Mongo::Cursor
         cursor_ids: [@cursor_id],
         server_description: @server_description,
         session: @session,
-        connection: @pinned_connection
+        connection: @pinned_connection,
+        deadline: deadline
       )
     ensure
       @cursor_id = 0_i64
@@ -217,7 +244,8 @@ class Mongo::Cursor
       comment: @comment,
       server_description: @server_description,
       session: @session,
-      connection: @pinned_connection
+      connection: @pinned_connection,
+      deadline: get_more_deadline
     )
 
     raise Mongo::Error.new("GetMore command failed to return a result") unless reply
@@ -234,15 +262,34 @@ class Mongo::Cursor
     reply
   end
 
+  private def get_more_deadline : Mongo::Deadline?
+    if @timeout_mode.iteration? && @timeout_ms
+      d = @iteration_deadline || Mongo::Deadline.from_timeout_ms(@timeout_ms)
+      @iteration_deadline = d
+      if @tailable && @await_time_ms
+        d
+      else
+        d.try(&.without_max_time)
+      end
+    else
+      @deadline
+    end
+  end
+
+  # close() always starts a fresh timeoutMS, even if cursor lifetime already expired.
+  private def kill_deadline : Mongo::Deadline?
+    if @timeout_ms
+      Mongo::Deadline.from_timeout_ms(@timeout_ms)
+    else
+      @deadline
+    end
+  end
+
   private def release_pin : Nil
     conn = @pinned_connection
     return unless conn
     @pinned_connection = nil
-    if conn.socket.closed?
-      @client.discard_connection(conn)
-    else
-      @client.checkin_connection(conn)
-    end
+    @client.checkin_connection(conn)
   end
 
   # Prefer the original batchSize. 0 means "default" (omit on getMore).

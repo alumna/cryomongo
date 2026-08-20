@@ -59,7 +59,11 @@ class Mongo::Client
       end
 
       attempt += 1
-      if attempt > allowed_retries
+      if d = deadline
+        if !d.infinite? && d.expired?
+          raise Mongo::Error::Timeout.new("retryable read exceeded timeoutMS", cause: original_error)
+        end
+      elsif attempt > allowed_retries
         raise original_error if original_error
         raise Mongo::Error.new("Unknown error during retryable read")
       end

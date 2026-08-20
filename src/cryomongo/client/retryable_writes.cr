@@ -68,19 +68,27 @@ class Mongo::Client
         end
 
         attempt += 1
-        if attempt > allowed_retries
+        if d = deadline
+          if !d.infinite? && d.expired?
+            raise Mongo::Error::Timeout.new("retryable write exceeded timeoutMS", cause: error)
+          end
+        elsif attempt > allowed_retries
           raise error
         end
 
         original_error = error
-        session.unpin if error.transient_transaction?
+        session.unpin if error.transient_transaction? || error.unknown_transaction?
         apply_overload_backoff(attempt, error) if overload
       rescue error : Mongo::Client::NetworkError
         wrapped = Error::Network.new(error)
         wrapped.add_retryable_label(server_description.max_wire_version)
         original_error = wrapped
         attempt += 1
-        raise wrapped if attempt > allowed_retries
+        if d = deadline
+          raise Mongo::Error::Timeout.new("retryable write exceeded timeoutMS", cause: wrapped) if !d.infinite? && d.expired?
+        elsif attempt > allowed_retries
+          raise wrapped
+        end
       end
     end
   end
@@ -185,7 +193,11 @@ class Mongo::Client
 
         allowed_retries = overload ? @options.max_adaptive_retries : 1
         attempt += 1
-        if attempt > allowed_retries
+        if d = deadline
+          if !d.infinite? && d.expired?
+            raise Mongo::Error::Timeout.new("retryable write exceeded timeoutMS", cause: error)
+          end
+        elsif attempt > allowed_retries
           raise error
         end
         original_error = error

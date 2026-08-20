@@ -8,7 +8,10 @@ module Mongo::Monitoring::CMAP
   end
 
   struct PoolClearedEvent < Event
-    def initialize(address : String)
+    # Load-balanced: only connections with this serviceId were cleared.
+    getter service_id : BSON::ObjectId?
+
+    def initialize(address : String, @service_id : BSON::ObjectId? = nil)
       super(address)
     end
   end
@@ -27,10 +30,21 @@ module Mongo::Monitoring::CMAP
     end
   end
 
-  struct ConnectionClosedEvent < Event
+  # Handshake and auth finished. The socket can be used.
+  struct ConnectionReadyEvent < Event
     getter connection_id : Int64
 
     def initialize(address : String, @connection_id : Int64)
+      super(address)
+    end
+  end
+
+  struct ConnectionClosedEvent < Event
+    getter connection_id : Int64
+    # "stale", "idle", "error", or "poolClosed".
+    getter reason : String
+
+    def initialize(address : String, @connection_id : Int64, @reason : String = "error")
       super(address)
     end
   end

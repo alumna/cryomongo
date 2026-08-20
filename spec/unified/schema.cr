@@ -16,6 +16,7 @@ module Mongo::Unified
     property collectionName : String
     property databaseName : String
     property documents : Array(JSON::Any)
+    property createOptions : JSON::Any?
   end
 
   struct ThreadRequest

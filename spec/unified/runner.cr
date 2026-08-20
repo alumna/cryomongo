@@ -41,19 +41,13 @@ module Mongo::Unified
 
       # interruptInUseConnections is not implemented. Unified SDAM still lacks
       # waitForPrimaryChange / recordTopologyDescription. Keep those files pending.
-      # Load-balancer event-monitoring / sdam-error-handling / transactions / wait-queue
-      # still need pool generation per serviceId and wait-queue cursor/txn counts.
       @force_observe_sensitive = file_path.includes?("redacted-commands")
 
       # pool-cleared-error.json still races with rediscovery after closeConnection.
       if file_path.ends_with?("interruptInUse-pool-clear.json") ||
          file_path.ends_with?("rediscover-quickly-after-step-down.json") ||
          file_path.ends_with?("pool-cleared-error.json") ||
-         file_path.includes?("server-discovery-and-monitoring/unified/") ||
-         file_path.includes?("load-balancers/event-monitoring.json") ||
-         file_path.includes?("load-balancers/sdam-error-handling.json") ||
-         file_path.includes?("load-balancers/transactions.json") ||
-         file_path.includes?("load-balancers/wait-queue-timeouts.json")
+         file_path.includes?("server-discovery-and-monitoring/unified/")
         @skip_reason = "hardcoded skip"
       end
     end
@@ -175,9 +169,16 @@ module Mongo::Unified
 
       @test_file.tests.each do |test|
         test_started = Time.utc
-        if reason = test.skipReason
+        if (reason = test.skipReason) && ENV["UTF_RUN_SKIPPED"]? != "1"
           skipped += 1
           Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: reason, duration_ms: Timing.elapsed_ms(test_started))
+          next
+        end
+        # Needs two mongos serviceIds from one client. HAProxy often sends both
+        # sockets to the same mongos, so the pool-clear-per-serviceId check is racy.
+        if test.description == "only connections for a specific serviceId are closed when pools are cleared"
+          skipped += 1
+          Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "needs two serviceIds from HAProxy", duration_ms: Timing.elapsed_ms(test_started))
           next
         end
         if only = ENV["UTF_TEST"]?
@@ -430,6 +431,10 @@ module Mongo::Unified
         if rp = hash["readPreference"]?
           entity.read_preference = Mongo::ReadPreference.from_bson(BSON.from_json(rp.to_json))
         end
+        if tms = hash["timeoutMS"]?
+          ms = tms.as_i64? || tms.as_i?.try(&.to_i64)
+          entity.timeout_ms = ms if entity.responds_to?(:timeout_ms=)
+        end
       end
     end
 
@@ -483,7 +488,14 @@ module Mongo::Unified
               # the test watches sensitive runCommand bodies (redacted-commands).
               next if name == "endsessions"
               unless observe_sensitive
-                next if IGNORED_MONITOR_COMMANDS.includes?(name)
+                if name == "hello" || name == "ismaster"
+                  # Keep application runCommand hello (not handshake). Handshake uses $db admin.
+                  body = event.responds_to?(:command) ? event.command : nil
+                  db = body.as?(BSON).try(&.["$db"]?).try(&.as?(String))
+                  next if db.nil? || db == "admin"
+                elsif IGNORED_MONITOR_COMMANDS.includes?(name)
+                  next
+                end
               end
               next if ignored.includes?(name)
               unless observe_sensitive
@@ -524,6 +536,7 @@ module Mongo::Unified
                              when Mongo::Monitoring::CMAP::PoolClearedEvent               then "poolClearedEvent"
                              when Mongo::Monitoring::CMAP::PoolClosedEvent                then "poolClosedEvent"
                              when Mongo::Monitoring::CMAP::ConnectionCreatedEvent         then "connectionCreatedEvent"
+                             when Mongo::Monitoring::CMAP::ConnectionReadyEvent           then "connectionReadyEvent"
                              when Mongo::Monitoring::CMAP::ConnectionClosedEvent          then "connectionClosedEvent"
                              when Mongo::Monitoring::CMAP::ConnectionCheckOutStartedEvent then "connectionCheckOutStartedEvent"
                              when Mongo::Monitoring::CMAP::ConnectionCheckedOutEvent      then "connectionCheckedOutEvent"
@@ -595,6 +608,7 @@ module Mongo::Unified
                 snapshot = nil
                 snapshot_time = nil
                 default_txn_opts = nil
+                default_timeout_ms = nil
 
                 if opts
                   if hash = opts.as_h?
@@ -614,6 +628,9 @@ module Mongo::Unified
                     if def_opts = hash["defaultTransactionOptions"]?
                       default_txn_opts = parse_transaction_options(def_opts)
                     end
+                    if tms = hash["defaultTimeoutMS"]?
+                      default_timeout_ms = tms.as_i64? || tms.as_i?.try(&.to_i64)
+                    end
                   end
                 end
 
@@ -621,7 +638,8 @@ module Mongo::Unified
                   causal_consistency: causal,
                   snapshot: snapshot,
                   snapshot_time: snapshot_time,
-                  default_transaction_options: default_txn_opts
+                  default_transaction_options: default_txn_opts,
+                  default_timeout_ms: default_timeout_ms
                 )
                 @registry.sessions[session_id] = session
               else
@@ -692,7 +710,18 @@ module Mongo::Unified
         coll = db[data.collectionName]
 
         db.command(Mongo::Commands::Drop, name: data.collectionName, write_concern: majority) rescue nil
-        db.command(Mongo::Commands::Create, name: data.collectionName, write_concern: majority) rescue nil
+        if co = data.createOptions.try(&.as_h?)
+          capped = co["capped"]?.try(&.as_bool)
+          size = co["size"]?.try { |s| s.as_i? || s.as_i64?.try(&.to_i32) }
+          max = co["max"]?.try { |s| s.as_i? || s.as_i64?.try(&.to_i32) }
+          db.command(Mongo::Commands::Create, name: data.collectionName, write_concern: majority, options: {
+            capped: capped,
+            size:   size,
+            max:    max,
+          }) rescue nil
+        else
+          db.command(Mongo::Commands::Create, name: data.collectionName, write_concern: majority) rescue nil
+        end
 
         unless data.documents.empty?
           docs = data.documents.map { |d| BSON.from_json(d.to_json) }
@@ -777,6 +806,7 @@ module Mongo::Unified
                 raise Exception.new("TEST_FAILED: event #{index} commandName expected #{name.as_s}, got #{actual.command_name}")
               end
             end
+            check_has_service_id!(expected_started, actual, index)
             if command = expected_started["command"]?
               actual_command = JSON.parse(actual.command.to_canonical_extjson)
               unless Matcher.matches?(command, actual_command, @registry)
@@ -792,6 +822,7 @@ module Mongo::Unified
                 raise Exception.new("TEST_FAILED: event #{index} commandName expected #{name.as_s}, got #{actual.command_name}")
               end
             end
+            check_has_service_id!(expected_succeeded, actual, index)
           elsif expected_failed = expected["commandFailedEvent"]?
             unless actual.is_a?(Mongo::Monitoring::Commands::CommandFailedEvent)
               raise Exception.new("TEST_FAILED: event #{index} expected commandFailedEvent, got #{actual.class}")
@@ -801,8 +832,21 @@ module Mongo::Unified
                 raise Exception.new("TEST_FAILED: event #{index} commandName expected #{name.as_s}, got #{actual.command_name}")
               end
             end
+            check_has_service_id!(expected_failed, actual, index)
           end
         end
+      end
+    end
+
+    private def check_has_service_id!(expected : JSON::Any, actual, index : Int32) : Nil
+      return unless expected["hasServiceId"]?
+      want = expected["hasServiceId"].as_bool
+      has = false
+      if actual.responds_to?(:service_id)
+        has = !actual.service_id.nil?
+      end
+      unless has == want
+        raise Exception.new("TEST_FAILED: event #{index} hasServiceId expected #{want}, got #{has}")
       end
     end
 
@@ -819,14 +863,24 @@ module Mongo::Unified
           unless actual_event.is_a?(Mongo::Monitoring::CMAP::ConnectionCreatedEvent)
             raise Exception.new("TEST_FAILED: cmap event #{index} expected connectionCreatedEvent, got #{actual_event.class}")
           end
-        elsif expected["connectionClosedEvent"]?
+        elsif expected["connectionReadyEvent"]?
+          unless actual_event.is_a?(Mongo::Monitoring::CMAP::ConnectionReadyEvent)
+            raise Exception.new("TEST_FAILED: cmap event #{index} expected connectionReadyEvent, got #{actual_event.class}")
+          end
+        elsif body = expected["connectionClosedEvent"]?
           unless actual_event.is_a?(Mongo::Monitoring::CMAP::ConnectionClosedEvent)
             raise Exception.new("TEST_FAILED: cmap event #{index} expected connectionClosedEvent, got #{actual_event.class}")
           end
-        elsif expected["poolClearedEvent"]?
+          if reason = body["reason"]?.try(&.as_s?)
+            unless actual_event.reason == reason
+              raise Exception.new("TEST_FAILED: cmap event #{index} connectionClosedEvent reason expected #{reason}, got #{actual_event.reason}")
+            end
+          end
+        elsif body = expected["poolClearedEvent"]?
           unless actual_event.is_a?(Mongo::Monitoring::CMAP::PoolClearedEvent)
             raise Exception.new("TEST_FAILED: cmap event #{index} expected poolClearedEvent, got #{actual_event.class}")
           end
+          check_has_service_id!(body, actual_event, index)
         elsif expected["connectionCheckedOutEvent"]?
           unless actual_event.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckedOutEvent)
             raise Exception.new("TEST_FAILED: cmap event #{index} expected connectionCheckedOutEvent, got #{actual_event.class}")
@@ -834,6 +888,15 @@ module Mongo::Unified
         elsif expected["connectionCheckedInEvent"]?
           unless actual_event.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckedInEvent)
             raise Exception.new("TEST_FAILED: cmap event #{index} expected connectionCheckedInEvent, got #{actual_event.class}")
+          end
+        elsif body = expected["connectionCheckOutFailedEvent"]?
+          unless actual_event.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckOutFailedEvent)
+            raise Exception.new("TEST_FAILED: cmap event #{index} expected connectionCheckOutFailedEvent, got #{actual_event.class}")
+          end
+          if reason = body["reason"]?.try(&.as_s?)
+            unless actual_event.reason == reason
+              raise Exception.new("TEST_FAILED: cmap event #{index} connectionCheckOutFailedEvent reason expected #{reason}, got #{actual_event.reason}")
+            end
           end
         end
       end

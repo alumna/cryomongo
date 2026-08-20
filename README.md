@@ -35,14 +35,14 @@ The driver is in **beta**. Core CRUD, sessions, and transactions work on standal
 - Legacy SDAM state-machine tests. Versioned API.
 - SCRAM-SHA-256 with SASLprep, X509, and PLAIN.
 - Change streams: `comment`, `showExpandedEvents`, `fullDocumentBeforeChange`, resume after a labeled getMore error.
-- CSOT `timeoutMS`: remaining time becomes `maxTimeMS`. Code 50 is `Error::Timeout`.
-- Load-balancer pin and `serviceId`. Local HAProxy UTF is wired.
+- CSOT `timeoutMS`: remaining time becomes `maxTimeMS`. Code 50 is `Error::Timeout`. Collection / database / operation `timeoutMS`, `timeoutMode`, GridFS lifetime, tailable / change-stream iteration. Official CSOT UTF is 27 files.
+- Load-balancer pin, `serviceId` on command and pool-cleared events, wait-queue cursor/txn counts, pool clear per `serviceId`. Local HAProxy UTF is wired.
 - CI matrix: standalone, replica set, sharded, and load-balanced.
 
 **Not done (see ROADMAP Phase 2 leftovers and Phase 3+)**
-- Rest of CSOT UTF (collection/database timeout, `timeoutMode`, GridFS timeout).
-- Load-balancer CMAP leftovers (pool clear per `serviceId`, wait-queue cursor/txn counts).
+- CSOT `runCursorCommand` helper and JSON.
 - Unified `pool-cleared-error.json` (still skipped).
+- Full `crystal spec` on load-balanced (failCommand / closeConnection).
 - `MONGODB-AWS`, `MONGODB-OIDC`, CSFLE.
 - Connection-pool lock cleanup for true parallel execution contexts.
 - Compression.

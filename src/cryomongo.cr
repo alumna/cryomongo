@@ -4,6 +4,7 @@ require "./cryomongo/ext/*"
 require "./cryomongo/messages/**"
 require "./cryomongo/server_api"
 require "./cryomongo/deadline"
+require "./cryomongo/timeout_mode"
 require "./cryomongo/client"
 require "./cryomongo/gridfs"
 

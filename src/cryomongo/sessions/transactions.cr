@@ -114,9 +114,15 @@ module Mongo::Session
     #   }
     # }
     # ```
-    def with_transaction(**options, &block)
+    def with_transaction(timeout_ms : Int64? = nil, **options, &block)
       start_time = Time.instant
-      timeout = 120.seconds
+      csot = timeout_ms || @options.default_timeout_ms || @client.options.timeout.try(&.total_milliseconds.to_i64)
+      if csot
+        @operation_deadline = Mongo::Deadline.from_timeout_ms(csot)
+        timeout = csot.milliseconds
+      else
+        timeout = 120.seconds
+      end
       transaction_attempt = 0
       last_error : Exception? = nil
       backoff_initial = 5.0
@@ -129,7 +135,7 @@ module Mongo::Session
           backoff = Random.rand * backoff_target
 
           if (Time.instant + backoff.milliseconds - start_time) >= timeout
-            raise last_error if last_error
+            raise timeout_from(last_error, timeout) if last_error
             raise Error::Transaction.new("Transaction exceeded timeout of #{timeout}")
           end
           sleep backoff.milliseconds
@@ -144,6 +150,10 @@ module Mongo::Session
           last_error = error
           if transaction_state.starting? || transaction_state.in_progress?
             begin
+              # Spec: abortTransaction gets a fresh timeoutMS.
+              if csot
+                @operation_deadline = Mongo::Deadline.from_timeout_ms(csot)
+              end
               abort_transaction
             rescue
               # Drivers MUST ignore any errors raised by abortTransaction
@@ -154,7 +164,7 @@ module Mongo::Session
             if (Time.instant - start_time) < timeout
               next # retryTransaction
             else
-              raise error
+              raise timeout_from(error, timeout)
             end
           end
 
@@ -182,7 +192,7 @@ module Mongo::Session
 
             if error.is_a?(Mongo::Error) && !is_max_time && error.has_error_label?("UnknownTransactionCommitResult")
               if (Time.instant - start_time) >= timeout
-                raise error
+                raise timeout_from(error, timeout)
               end
               next # continue retryCommit
             end
@@ -200,6 +210,12 @@ module Mongo::Session
         break if commit_successful
         next if transient_error
       end
+    ensure
+      @operation_deadline = nil
+    end
+
+    private def timeout_from(error : Exception, timeout : Time::Span) : Mongo::Error::Timeout
+      Mongo::Error::Timeout.new("withTransaction exceeded timeout of #{timeout}", cause: error)
     end
 
     # Commits the currently active transaction in this session.
@@ -216,13 +232,14 @@ module Mongo::Session
     # }
     # session.commit_transaction
     # ```
-    def commit_transaction(*, write_concern : WriteConcern? = nil)
+    def commit_transaction(*, write_concern : WriteConcern? = nil, timeout_ms : Int64? = nil)
       state_transition(:commit, rollback_status_on_error: false) {
         skip_commit = @transitions_from.try(&.starting?) || false
         begin
           @client.command(
             Commands::CommitTransaction,
             session: self,
+            deadline: Mongo::Deadline.from_timeout_ms(timeout_ms),
             options: {
               write_concern:  write_concern || current_transaction_options.write_concern,
               max_time_ms:    current_transaction_options.max_commit_time_ms,
@@ -251,11 +268,12 @@ module Mongo::Session
     # }
     # session.abort_transaction
     # ```
-    def abort_transaction(*, write_concern : WriteConcern? = nil)
+    def abort_transaction(*, write_concern : WriteConcern? = nil, timeout_ms : Int64? = nil)
       state_transition(:abort, rollback_status_on_error: false) {
         @client.command(
           Commands::AbortTransaction,
           session: self,
+          deadline: Mongo::Deadline.from_timeout_ms(timeout_ms),
           options: {
             write_concern:  write_concern || current_transaction_options.write_concern,
             recovery_token: recovery_token,
@@ -277,6 +295,8 @@ module Mongo::Session
       rescue
         # Drivers MUST ignore any errors raised by abortTransaction while ending a session.
       end
+      # Load-balanced: return the pinned socket. Spec: endSession unpins.
+      unpin
       previous_def
     end
 
@@ -301,7 +321,7 @@ module Mongo::Session
       return unless conn
       return unless conn.socket.closed?
       @pinned_connection = nil
-      @client.discard_connection(conn)
+      @client.checkin_connection(conn)
     end
 
     def unpin : Nil
@@ -357,6 +377,8 @@ module Mongo::Session
     rescue e : Error::Server
       raise e
     rescue e : Error::Network
+      raise e
+    rescue e : Error::Timeout
       raise e
     rescue e
       if rollback_status_on_error

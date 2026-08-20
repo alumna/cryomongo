@@ -4,6 +4,13 @@ require "weak_ref"
 
 # :nodoc:
 class Mongo::Connection::Pool(T)
+  # Why a checked-out socket is held. Wait-queue timeout lists these counts.
+  enum InUse
+    Other
+    Cursor
+    Transaction
+  end
+
   # Pool configuration
 
   # initial number of connections in the pool
@@ -29,6 +36,14 @@ class Mongo::Connection::Pool(T)
   @closed : Bool = false
   # last time each idle connection was released (keyed by socket object_id)
   @idle_since = Hash(UInt64, Time::Instant).new
+  # Non-load-balanced generation. Incremented on a full pool clear.
+  @generation : Int32 = 0
+  # Load-balanced: generation per mongos serviceId.
+  @service_generations = Hash(BSON::ObjectId, Int32).new
+  # Load-balanced: open sockets per serviceId. Entry is removed at 0.
+  @service_counts = Hash(BSON::ObjectId, Int32).new
+  # Checked-out purpose, keyed by connection_id (Connection is a struct).
+  @in_use = Hash(Int64, InUse).new
 
   # Sync state
 
@@ -56,6 +71,9 @@ class Mongo::Connection::Pool(T)
       @total.clear
       @idle.clear
       @idle_since.clear
+      @in_use.clear
+      @service_generations.clear
+      @service_counts.clear
     end
   end
 
@@ -75,7 +93,39 @@ class Mongo::Connection::Pool(T)
     )
   end
 
-  def checkout : T
+  # Sockets currently checked out, including pins.
+  def checked_out_count : Int32
+    sync { @total.size - @idle.size }
+  end
+
+  def stale?(resource : T) : Bool
+    sync { stale_unlocked?(resource) }
+  end
+
+  def mark_cursor(resource : T) : Nil
+    sync { @in_use[resource.connection_id] = InUse::Cursor }
+  end
+
+  def mark_transaction(resource : T) : Nil
+    sync { @in_use[resource.connection_id] = InUse::Transaction }
+  end
+
+  # Increment generation. Idle sockets that are now stale are closed.
+  # Load-balanced: pass service_id so other mongos sockets stay.
+  # Returns the idle sockets that were closed.
+  # Increment generation. Idle sockets stay until checkin/checkout (CMAP lazy close).
+  def clear(service_id : BSON::ObjectId? = nil) : Array(T)
+    sync do
+      if sid = service_id
+        @service_generations[sid] = (@service_generations[sid]? || 0) + 1
+      else
+        @generation += 1
+      end
+    end
+    [] of T
+  end
+
+  def checkout(wait : Time::Span? = nil) : T
     res = sync do
       raise Mongo::Error::PoolCleared.new("Connection pool was cleared") if @closed
 
@@ -86,28 +136,35 @@ class Mongo::Connection::Pool(T)
                      if can_increase_pool?
                        @inflight += 1
                        begin
-                         unsync { build_resource }
+                         created = unsync { @factory.call }
+                         created.generation = generation_for(created.service_id)
+                         add_service_count(created.service_id)
+                         @total << created
+                         created
                        ensure
                          @inflight -= 1
                        end
                      else
-                       unsync { wait_for_available }
+                       timed_out = false
+                       unsync { timed_out = !wait_for_available(wait) }
                        raise Mongo::Error::PoolCleared.new("Connection pool was cleared") if @closed
+                       raise wait_queue_error if timed_out
                        pick_available
                      end
                    else
                      pick_available
                    end
 
-        if resource && idle_too_long?(resource)
+        if resource && (idle_too_long?(resource) || stale_unlocked?(resource))
           discard(resource)
           resource = nil
         end
       end
 
       if resource
-        @idle.delete resource
+        delete_idle(resource)
         forget_idle_time(resource)
+        @in_use[resource.connection_id] = InUse::Other
       end
 
       resource
@@ -141,13 +198,14 @@ class Mongo::Connection::Pool(T)
       candidates.each do |ref|
         resource = ref.value
         if resource && is_available?(resource)
-          if idle_too_long?(resource)
+          if idle_too_long?(resource) || stale_unlocked?(resource)
             discard(resource)
             next
           end
-          @idle.delete resource
+          delete_idle(resource)
           forget_idle_time(resource)
-          resource.before_checkout
+          @in_use[resource.connection_id] = InUse::Other
+          resource.before_checkout if resource.responds_to?(:before_checkout)
           return {resource, true}
         end
       end
@@ -161,19 +219,30 @@ class Mongo::Connection::Pool(T)
   def drop(resource : T) : Nil
     sync do
       resource.close
-      @total.delete(resource)
-      @idle.delete(resource)
-      forget_idle_time(resource)
+      remove(resource)
     end
   end
 
-  def release(resource : T) : Nil
+  # Return a socket to the pool, or close it if it is dead, stale, or the pool is closed.
+  # Returns "stale", "error", "poolClosed", or nil when the socket is idle again.
+  def release(resource : T) : String?
     sync do
+      @in_use.delete(resource.connection_id)
       if @closed
         resource.close
-        @total.delete(resource)
-        forget_idle_time(resource)
-        return
+        remove(resource)
+        return "poolClosed"
+      end
+
+      if resource.socket.closed?
+        remove(resource)
+        return "error"
+      end
+
+      if stale_unlocked?(resource)
+        resource.close
+        remove(resource)
+        return "stale"
       end
 
       if can_increase_idle_pool
@@ -188,10 +257,11 @@ class Mongo::Connection::Pool(T)
         else
           # …but do not block.
         end
+        nil
       else
         resource.close
-        @total.delete(resource)
-        forget_idle_time(resource)
+        remove(resource)
+        "idle"
       end
     end
   end
@@ -207,25 +277,87 @@ class Mongo::Connection::Pool(T)
 
   # :nodoc:
   def is_available?(resource : T)
-    @idle.includes?(resource)
+    @idle.any? { |c| c.connection_id == resource.connection_id }
   end
 
   # :nodoc:
   def delete(resource : T)
-    @total.delete(resource)
-    @idle.delete(resource)
-    forget_idle_time(resource)
+    remove(resource)
   end
 
   private def build_resource : T
     resource = @factory.call
+    resource.generation = generation_for(resource.service_id)
+    add_service_count(resource.service_id)
     @total << resource
     @idle << resource
     mark_idle(resource)
     resource
   end
 
-  # Connection is a struct. The socket object is the stable identity.
+  private def generation_for(service_id : BSON::ObjectId?) : Int32
+    if sid = service_id
+      @service_generations[sid]? || 0
+    else
+      @generation
+    end
+  end
+
+  private def stale_unlocked?(resource : T) : Bool
+    resource.generation != generation_for(resource.service_id)
+  end
+
+  private def add_service_count(service_id : BSON::ObjectId?) : Nil
+    return unless sid = service_id
+    @service_counts[sid] = (@service_counts[sid]? || 0) + 1
+  end
+
+  private def drop_service_count(service_id : BSON::ObjectId?) : Nil
+    return unless sid = service_id
+    n = (@service_counts[sid]? || 1) - 1
+    if n <= 0
+      @service_counts.delete(sid)
+      @service_generations.delete(sid)
+    else
+      @service_counts[sid] = n
+    end
+  end
+
+  private def wait_queue_error : Mongo::Error::Connection
+    cursors = 0
+    txns = 0
+    other = 0
+    @in_use.each_value do |kind|
+      case kind
+      when .cursor?
+        cursors += 1
+      when .transaction?
+        txns += 1
+      else
+        other += 1
+      end
+    end
+    Mongo::Error::Connection.new(
+      "Timeout waiting for connection from the connection pool. maxPoolSize: #{@max_pool_size}, connections in use by cursors: #{cursors}, connections in use by transactions: #{txns}, connections in use by other operations: #{other}"
+    )
+  end
+
+  private def same_id?(left : T, right : T) : Bool
+    left.connection_id == right.connection_id
+  end
+
+  private def delete_idle(resource : T) : Nil
+    @idle.reject! { |c| same_id?(c, resource) }
+  end
+
+  private def remove(resource : T) : Nil
+    @total.reject! { |c| same_id?(c, resource) }
+    delete_idle(resource)
+    forget_idle_time(resource)
+    @in_use.delete(resource.connection_id)
+    drop_service_count(resource.service_id)
+  end
+
   private def idle_key(resource : T) : UInt64
     resource.socket.object_id
   end
@@ -249,10 +381,8 @@ class Mongo::Connection::Pool(T)
   end
 
   private def discard(resource : T)
-    @idle.delete(resource)
-    @total.delete(resource)
-    forget_idle_time(resource)
     resource.close
+    remove(resource)
   end
 
   private def can_increase_pool?
@@ -267,14 +397,18 @@ class Mongo::Connection::Pool(T)
     @idle.first?
   end
 
-  private def wait_for_available
+  # True when a socket became free. False on wait-queue timeout.
+  private def wait_for_available(wait : Time::Span? = nil) : Bool
+    span = wait || @checkout_timeout.seconds
+    span = Time::Span.zero if span < Time::Span.zero
     select
     when @availability_channel.receive
-    when timeout(@checkout_timeout.seconds)
-      raise Mongo::Error::Connection.new("Too many open connections, could not check out a connection in #{@checkout_timeout} seconds.")
+      true
+    when timeout(span)
+      false
     end
   rescue Channel::ClosedError
-    raise Mongo::Error::PoolCleared.new("Connection pool was cleared")
+    true
   end
 
   private def sync(&)

@@ -6,6 +6,8 @@ struct Mongo::Deadline
   getter start : Time::Instant
   # Nil means infinite (URI timeoutMS=0).
   getter limit : Time::Span?
+  # False for timeoutMode=iteration on a non-awaitData command (no maxTimeMS).
+  getter? send_max_time : Bool = true
 
   def self.from_options(options : Mongo::Options) : self?
     span = options.timeout
@@ -29,7 +31,11 @@ struct Mongo::Deadline
     end
   end
 
-  def initialize(@start : Time::Instant, @limit : Time::Span?)
+  def initialize(@start : Time::Instant, @limit : Time::Span?, @send_max_time : Bool = true)
+  end
+
+  def without_max_time : self
+    Deadline.new(@start, @limit, false)
   end
 
   def infinite? : Bool

@@ -13,7 +13,6 @@ module Mongo::Unified::Dispatcher
     "waitForPrimaryChange",
     "recordTopologyDescription",
     "assertTopologyType",
-    "assertNumberConnectionsCheckedOut",
     "createSearchIndex",
     "createSearchIndexes",
     "dropSearchIndex",
@@ -111,7 +110,8 @@ module Mongo::Unified::Dispatcher
                when "waitForEvent"                             then execute_wait_for_event(args, registry)
                when "assertEventCount"                         then execute_assert_event_count(args, registry)
                when "wait"                                     then execute_wait(args)
-               when "close"                                    then execute_close(target)
+               when "close"                                    then execute_close(args, target)
+               when "assertNumberConnectionsCheckedOut"        then execute_assert_number_connections_checked_out(args, registry)
                when "appendMetadata"                           then execute_append_metadata(args, target)
                else
                  raise Exception.new("SKIP_TEST")

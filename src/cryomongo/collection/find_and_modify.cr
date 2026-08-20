@@ -35,8 +35,9 @@ class Mongo::Collection
     max_time_ms : Int64? = nil,
     comment = nil,
     session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
   ) : BSON? forall H
-    result = self.command(Commands::FindAndModify, filter: filter, session: session, options: {
+    result = self.command(Commands::FindAndModify, filter: filter, session: session, timeout_ms: timeout_ms, options: {
       remove:                     true,
       sort:                       sort.try { BSON.new(sort) },
       fields:                     fields.try { BSON.new(fields) },
@@ -70,9 +71,10 @@ class Mongo::Collection
     max_time_ms : Int64? = nil,
     comment = nil,
     session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
   ) : BSON? forall H
     replacement = self.class.validate_replacement!(replacement)
-    result = self.command(Commands::FindAndModify, filter: filter, session: session, options: {
+    result = self.command(Commands::FindAndModify, filter: filter, session: session, timeout_ms: timeout_ms, options: {
       update:                     replacement,
       sort:                       sort.try { BSON.new(sort) },
       new:                        new,
@@ -109,9 +111,10 @@ class Mongo::Collection
     max_time_ms : Int64? = nil,
     comment = nil,
     session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
   ) : BSON? forall H
     update = self.class.validate_update!(update)
-    result = self.command(Commands::FindAndModify, filter: filter, session: session, options: {
+    result = self.command(Commands::FindAndModify, filter: filter, session: session, timeout_ms: timeout_ms, options: {
       update:                     update,
       sort:                       sort.try { BSON.new(sort) },
       new:                        new,

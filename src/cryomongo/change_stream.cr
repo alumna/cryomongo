@@ -91,11 +91,15 @@ module Mongo::ChangeStream
     @seen_document : Bool = false
     # Timestamp used only while resuming (original aggregate operationTime).
     @resume_start_at : BSON::Timestamp? = nil
+    # Timeout on next() must not resume in the same call. The next next() resumes.
+    @resume_on_timeout : Bool = false
 
     # :nodoc:
-    def initialize(@client : Mongo::Client, @session : Session::ClientSession? = nil, @limit : Int32? = nil, **@options)
+    def initialize(@client : Mongo::Client, @session : Session::ClientSession? = nil, @limit : Int32? = nil, timeout_ms : Int64? = nil, **@options)
       @await_time_ms = options["max_time_ms"]?
       @tailable = true
+      @timeout_mode = Mongo::TimeoutMode::Iteration
+      @timeout_ms = timeout_ms
       @yielded = 0
       @session = @session || Session::ClientSession.new(@client)
       @resume_token = options["start_after"]? || options["resume_after"]?
@@ -121,30 +125,54 @@ module Mongo::ChangeStream
     end
 
     def next : BSON | Iterator::Stop
-      loop do
-        begin
-          element = super
-          apply_document_token(element) if element.is_a?(BSON)
-          return element
-        rescue e : Mongo::Error
-          raise e unless resumable?(e)
-          resume_after_error
+      if @resume_on_timeout
+        @resume_on_timeout = false
+        resume_after_error
+      end
+      start_iteration_deadline
+      begin
+        loop do
+          begin
+            element = super
+            apply_document_token(element) if element.is_a?(BSON)
+            return element
+          rescue e : Mongo::Error::Timeout
+            @resume_on_timeout = true
+            raise e
+          rescue e : Mongo::Error
+            raise e unless resumable?(e)
+            resume_after_error
+          end
         end
+      ensure
+        @iteration_deadline = nil
       end
     end
 
     # One getMore at most. Does not block waiting for a later change after an
     # empty batch. Use this to read the latest resume token while idle.
     def try_next : BSON?
-      loop do
-        begin
-          element = super
-          apply_document_token(element) if element
-          return element
-        rescue e : Mongo::Error
-          raise e unless resumable?(e)
-          resume_after_error
+      if @resume_on_timeout
+        @resume_on_timeout = false
+        resume_after_error
+      end
+      start_iteration_deadline
+      begin
+        loop do
+          begin
+            element = super
+            apply_document_token(element) if element
+            return element
+          rescue e : Mongo::Error::Timeout
+            @resume_on_timeout = true
+            raise e
+          rescue e : Mongo::Error
+            raise e unless resumable?(e)
+            resume_after_error
+          end
         end
+      ensure
+        @iteration_deadline = nil
       end
     end
 
@@ -168,6 +196,9 @@ module Mongo::ChangeStream
       @batch_index = 0
       @database, @collection = result.cursor.ns.split(".", 2)
       @server_description = @session.try(&.last_operation_server)
+      if session = @session
+        @pinned_connection = session.take_pending_cursor_connection
+      end
       @batch_pbrt = result.cursor.post_batch_resume_token
 
       if token = @batch_pbrt
@@ -272,6 +303,7 @@ module Mongo::ChangeStream
 
       # Aggregate honors cursor.batchSize, not top-level batchSize.
       # maxAwaitTimeMS belongs on getMore only (@await_time_ms).
+      # timeoutMS applies to this aggregate (awaitData-style maxTimeMS).
       @client.command(
         Commands::Aggregate,
         pipeline: full_pipeline,
@@ -280,12 +312,23 @@ module Mongo::ChangeStream
         read_concern: read_concern,
         read_preference: read_preference,
         session: @session,
+        deadline: aggregate_deadline,
         options: {
           cursor:    batch_size.try { {batchSize: batch_size} },
           collation: collation,
           comment:   comment,
         }
       )
+    end
+
+    private def start_iteration_deadline : Nil
+      return if @iteration_deadline
+      return unless @timeout_ms
+      @iteration_deadline = Mongo::Deadline.from_timeout_ms(@timeout_ms)
+    end
+
+    private def aggregate_deadline : Mongo::Deadline?
+      @iteration_deadline || Mongo::Deadline.from_timeout_ms(@timeout_ms)
     end
 
     private def make_pipeline(*, pipeline, full_document, full_document_before_change, show_expanded_events, resume_after, start_after, start_at_operation_time)

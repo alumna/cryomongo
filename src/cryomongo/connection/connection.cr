@@ -3,14 +3,19 @@ require "./credentials"
 require "./auth"
 
 # :nodoc:
-struct Mongo::Connection
+# Class so pin, pool, and checkout share one object (generation, serviceId, socket).
+class Mongo::Connection
   @@next_connection_id = Atomic(Int64).new(1)
 
   getter server_description : SDAM::ServerDescription
   getter credentials : Mongo::Credentials
   getter socket : IO
   getter connection_id : Int64
-  getter service_id : BSON::ObjectId? = nil
+  property service_id : BSON::ObjectId? = nil
+  # Pool generation at handshake. A later clear with a higher value makes this socket stale.
+  property generation : Int32 = 0
+  # True after hello succeeds. Handshake errors before this must not clear the pool.
+  property handshake_complete : Bool = false
   @sasl_supported_mechs : Array(String)? = nil
   # After the first handshake, later hellos follow helloOk from the server.
   getter? use_hello : Bool = false

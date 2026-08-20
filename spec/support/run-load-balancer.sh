@@ -53,6 +53,9 @@ start() {
   stop >/dev/null 2>&1 || true
 
   cat > "$CONF" <<EOF
+global
+    stats socket ${TMP}/haproxy.sock mode 666 level admin
+
 defaults
     mode tcp
     timeout connect 10s
@@ -69,12 +72,17 @@ frontend mongoses_frontend
 
 backend mongos_backend
     mode tcp
-    server mongos ${LB1} check send-proxy-v2
+    # Do not health-check the load-balancer port. mongos expects PROXY v2
+    # on that port, so a plain TCP check fails and HAProxy marks the server down.
+    server mongos ${LB1} send-proxy-v2
 
 backend mongoses_backend
     mode tcp
-    server mongos_one ${LB1} check send-proxy-v2
-    server mongos_two ${LB2} check send-proxy-v2
+    # leastconn so a pinned socket on one mongos sends the next TCP to the other.
+    balance leastconn
+    retries 0
+    server mongos_one ${LB1} send-proxy-v2
+    server mongos_two ${LB2} send-proxy-v2
 EOF
 
   haproxy -D -f "$CONF" -p "$PIDFILE"

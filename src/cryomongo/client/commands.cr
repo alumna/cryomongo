@@ -52,7 +52,7 @@ class Mongo::Client
             session: session,
             operation_id: operation_id,
             connection: connection,
-            deadline: deadline || Mongo::Deadline.from_options(@options),
+            deadline: resolve_deadline(deadline, session),
             end_implicit_session: owns_session,
           )
         }
@@ -67,7 +67,7 @@ class Mongo::Client
           session: session,
           operation_id: operation_id,
           connection: connection,
-          deadline: deadline || Mongo::Deadline.from_options(@options),
+          deadline: resolve_deadline(deadline, session),
           end_implicit_session: owns_session,
         )
       end
@@ -211,6 +211,12 @@ class Mongo::Client
     **args,
     &
   )
+    duration_start = Time.instant
+    request_id = 0_i64
+    command_started = false
+    command_name = command.name
+    address = connection.server_description.address
+
     deadline.try(&.check!)
     remaining = if (d = deadline) && !d.infinite?
                   d.remaining
@@ -218,6 +224,14 @@ class Mongo::Client
                   nil
                 end
     connection.apply_timeout(remaining || @options.socket_timeout)
+
+    # Load-balanced transactions keep this socket even if this command fails
+    # with a non-transient error.
+    if @options.load_balanced && owns_connection && session.is_transaction? && (session.transaction_state.starting? || session.transaction_state.in_progress?)
+      session.pin_connection(connection)
+      mark_transaction_pin(connection)
+      owns_connection = false
+    end
 
     if session.options.snapshot && server_description.max_wire_version < 13
       raise Error::Client.new("Snapshot reads require MongoDB 5.0 or later")
@@ -266,6 +280,7 @@ class Mongo::Client
     body = (yield body) || body
     body = apply_server_api(body)
     body = apply_csot_max_time(body, command, deadline, server_description)
+    body = strip_wtimeout_if_csot(body, deadline)
 
     # Create the OP_MSG message to send.
     op_msg = Messages::OpMsg.new(body, flag_bits: flag_bits)
@@ -273,25 +288,21 @@ class Mongo::Client
       op_msg.sequence(key.to_s, contents: documents)
     }
 
-    # Command monitoring related variables.
-    duration_start = Time.instant
-    request_id = uninitialized Int64
-    command_name = command.name
-    address = connection.server_description.address
-
     # Send the command.
     connection.send(op_msg, command) { |message|
       # Monitor by sending a CommandStartedEvent
       if @commands_observable.has_subscribers?
         request_id = message.header.request_id.to_i64
 
+        command_started = true
         @commands_observable.broadcast(Monitoring::Commands::CommandStartedEvent.new(
           command_name: command_name,
           request_id: request_id,
           operation_id: operation_id,
           address: address,
           command: op_msg.safe_payload(command),
-          database_name: op_msg.body["$db"].as(String)
+          database_name: op_msg.body["$db"].as(String),
+          service_id: connection.service_id
         ))
       end
     }
@@ -305,7 +316,8 @@ class Mongo::Client
           operation_id: operation_id,
           address: address,
           duration: duration_start.elapsed,
-          reply: BSON.new({ok: 1})
+          reply: BSON.new({ok: 1}),
+          service_id: connection.service_id
         ))
       end
 
@@ -327,7 +339,8 @@ class Mongo::Client
             address: address,
             duration: duration,
             reply: op_msg.safe_payload(command),
-            failure: Monitoring::Redact.failure(command_name, error, op_msg.body)
+            failure: Monitoring::Redact.failure(command_name, error, op_msg.body),
+            service_id: connection.service_id
           ))
         else
           @commands_observable.broadcast(Monitoring::Commands::CommandSucceededEvent.new(
@@ -336,7 +349,8 @@ class Mongo::Client
             operation_id: operation_id,
             address: address,
             duration: duration,
-            reply: op_msg.safe_payload(command)
+            reply: op_msg.safe_payload(command),
+            service_id: connection.service_id
           ))
         end
       end
@@ -379,28 +393,46 @@ class Mongo::Client
     result = command.result(op_msg.body)
     session.last_operation_server = server_description
     if @options.load_balanced && owns_connection
-      if session.is_transaction? && (session.transaction_state.starting? || session.transaction_state.in_progress?)
-        session.pin_connection(connection)
-        owns_connection = false
-      elsif (cid = cursor_id_of(result)) && cid != 0
+      if (cid = cursor_id_of(result)) && cid != 0
         session.pending_cursor_connection = connection
+        mark_cursor_pin(connection)
         owns_connection = false
       end
     end
     result
   rescue error
+    started_name = command_name
+    started_address = address
+    if command_started && started_name && started_address && @commands_observable.has_subscribers? && error.is_a?(NetworkError)
+      @commands_observable.broadcast(Monitoring::Commands::CommandFailedEvent.new(
+        command_name: started_name,
+        request_id: request_id || 0_i64,
+        operation_id: operation_id,
+        address: started_address,
+        duration: duration_start.try(&.elapsed) || Time::Span.zero,
+        reply: BSON.new,
+        failure: error,
+        service_id: connection.service_id
+      ))
+    end
     if error.is_a?(NetworkError)
+      # Mark the socket dead so checkin uses reason "error", not "stale".
+      connection.close
       Mongo::Log.error(exception: error) { "Network error" } unless server_description
       # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#network-or-command-error-during-server-check
-      server_description.try { |desc|
-        Mongo::Log.error(exception: error) { "I/O error with server address: #{desc.address}" }
-        description = SDAM::ServerDescription.new(desc.address)
-        description.error = error.message
-        description.last_update_time = desc.last_update_time
-        topology.update(desc, description)
-        close_connection_pool(desc)
-        @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
-      }
+      if @options.load_balanced
+        handle_load_balanced_error(server_description, connection, error)
+      else
+        server_description.try { |desc|
+          Mongo::Log.error(exception: error) { "I/O error with server address: #{desc.address}" }
+          description = SDAM::ServerDescription.new(desc.address)
+          description.error = error.message
+          description.last_update_time = desc.last_update_time
+          topology.update(desc, description)
+          close_connection_pool(desc)
+          @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
+        }
+      end
       session.try &.dirty = true
       error = Error::Network.new(error)
       if (d = deadline) && !d.infinite?
@@ -419,7 +451,11 @@ class Mongo::Client
       Mongo::Log.error { "Command error: #{error}" }
       # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#not-master-and-node-is-recovering
       if error.state_change?
-        apply_state_change_error(server_description, error)
+        if @options.load_balanced
+          handle_load_balanced_error(server_description, connection, error) if error.shutdown?
+        else
+          apply_state_change_error(server_description, error)
+        end
       end
     end
 
@@ -430,9 +466,9 @@ class Mongo::Client
         error.add_transient_transaction_label
       end
 
-      # Stay pinned after UnknownTransactionCommitResult so commit retries on
-      # the same mongos. Unpin only on TransientTransactionError.
-      if error.transient_transaction?
+      # Transient errors unpin. Unknown commit result also unpins before a retry
+      # (transactions spec "When to unpin"). Successful commit stays pinned.
+      if error.transient_transaction? || (command.is_a?(Commands::CommitTransaction) && error.unknown_transaction?)
         session.try &.unpin
       end
     end
@@ -443,6 +479,20 @@ class Mongo::Client
     if end_implicit_session && !keeps_implicit_session?(result)
       session.try &.end if session.try(&.implicit?)
     end
+  end
+
+  # Load-balanced: do not mark the balancer Unknown. Clear only sockets with
+  # this serviceId. Stale sockets (older generation) are ignored.
+  private def handle_load_balanced_error(server_description : SDAM::ServerDescription?, connection : Mongo::Connection, error : Exception) : Nil
+    return unless connection.handshake_complete
+    pool = pool_for(connection)
+    return if pool && pool.stale?(connection)
+    sid = connection.service_id
+    return unless sid
+    desc = server_description
+    return unless desc
+    Mongo::Log.error(exception: error) { "Error with load balancer service #{sid} at #{desc.address}" }
+    clear_connection_pool(desc, sid)
   end
 
   # Mark the server Unknown after a not-master / recovering error, unless the
@@ -466,11 +516,23 @@ class Mongo::Client
     @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
   end
 
+  private def resolve_deadline(deadline : Mongo::Deadline?, session : Session::ClientSession?) : Mongo::Deadline?
+    return deadline if deadline
+    if d = session.try(&.operation_deadline)
+      return d
+    end
+    if ms = session.try(&.options.default_timeout_ms)
+      return Mongo::Deadline.from_timeout_ms(ms)
+    end
+    Mongo::Deadline.from_options(@options)
+  end
+
   # CSOT: remaining timeout minus min RTT. getMore on a non-awaitData cursor
   # must not get maxTimeMS. AwaitData getMore already has maxTimeMS (maxAwaitTimeMS).
   private def apply_csot_max_time(body : BSON, command, deadline : Mongo::Deadline?, server_description : SDAM::ServerDescription) : BSON
     return body unless deadline
     return body if deadline.infinite?
+    return body if command != Commands::GetMore && !deadline.send_max_time?
 
     min_rtt = server_description.min_round_trip_time
     max_time_ms = deadline.max_time_ms(min_rtt)
@@ -492,6 +554,38 @@ class Mongo::Client
     end
 
     body.copy_with({maxTimeMS: max_time_ms})
+  end
+
+  # timeoutMS replaces wTimeoutMS. Drop wtimeout from writeConcern when CSOT is on.
+  private def strip_wtimeout_if_csot(body : BSON, deadline : Mongo::Deadline?) : BSON
+    return body unless deadline
+    return body if deadline.infinite?
+    return body unless body.has_key?("writeConcern")
+    wc = body["writeConcern"]?
+    return body unless wc.is_a?(BSON)
+    return body unless wc.has_key?("wtimeout") || wc.has_key?("wtimeoutMS")
+    other = false
+    wc.each { |k, _|
+      other = true unless k == "wtimeout" || k == "wtimeoutMS"
+    }
+    if other
+      new_wc = BSON.build { |b|
+        wc.each { |k, v|
+          b[k] = v unless k == "wtimeout" || k == "wtimeoutMS"
+        }
+      }
+      return body.copy_with({writeConcern: new_wc})
+    end
+    BSON.build do |builder|
+      body.each { |key, value, code|
+        next if key == "writeConcern"
+        if value.is_a?(BSON) && code.array?
+          builder.append_array(key, value)
+        else
+          builder[key] = value
+        end
+      }
+    end
   end
 
   # timeoutMS turns MaxTimeMSExpired (code 50) into Error::Timeout.
