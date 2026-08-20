@@ -24,9 +24,15 @@ class Mongo::Cursor
   @batch_index : Int32 = 0
   @limit : Int32? = nil
   @comment : BSON::Value? = nil
+  @timeout_ms : Int64? = nil
+  @timeout_mode : Mongo::TimeoutMode = Mongo::TimeoutMode::CursorLifetime
+  @deadline : Mongo::Deadline? = nil
+  # Fresh timeoutMS for one next() when timeoutMode is iteration (change-stream resume uses the same deadline).
+  @iteration_deadline : Mongo::Deadline? = nil
 
   protected property server_description : SDAM::ServerDescription? = nil
   protected property session : Session::ClientSession?
+  @pinned_connection : Mongo::Connection? = nil
 
   # :nodoc:
   def initialize(
@@ -40,6 +46,9 @@ class Mongo::Cursor
     @tailable : Bool = false,
     @session : Session::ClientSession? = nil,
     @comment = nil,
+    @timeout_ms : Int64? = nil,
+    @timeout_mode : Mongo::TimeoutMode = Mongo::TimeoutMode::CursorLifetime,
+    @deadline : Mongo::Deadline? = nil,
   )
     @database, @collection = namespace.split(".", 2)
   end
@@ -54,6 +63,9 @@ class Mongo::Cursor
     @tailable : Bool = false,
     @session : Session::ClientSession? = nil,
     @comment = nil,
+    @timeout_ms : Int64? = nil,
+    @timeout_mode : Mongo::TimeoutMode = Mongo::TimeoutMode::CursorLifetime,
+    @deadline : Mongo::Deadline? = nil,
   )
     @cursor_id = result.cursor.id
     @batch = result.cursor.first_batch
@@ -65,6 +77,9 @@ class Mongo::Cursor
   protected def bind(session : Session::ClientSession?) : self
     @session = session
     @server_description = session.try(&.last_operation_server)
+    if session
+      @pinned_connection = session.take_pending_cursor_connection
+    end
     self
   end
 
@@ -90,57 +105,77 @@ class Mongo::Cursor
   end
 
   def next
-    loop do
-      if (limit = @limit) && @yielded >= limit
-        return Iterator::Stop::INSTANCE
+    owns_iteration = start_iteration_deadline
+    begin
+      loop do
+        if (limit = @limit) && @yielded >= limit
+          return Iterator::Stop::INSTANCE
+        end
+
+        if element = next_from_batch
+          @yielded += 1
+          return element
+        end
+
+        # Tailable / awaitData / change streams stay open on an empty getMore.
+        # Only a closed cursor (id 0) means the iteration is over.
+        return Iterator::Stop::INSTANCE if @cursor_id == 0
+
+        fetch_more
+
+        # Non-tailable: an empty getMore means the result is exhausted.
+        # Tailable / change streams stay open and wait again.
+        if !@tailable && batch_empty?
+          return Iterator::Stop::INSTANCE
+        end
       end
-
-      if element = next_from_batch
-        @yielded += 1
-        return element
-      end
-
-      # Tailable / awaitData / change streams stay open on an empty getMore.
-      # Only a closed cursor (id 0) means the iteration is over.
-      return Iterator::Stop::INSTANCE if @cursor_id == 0
-
-      fetch_more
-
-      # Non-tailable: an empty getMore means the result is exhausted.
-      # Tailable / change streams stay open and wait again.
-      if !@tailable && batch_empty?
-        return Iterator::Stop::INSTANCE
-      end
+    ensure
+      @iteration_deadline = nil if owns_iteration
     end
   end
 
   # One getMore at most. Returns `nil` when the batch is empty and the cursor is
   # still open (normal for tailable and change-stream cursors).
   def try_next : BSON?
-    return nil if (limit = @limit) && @yielded >= limit
+    owns_iteration = start_iteration_deadline
+    begin
+      return nil if (limit = @limit) && @yielded >= limit
 
-    if element = next_from_batch
-      @yielded += 1
-      return element
+      if element = next_from_batch
+        @yielded += 1
+        return element
+      end
+
+      return nil if @cursor_id == 0
+
+      fetch_more
+
+      if element = next_from_batch
+        @yielded += 1
+        return element
+      end
+
+      nil
+    ensure
+      @iteration_deadline = nil if owns_iteration
     end
-
-    return nil if @cursor_id == 0
-
-    fetch_more
-
-    if element = next_from_batch
-      @yielded += 1
-      return element
-    end
-
-    nil
   end
 
   # Close the cursor and frees underlying resources.
-  def close
-    unless exhausted?
-      self.kill
+  # timeout_ms, if set, is the timeout for killCursors only. Otherwise killCursors
+  # starts a fresh timeoutMS from the original find/aggregate.
+  def close(*, timeout_ms : Int64? = nil)
+    conn = @pinned_connection
+    if conn && conn.socket.closed?
+      # Dead pin: return the socket. Load-balanced killCursors must stay on the
+      # same mongos, so do not open a new socket after a network error.
+      @pinned_connection = nil
+      @client.checkin_connection(conn)
+      if @client.options.load_balanced
+        @cursor_id = 0_i64
+      end
     end
+    self.kill(timeout_ms: timeout_ms) unless exhausted?
   rescue e
     # Ignore - client might be dead
   ensure
@@ -174,17 +209,28 @@ class Mongo::Cursor
     @batch_index >= @batch.size
   end
 
-  protected def kill
+  protected def kill(*, timeout_ms : Int64? = nil)
     return if @cursor_id == 0
-    @client.command(
-      Commands::KillCursors,
-      database: @database,
-      collection: @collection,
-      cursor_ids: [@cursor_id],
-      server_description: @server_description,
-      session: @session
-    )
-    @cursor_id = 0_i64
+    begin
+      deadline = unless timeout_ms.nil?
+                   Mongo::Deadline.from_timeout_ms(timeout_ms)
+                 else
+                   kill_deadline
+                 end
+      @client.command(
+        Commands::KillCursors,
+        database: @database,
+        collection: @collection,
+        cursor_ids: [@cursor_id],
+        server_description: @server_description,
+        session: @session,
+        connection: @pinned_connection,
+        deadline: deadline
+      )
+    ensure
+      @cursor_id = 0_i64
+      release_pin
+    end
   end
 
   protected def end_implicit_session
@@ -207,7 +253,9 @@ class Mongo::Cursor
       max_time_ms: @await_time_ms,
       comment: @comment,
       server_description: @server_description,
-      session: @session
+      session: @session,
+      connection: @pinned_connection,
+      deadline: get_more_deadline
     )
 
     raise Mongo::Error.new("GetMore command failed to return a result") unless reply
@@ -215,12 +263,53 @@ class Mongo::Cursor
     @cursor_id = reply.cursor.id
     @batch = reply.cursor.next_batch
     @batch_index = 0
+    release_pin if @cursor_id == 0
 
     if (session = @session) && exhausted? && session.implicit?
       session.end
     end
 
     reply
+  end
+
+  # timeoutMode iteration: each next/try_next gets a fresh timeoutMS.
+  # Change streams set @iteration_deadline first so this returns false.
+  private def start_iteration_deadline : Bool
+    return false unless @timeout_mode.iteration?
+    return false unless @timeout_ms
+    return false if @iteration_deadline
+    @iteration_deadline = Mongo::Deadline.from_timeout_ms(@timeout_ms)
+    true
+  end
+
+  private def get_more_deadline : Mongo::Deadline?
+    if @timeout_mode.iteration? && @timeout_ms
+      d = @iteration_deadline || Mongo::Deadline.from_timeout_ms(@timeout_ms)
+      @iteration_deadline = d
+      if @tailable && @await_time_ms
+        d
+      else
+        d.try(&.without_max_time)
+      end
+    else
+      @deadline
+    end
+  end
+
+  # close() always starts a fresh timeoutMS, even if cursor lifetime already expired.
+  private def kill_deadline : Mongo::Deadline?
+    if @timeout_ms
+      Mongo::Deadline.from_timeout_ms(@timeout_ms)
+    else
+      @deadline
+    end
+  end
+
+  private def release_pin : Nil
+    conn = @pinned_connection
+    return unless conn
+    @pinned_connection = nil
+    @client.checkin_connection(conn)
   end
 
   # Prefer the original batchSize. 0 means "default" (omit on getMore).
@@ -258,10 +347,13 @@ class Mongo::Cursor
     {% end %}
   end
 
-  # Last-resort cleanup. finalize can run on a GC thread and must not be
-  # the only way to send killCursors. Call `#close`, `#each`, or a block `find`.
+  # Last-resort cleanup. finalize can run on a GC thread and must not send
+  # killCursors or touch the connection pool. Call `#close`, `#each`, or a
+  # block `find`. A pinned load-balanced socket is discarded with the cursor;
+  # the pool reclaims it when the client closes.
   def finalize
-    close
+    @cursor_id = 0_i64
+    @pinned_connection = nil
   end
 end
 

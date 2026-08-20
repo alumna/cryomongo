@@ -14,6 +14,7 @@ test*.sh
 /data
 /tmp/
 /specifications*
+drivers-evergreen-tools/
 /local
 
 # Temporary

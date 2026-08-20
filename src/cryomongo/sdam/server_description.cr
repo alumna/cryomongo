@@ -20,6 +20,8 @@ class Mongo::SDAM::ServerDescription
   property error : String? = nil
   # The duration of the hello call.
   property round_trip_time : Time::Span = 0.seconds
+  # Last hello samples (at most 10). CSOT uses the min after two samples.
+  getter rtt_window : Array(Time::Span) = [] of Time::Span
   # A 64-bit BSON datetime or null. The "lastWriteDate" from the server's most recent ismaster response.
   property last_write_date : Time? = nil
   # An opaque value representing the position in the oplog of the most recently seen write.
@@ -126,7 +128,7 @@ class Mongo::SDAM::ServerDescription
     @primary, @logical_session_timeout_minutes, @topology_version
 
   def data_bearing?
-    @type.mongos? || @type.rs_primary? || @type.rs_secondary? || @type.standalone?
+    @type.mongos? || @type.rs_primary? || @type.rs_secondary? || @type.standalone? || @type.load_balancer?
   end
 
   def primary_or_possible?
@@ -138,12 +140,33 @@ class Mongo::SDAM::ServerDescription
   end
 
   def supports_retryable_writes?
+    # Load-balanced ServerDescription fields stay unset (no monitors).
+    return true if @type.load_balancer?
     @max_wire_version >= 6 &&
       @logical_session_timeout_minutes &&
       !@type.standalone?
   end
 
   def supports_retryable_reads?
+    return true if @type.load_balancer?
     @max_wire_version >= 6
+  end
+
+  # Copy the hello RTT window from an older description of the same server.
+  def copy_rtt_window(other : ServerDescription) : Nil
+    @rtt_window = other.rtt_window.dup
+  end
+
+  def record_rtt_sample(sample : Time::Span) : Nil
+    @rtt_window << sample
+    @rtt_window.shift if @rtt_window.size > 10
+  end
+
+  # Spec: 0 until at least two hello samples exist, then min of the last 10.
+  def min_round_trip_time : Time::Span
+    return Time::Span.zero if @rtt_window.size < 2
+    min = @rtt_window[0]
+    @rtt_window.each { |s| min = s if s < min }
+    min
   end
 end

@@ -64,6 +64,7 @@ module Mongo::Commands::Hello
     property isreplicaset : Bool?
     property topology_version : BSON?
     property helloOk : Bool?
+    property serviceId : BSON::ObjectId?
   }
 
   # Transforms the server result.

@@ -12,7 +12,7 @@ This phase focuses on ensuring the driver is safe, doesn't leak resources, and p
 
 ### Testing Infrastructure
 - [x] **Strict UTF Dispatcher:** Unknown operations raise `SKIP_TEST` (no silent pass).
-- [x] **Topology CI Matrix:** GitHub Actions runs standalone, replica set, and sharded. Push a PR to run that matrix.
+- [x] **Topology CI Matrix:** GitHub Actions runs standalone, replica set, sharded, and load-balanced. Push a PR to run that matrix.
 - [x] **Dynamic Test Skipping:** `runOnRequirements` uses live topology or `TOPOLOGY`. A few files stay skipped because the feature is not implemented (`interruptInUseConnections`, most unified SDAM).
 
 ### Core Specifications (JSON & Legacy)
@@ -38,19 +38,35 @@ This phase focuses on ensuring the driver is safe, doesn't leak resources, and p
 
 This phase addresses the complexities of running in modern cloud environments, handling dynamic scaling, and verifying advanced MongoDB features.
 
-### Cloud Architecture Specs
-- [ ] **SRV Polling:** Spawn a background fiber for `mongodb+srv://` connections to poll DNS records periodically and dynamically add/remove `mongos` routers from the topology.
-- [ ] **Load Balancers:** Implement the Load Balancer spec (disable `minPoolSize` background creation, and pin consecutive transaction/cursor operations to the exact same TCP socket).
-- [ ] **Client-Side Operations Timeout (CSOT):** Implement the modern `timeoutMS` specification to unify connection, handshake, and execution timeouts into a single deadline.
+Phase 2 is done. GitHub runs `crystal spec` on standalone, replica set, sharded, and load-balanced. Named holes below stay open. Details are in `FIXES.md`.
 
-### Advanced Application Features (Needs Test Hookup)
-- [ ] **Change Streams:** Run the official JSON/YAML spec tests to verify resume token and failover logic.
-- [ ] **GridFS:** Wire up and pass official GridFS spec tests.
-- [ ] **Index Management:** Wire up and pass official Index Management spec tests.
-- [ ] **Enumerate Collections & Databases:** Wire up and pass official spec tests.
+### Cloud Architecture Specs
+- [x] **SRV Polling:** Background fiber for `mongodb+srv://` (Sharded or Unknown). Adds and removes mongos hosts. `srvMaxHosts` / `srvServiceName`. No polling when `loadBalanced=true`.
+- [x] **Load Balancers (core):** No `minPoolSize` pre-create. Hello must return `serviceId`. Pin the TCP socket for a transaction and for an open cursor. Official UTF is copied. HAProxy: mongos `--setParameter loadBalancerPort` plus `spec/support/run-load-balancer.sh`. GitHub load-balanced runs `crystal spec`.
+- [x] **CSOT (core):** URI `timeoutMS` is a deadline for selection, checkout, socket wait, and `maxTimeMS` (remaining minus min RTT). Code 50 becomes `Error::Timeout`. Collection / database / operation `timeoutMS` and `timeoutMode`. GridFS, tailable, change-stream, session, and `with_transaction` timeouts. `runCursorCommand` helper. Official CSOT UTF is 28 files.
+
+### Advanced Application Features
+- [x] **Change Streams:** Iterate helpers exist. `watch` sends `comment`, `showExpandedEvents`, and `fullDocumentBeforeChange`. A labeled getMore error resumes with a new aggregate. `change-streams.json` passes on a replica set (22 tests). The other unified files run on replica set and sharded.
+- [x] **GridFS:** Official UTF `upload` / `download` / `downloadByName` / `delete` / `rename` pass on sharded 8.0.
+- [x] **Index Management:** Official `index-rawdata.json` runs (`rawData` ignored on 8.0).
+- [x] **Enumerate Collections & Databases:** Official collection-management UTF runs (create / collMod / listCollections / timeseries / clustered index).
 
 ### Advanced Authentication Specs
-- [x] Basic Auth (SCRAM-SHA-1/256, X509, PLAIN)
+- [x] Basic Auth (SCRAM-SHA-1/256 with SASLprep on SHA-256 passwords, X509, PLAIN)
+
+### Leftovers to close Phase 2
+
+- [x] **Official load-balancer UTF leftovers:** `assertNumberConnectionsCheckedOut`. Wait-queue error lists cursor / txn / other in-use counts. `serviceId` on `poolClearedEvent` and on command events. Pin CMAP checkedOut / checkedIn (`cursors.json` and `transactions.json`). Pool clear per `serviceId`. `non-lb-connection-establishment.json` stays pending on load-balanced. `lb-connection-establishment.json` stays skipped (MongoDB 8.0 still accepts `loadBalanced=false` on the LB port). One `sdam-error-handling` test stays skipped (HAProxy often sends both sockets to one mongos).
+- [x] **CSOT API and more UTF:** `timeoutMS` on collection / database / operation, `timeoutMode` on find, aggregate, listCollections, and listIndexes. Session `defaultTimeoutMS` and `with_transaction` deadline. GridFS stream lifetime, tailable `timeoutMode` / `maxAwaitTimeMS`, change-stream iteration, override / session JSON. `Database#run_command` and `#run_cursor_command`. Official CSOT UTF is 28 files. Official run-command UTF is copied.
+- [x] **Widen the GitHub load-balanced job.** LoadBalancer always allows retryable reads and writes (no monitor hello). `failCommand` / `closeConnection` UTF retries. GitHub `crystal spec` (766 examples, 0 failures): standalone **23.86s / 219 pending**, replica set **3:36 / 104 pending**, sharded **7:05 / 112 pending**, load-balanced **2:58 / 137 pending**.
+
+### Stay open after Phase 2 (not in the close-Phase-2 pass)
+
+- Change-stream `nsType` needs MongoDB 8.1.
+- Search-index UTF needs Atlas. Keep `SKIP_TEST`.
+- Live SCRAM / X509 / PLAIN prose needs users on the server.
+- Unified `pool-cleared-error.json` is a Phase 1 CMAP leftover (rediscovery race) -- try to fix this when you have the opportunity to do so.
+- Compression, AWS, OIDC, and CSFLE are Phase 3–5.
 
 ---
 

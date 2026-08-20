@@ -16,6 +16,7 @@ module Mongo::Unified
     property collectionName : String
     property databaseName : String
     property documents : Array(JSON::Any)
+    property createOptions : JSON::Any?
   end
 
   struct ThreadRequest
@@ -33,6 +34,8 @@ module Mongo::Unified
     property serverApi : JSON::Any?
     # UTF: two mongos hosts when true, exactly one when false, on a sharded cluster.
     property useMultipleMongoses : Bool?
+    # CSOT: wait until minPoolSize sockets exist, up to this many milliseconds.
+    property awaitMinPoolSizeMS : Int32?
 
     property client : String?
     property databaseName : String?
@@ -68,6 +71,7 @@ module Mongo::Unified
     property errorCodeName : String?
     property errorLabelsContain : Array(String)?
     property errorLabelsOmit : Array(String)?
+    property isTimeoutError : Bool?
   end
 
   struct Test

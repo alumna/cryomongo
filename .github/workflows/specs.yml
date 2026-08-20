@@ -18,6 +18,8 @@ jobs:
             uri: mongodb://localhost:27017/?replicaSet=rs0
           - topology: sharded
             uri: mongodb://localhost:27017,localhost:27016
+          - topology: load-balanced
+            uri: mongodb://127.0.0.1:8000/?loadBalanced=true
     runs-on: ubuntu-24.04
     name: MongoDB 8.0 ${{ matrix.topology }}
     steps:
@@ -85,7 +87,7 @@ jobs:
               docker exec mongo mongosh --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]})'
               wait_primary mongo 27017
               ;;
-            sharded)
+            sharded|load-balanced)
               docker network create mongo-test
               docker run -d --name cfg --network mongo-test --network-alias cfg --tmpfs /data/db mongo:8.0 \
                 mongod --configsvr --replSet cfg --port 27019 --bind_ip_all $MONGOD_PARAMS
@@ -97,16 +99,37 @@ jobs:
               docker exec shard mongosh --port 27018 --eval 'rs.initiate({_id:"shard0",members:[{_id:0,host:"shard:27018"}]})'
               wait_primary cfg 27019
               wait_primary shard 27018
-              docker run -d --name mongos --network mongo-test -p 27017:27017 mongo:8.0 \
-                mongos --configdb cfg/cfg:27019 --bind_ip_all $MONGOS_PARAMS
+              # load-balanced UTF talks to HAProxy PROXY v2 on 8000/8001. mongos 8.0
+              # takes --setParameter loadBalancerPort (not --loadBalancerPort).
+              mongos_lb=""
+              mongos2_lb=""
+              mongos_ports="-p 27017:27017"
+              mongos2_ports="-p 27016:27017"
+              if [ "$TOPOLOGY" = "load-balanced" ]; then
+                mongos_lb="--setParameter loadBalancerPort=27050"
+                mongos2_lb="--setParameter loadBalancerPort=27051"
+                mongos_ports="-p 27017:27017 -p 27050:27050"
+                mongos2_ports="-p 27016:27017 -p 27051:27051"
+              fi
+              docker run -d --name mongos --network mongo-test $mongos_ports mongo:8.0 \
+                mongos --configdb cfg/cfg:27019 --bind_ip_all $MONGOS_PARAMS $mongos_lb
               wait_running mongos
               docker exec mongos mongosh --eval 'sh.addShard("shard0/shard:27018")'
               # Pin / recovery-token UTF needs two mongos (useMultipleMongoses: true).
-              docker run -d --name mongos2 --network mongo-test -p 27016:27017 mongo:8.0 \
-                mongos --configdb cfg/cfg:27019 --bind_ip_all $MONGOS_PARAMS
+              docker run -d --name mongos2 --network mongo-test $mongos2_ports mongo:8.0 \
+                mongos --configdb cfg/cfg:27019 --bind_ip_all $MONGOS_PARAMS $mongos2_lb
               wait_running mongos2
               ;;
           esac
+
+      - name: Install HAProxy (load-balanced)
+        if: matrix.topology == 'load-balanced'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y haproxy
+          spec/support/run-load-balancer.sh start
+          cat tmp/lb-uri.env
 
       - name: Install Crystal
         uses: crystal-lang/install-crystal@v1
@@ -120,4 +143,17 @@ jobs:
         env:
           TOPOLOGY: ${{ matrix.topology }}
           MONGODB_URI: ${{ matrix.uri }}
-        run: crystal spec
+          SINGLE_MONGOS_LB_URI: mongodb://127.0.0.1:8000/?loadBalanced=true
+          MULTI_MONGOS_LB_URI: mongodb://127.0.0.1:8001/?loadBalanced=true
+          UTF_TIMING_LOG: tmp/utf-timing.log
+        run: |
+          mkdir -p tmp
+          crystal spec
+
+      - name: Upload UTF timing log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: utf-timing-${{ matrix.topology }}
+          path: tmp/utf-timing.log
+          if-no-files-found: ignore

@@ -10,6 +10,8 @@ class Mongo::Collection
     max_time_ms : Int64? = nil,
     write_concern : WriteConcern? = nil,
     session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
+    deadline : Mongo::Deadline? = nil,
   ) : Commands::CreateIndexes::Result?
     self.create_indexes(
       models: [{
@@ -19,7 +21,9 @@ class Mongo::Collection
       commit_quorum: commit_quorum,
       max_time_ms: max_time_ms,
       write_concern: write_concern,
-      session: session
+      session: session,
+      timeout_ms: timeout_ms,
+      deadline: deadline
     )
   end
 
@@ -33,6 +37,8 @@ class Mongo::Collection
     max_time_ms : Int64? = nil,
     write_concern : WriteConcern? = nil,
     session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
+    deadline : Mongo::Deadline? = nil,
   ) : Commands::CreateIndexes::Result?
     indexes = models.map { |item|
       if item.is_a? BSON
@@ -56,7 +62,7 @@ class Mongo::Collection
         BSON.new({key: index_model.keys}).append(index_model.options.to_bson)
       end
     }
-    self.command(Commands::CreateIndexes, indexes: indexes, session: session, options: {
+    self.command(Commands::CreateIndexes, indexes: indexes, session: session, timeout_ms: timeout_ms, deadline: deadline, options: {
       commit_quorum: commit_quorum,
       max_time_ms:   max_time_ms,
       write_concern: write_concern,
@@ -66,9 +72,9 @@ class Mongo::Collection
   # Drops a single index from the collection by the index name.
   #
   # See: `drop_indexes`
-  def drop_index(name : String, *, max_time_ms : Int64? = nil, write_concern : WriteConcern? = nil, session : Session::ClientSession? = nil) : Commands::Common::BaseResult?
+  def drop_index(name : String, *, max_time_ms : Int64? = nil, write_concern : WriteConcern? = nil, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil) : Commands::Common::BaseResult?
     raise Mongo::Error.new "'*' cannot be used with drop_index as more than one index would be dropped." if name == "*"
-    self.command(Commands::DropIndexes, index: name, session: session, options: {
+    self.command(Commands::DropIndexes, index: name, session: session, timeout_ms: timeout_ms, options: {
       max_time_ms:   max_time_ms,
       write_concern: write_concern,
     })
@@ -77,8 +83,8 @@ class Mongo::Collection
   # Drops all indexes in the collection.
   #
   # NOTE: [for more details, please check the official documentation](https://docs.mongodb.com/manual/reference/command/dropIndexes/).
-  def drop_indexes(*, max_time_ms : Int64? = nil, write_concern : WriteConcern? = nil, session : Session::ClientSession? = nil) : Commands::Common::BaseResult?
-    self.command(Commands::DropIndexes, index: "*", session: session, options: {
+  def drop_indexes(*, max_time_ms : Int64? = nil, write_concern : WriteConcern? = nil, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil) : Commands::Common::BaseResult?
+    self.command(Commands::DropIndexes, index: "*", session: session, timeout_ms: timeout_ms, options: {
       max_time_ms:   max_time_ms,
       write_concern: write_concern,
     })
@@ -87,9 +93,12 @@ class Mongo::Collection
   # Gets index information for all indexes in the collection.
   #
   # NOTE: [for more details, please check the official documentation](https://docs.mongodb.com/manual/reference/command/listIndexes/).
-  def list_indexes(session : Session::ClientSession? = nil) : Mongo::Cursor?
-    result = self.command(Commands::ListIndexes, session: session, options: NamedTuple.new) { |result, cmd_session|
-      bind_cursor(Cursor.new(@database.client, result, session: cmd_session), cmd_session)
+  def list_indexes(*, batch_size : Int32? = nil, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil, deadline : Mongo::Deadline? = nil, timeout_mode : Mongo::TimeoutMode? = nil) : Mongo::Cursor?
+    cursor_opt = batch_size.try { BSON.new({"batchSize" => batch_size}) }
+    mode, computed = cursor_timeout(timeout_ms, timeout_mode, false)
+    computed = deadline if deadline
+    result = self.command(Commands::ListIndexes, session: session, timeout_ms: timeout_ms, deadline: computed, options: {cursor: cursor_opt}) { |result, cmd_session|
+      bind_cursor(Cursor.new(@database.client, result, batch_size: batch_size, session: cmd_session, timeout_ms: timeout_ms_for_cursor(timeout_ms), timeout_mode: mode, deadline: computed), cmd_session)
     }
     raise Mongo::Error.new("Command failed to return a result") unless result
     result

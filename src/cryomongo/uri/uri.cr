@@ -70,16 +70,19 @@ module Mongo::URI
       host = parsed_uri.host
       raise Mongo::Error.new("Missing host in connection URI") unless host
 
-      srv = Mongo::SRV.new(host)
-      srv_records, txt_record = srv.resolve
-      seeds = srv_records.map { |srv_record|
-        "#{srv_record.target}:#{srv_record.port}"
-      }
+      service_name = uri_param(query_params, "srvservicename") || "mongodb"
+      srv_max = uri_param(query_params, "srvmaxhosts").try(&.to_i32?) || 0
+
+      srv = Mongo::SRV.new(host, service_name)
+      srv_hosts, txt_record = srv.resolve
+      srv_hosts = Mongo::SRV.limit_hosts(srv_hosts, srv_max)
+      seeds = srv_hosts.map(&.address)
+      options.srv_hostname = host
 
       query_params["ssl"] = "true" unless query_params.has_key?("ssl")
       txt_record.try { |txt|
         txt_options = ::URI::Params.parse(txt.text_data.join(" "))
-        {"authSource", "replicaSet"}.each do |key|
+        {"authSource", "replicaSet", "loadBalanced"}.each do |key|
           if txt_options.has_key?(key) && !query_params.has_key?(key)
             query_params[key] = txt_options[key]
           end
@@ -155,13 +158,44 @@ module Mongo::URI
     )
 
     validate_credentials(credentials, mech_props)
-
-    raise Mongo::Error.new("directConnection=true cannot be provided with multiple seeds") if options.direct_connection && seeds.size > 1
+    validate_uri_options(scheme, seeds, options)
 
     {seeds, options, credentials, default_auth_db}
   rescue e : ::URI::Error | ArgumentError | IndexError | Socket::Error
     # Catching expected parsing/network exceptions and wrapping them
     raise Mongo::Error.new("Invalid uri: #{uri}, #{e.message}", cause: e)
+  end
+
+  private def uri_param(params : ::URI::Params, downcased_name : String) : String?
+    params.each do |key, value|
+      return value if key.downcase == downcased_name && !value.empty?
+    end
+    nil
+  end
+
+  private def validate_uri_options(scheme : String, seeds : Array(Seed), options : Mongo::Options)
+    srv = scheme == "mongodb+srv"
+    unless srv
+      if options.srv_max_hosts != 0
+        raise Mongo::Error.new("srvMaxHosts cannot be used with a mongodb:// URI")
+      end
+      if options.srv_service_name != "mongodb"
+        raise Mongo::Error.new("srvServiceName cannot be used with a mongodb:// URI")
+      end
+    end
+
+    raise Mongo::Error.new("directConnection=true cannot be provided with multiple seeds") if options.direct_connection && seeds.size > 1
+
+    if options.load_balanced
+      raise Mongo::Error.new("loadBalanced=true cannot be used with multiple hosts") if seeds.size > 1
+      raise Mongo::Error.new("loadBalanced=true cannot be used with replicaSet") if options.replica_set
+      raise Mongo::Error.new("loadBalanced=true cannot be used with directConnection=true") if options.direct_connection
+      raise Mongo::Error.new("loadBalanced=true cannot be used with srvMaxHosts") if options.srv_max_hosts > 0
+    end
+
+    if options.srv_max_hosts > 0 && options.replica_set
+      raise Mongo::Error.new("srvMaxHosts cannot be used with replicaSet")
+    end
   end
 
   private def parse_mechanism_properties(props_str : String?) : Hash(String, String)

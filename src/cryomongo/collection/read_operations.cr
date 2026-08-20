@@ -16,6 +16,9 @@ class Mongo::Collection
     write_concern : WriteConcern? = nil,
     read_preference : ReadPreference? = nil,
     session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
+    timeout_mode : Mongo::TimeoutMode? = nil,
+    max_await_time_ms : Int64? = nil,
   ) : Mongo::Cursor? forall H
     hint_value = if hint.nil?
                    nil
@@ -24,7 +27,16 @@ class Mongo::Collection
                  else
                    BSON.new(hint)
                  end
-    self.command(Commands::Aggregate, pipeline: pipeline, session: session, options: {
+    if timeout_mode.try(&.iteration?) && pipeline.any? { |stage|
+         h = stage.is_a?(BSON) ? stage : BSON.new(stage)
+         h.has_key?("$out") || h.has_key?("$merge")
+       }
+      raise Mongo::Error.new("timeoutMode iteration cannot be used with $out or $merge")
+    end
+    check_max_await_vs_timeout(max_await_time_ms, timeout_ms)
+    mode, deadline = cursor_timeout(timeout_ms, timeout_mode, false)
+    agg_deadline = mode.iteration? ? deadline.try(&.without_max_time) : deadline
+    self.command(Commands::Aggregate, pipeline: pipeline, session: session, deadline: agg_deadline, options: {
       allow_disk_use:             allow_disk_use,
       cursor:                     batch_size.try { {batchSize: batch_size} },
       bypass_document_validation: bypass_document_validation,
@@ -36,7 +48,7 @@ class Mongo::Collection
       write_concern:              write_concern,
       read_preference:            read_preference,
     }) { |result, cmd_session|
-      bind_cursor(Cursor.new(@database.client, result, batch_size: batch_size, session: cmd_session, comment: comment), cmd_session)
+      bind_cursor(Cursor.new(@database.client, result, batch_size: batch_size, session: cmd_session, comment: comment, timeout_ms: timeout_ms_for_cursor(timeout_ms), timeout_mode: mode, deadline: deadline), cmd_session)
     }
   end
 
@@ -56,6 +68,7 @@ class Mongo::Collection
     read_preference : ReadPreference? = nil,
     comment = nil,
     session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
   ) : Int64 forall H
     pipeline = !filter || filter.empty? ? [BSON.new({"$match": BSON.new})] : [BSON.new({"$match": BSON.new(filter)})]
     skip.try { pipeline << BSON.new({"$skip": skip}) }
@@ -68,7 +81,7 @@ class Mongo::Collection
                  else
                    BSON.new(hint)
                  end
-    cursor = self.command(Commands::Aggregate, pipeline: pipeline, session: session, options: {
+    cursor = self.command(Commands::Aggregate, pipeline: pipeline, session: session, timeout_ms: timeout_ms, options: {
       collation:       collation,
       hint:            hint_value,
       max_time_ms:     max_time_ms,
@@ -91,8 +104,8 @@ class Mongo::Collection
   # Gets an estimate of the count of documents in a collection using collection metadata.
   #
   # See: [the specification document](https://github.com/mongodb/specifications/blob/master/source/crud/crud.rst#count-api-details).
-  def estimated_document_count(*, max_time_ms : Int64? = nil, read_preference : ReadPreference? = nil, comment = nil, session : Session::ClientSession? = nil) : Int64
-    result = self.command(Commands::Count, session: session, options: {
+  def estimated_document_count(*, max_time_ms : Int64? = nil, read_preference : ReadPreference? = nil, comment = nil, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil) : Int64
+    result = self.command(Commands::Count, session: session, timeout_ms: timeout_ms, options: {
       max_time_ms:     max_time_ms,
       read_preference: read_preference,
       comment:         comment,
@@ -130,6 +143,7 @@ class Mongo::Collection
     hint : (String | H)? = nil,
     comment = nil,
     session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
   ) : Array forall H
     hint_value = if hint.nil?
                    nil
@@ -138,7 +152,7 @@ class Mongo::Collection
                  else
                    BSON.new(hint)
                  end
-    result = self.command(Commands::Distinct, key: key, session: session, options: {
+    result = self.command(Commands::Distinct, key: key, session: session, timeout_ms: timeout_ms, options: {
       query:           filter,
       read_concern:    read_concern,
       collation:       collation,
@@ -180,6 +194,9 @@ class Mongo::Collection
     collation : Collation? = nil,
     read_preference : ReadPreference? = nil,
     session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
+    timeout_mode : Mongo::TimeoutMode? = nil,
+    deadline : Mongo::Deadline? = nil,
   ) : Mongo::Cursor forall H
     sent_batch_size = batch_size
     if (bs = batch_size) && (lim = limit) && bs == lim && bs >= 0
@@ -187,7 +204,24 @@ class Mongo::Collection
       sent_batch_size = bs + 1
     end
 
-    result = self.command(Commands::Find, filter: filter, session: session, options: {
+    tailable_flag = tailable || false
+    await_flag = await_data || false
+    if await_flag
+      check_max_await_vs_timeout(max_time_ms, timeout_ms)
+    end
+    mode, computed = cursor_timeout(timeout_ms, timeout_mode, tailable_flag)
+    computed = deadline if deadline
+    # Tailable awaitData sends maxTimeMS on find. Other iteration cursors must not.
+    find_deadline = if tailable_flag && await_flag
+                      computed
+                    elsif mode.iteration?
+                      computed.try(&.without_max_time)
+                    else
+                      computed
+                    end
+    deadline = computed
+
+    result = self.command(Commands::Find, filter: filter, session: session, deadline: find_deadline, options: {
       sort:                  sort.try { BSON.new(sort) },
       projection:            projection.try { BSON.new(projection) },
       hint:                  hint.nil? ? nil : (hint.is_a?(String) ? hint : BSON.new(hint)),
@@ -202,10 +236,10 @@ class Mongo::Collection
       min:                   min.try { BSON.new(min) },
       return_key:            return_key,
       show_record_id:        show_record_id,
-      tailable:              tailable,
+      tailable:              tailable_flag ? true : nil,
       oplog_replay:          oplog_replay,
       no_cursor_timeout:     no_cursor_timeout,
-      await_data:            await_data,
+      await_data:            await_flag ? true : nil,
       allow_partial_results: allow_partial_results,
       allow_disk_use:        allow_disk_use,
       collation:             collation,
@@ -214,12 +248,15 @@ class Mongo::Collection
       bind_cursor(Cursor.new(
         @database.client,
         result,
-        await_time_ms: tailable && await_data ? max_time_ms : nil,
-        tailable: tailable || false,
+        await_time_ms: tailable_flag && await_flag ? max_time_ms : nil,
+        tailable: tailable_flag,
         batch_size: batch_size,
         limit: limit,
         session: cmd_session,
-        comment: comment
+        comment: comment,
+        timeout_ms: timeout_ms_for_cursor(timeout_ms),
+        timeout_mode: mode,
+        deadline: deadline,
       ), cmd_session)
     }
     raise Mongo::Error.new("Command failed to return a result") unless result
@@ -253,6 +290,9 @@ class Mongo::Collection
     collation : Collation? = nil,
     read_preference : ReadPreference? = nil,
     session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
+    timeout_mode : Mongo::TimeoutMode? = nil,
+    deadline : Mongo::Deadline? = nil,
     &
   ) forall H
     find(
@@ -280,6 +320,9 @@ class Mongo::Collection
       collation: collation,
       read_preference: read_preference,
       session: session,
+      timeout_ms: timeout_ms,
+      timeout_mode: timeout_mode,
+      deadline: deadline,
     ).each { |doc| yield doc }
   end
 
@@ -306,6 +349,8 @@ class Mongo::Collection
     collation : Collation? = nil,
     read_preference : ReadPreference? = nil,
     session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
+    deadline : Mongo::Deadline? = nil,
   ) : BSON? forall H
     cursor = self.find(
       filter: filter,
@@ -327,11 +372,35 @@ class Mongo::Collection
       allow_partial_results: allow_partial_results,
       collation: collation,
       read_preference: read_preference,
-      session: session
+      session: session,
+      timeout_ms: timeout_ms,
+      deadline: deadline
     )
     element = cursor.try &.next
     cursor.try &.close
     return element if element.is_a? BSON
     nil
+  end
+
+  # timeoutMode requires timeoutMS at this collection, its database, the client, or the operation.
+  protected def cursor_timeout(timeout_ms : Int64?, timeout_mode : Mongo::TimeoutMode?, tailable : Bool) : {Mongo::TimeoutMode, Mongo::Deadline?}
+    has_timeout = !timeout_ms.nil? || !@timeout_ms.nil? || !@database.timeout_ms.nil? || @database.client.options.timeout
+    if timeout_mode && !has_timeout
+      raise Mongo::Error.new("timeoutMode requires timeoutMS")
+    end
+    mode = timeout_mode || (tailable ? Mongo::TimeoutMode::Iteration : Mongo::TimeoutMode::CursorLifetime)
+    if tailable && mode.cursor_lifetime?
+      raise Mongo::Error.new("tailable cursors do not support timeoutMode cursorLifetime")
+    end
+    deadline = unless timeout_ms.nil?
+                 Mongo::Deadline.from_timeout_ms(timeout_ms)
+               else
+                 inherited_deadline
+               end
+    {mode, deadline}
+  end
+
+  protected def timeout_ms_for_cursor(timeout_ms : Int64?) : Int64?
+    resolved_timeout_ms(timeout_ms)
   end
 end

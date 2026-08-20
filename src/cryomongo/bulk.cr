@@ -79,7 +79,7 @@ class Mongo::Bulk
   end
 
   # Execute the bulk operations stored in this `Bulk` instance.
-  def execute(write_concern : WriteConcern? = nil, bypass_document_validation : Bool? = nil, comment = nil)
+  def execute(write_concern : WriteConcern? = nil, bypass_document_validation : Bool? = nil, comment = nil, timeout_ms : Int64? = nil)
     _, not_executed = @executed.compare_and_set(0_u8, 1_u8)
     raise Mongo::Bulk::Error.new "Cannot execute a bulk operation more than once" unless not_executed
 
@@ -89,6 +89,7 @@ class Mongo::Bulk
       comment:                    comment,
     }
 
+    bulk_deadline = Mongo::Deadline.from_timeout_ms(timeout_ms)
     indexed_models = @models.map_with_index { |model, index| {index, model} }
     unless @ordered
       # Reorder by wire-command family for fewer round-trips, but keep original indices.
@@ -105,7 +106,7 @@ class Mongo::Bulk
     indexed_models.each { |original_index, model|
       family = command_family(model)
       if family != group_family
-        process_group(group_family, group, group_indices, results, options, operation_id)
+        process_group(group_family, group, group_indices, results, options, operation_id, bulk_deadline)
         return results if early_return?(results)
         group_family = family
         group_bytesize = 0
@@ -114,7 +115,7 @@ class Mongo::Bulk
       bson = format_bson(model)
 
       if group_bytesize + bson.size >= @max_bson_object_size || group.size >= @max_write_batch_size
-        process_group(group_family, group, group_indices, results, options, operation_id)
+        process_group(group_family, group, group_indices, results, options, operation_id, bulk_deadline)
         return results if early_return?(results)
         group_bytesize = 0
       end
@@ -125,7 +126,7 @@ class Mongo::Bulk
       operation_id += 1_i64
     }
 
-    process_group(group_family, group, group_indices, results, options, operation_id)
+    process_group(group_family, group, group_indices, results, options, operation_id, bulk_deadline)
 
     results
   ensure
@@ -218,7 +219,7 @@ class Mongo::Bulk
     end.as(BSON)
   end
 
-  private def process_group(family, group : Array(BSON), group_indices : Array(Int32), results, options, operation_id)
+  private def process_group(family, group : Array(BSON), group_indices : Array(Int32), results, options, operation_id, deadline : Mongo::Deadline?)
     return if group.size < 1
 
     options = options.merge({
@@ -228,11 +229,11 @@ class Mongo::Bulk
     result = nil
     case family
     when :insert
-      result = @collection.command(Commands::Insert, documents: group, options: options, session: @session, operation_id: operation_id)
+      result = @collection.command(Commands::Insert, documents: group, options: options, session: @session, operation_id: operation_id, deadline: deadline)
     when :delete
-      result = @collection.command(Commands::Delete, deletes: group, options: options, session: @session, operation_id: operation_id)
+      result = @collection.command(Commands::Delete, deletes: group, options: options, session: @session, operation_id: operation_id, deadline: deadline)
     when :update
-      result = @collection.command(Commands::Update, updates: group, options: options, session: @session, operation_id: operation_id)
+      result = @collection.command(Commands::Update, updates: group, options: options, session: @session, operation_id: operation_id, deadline: deadline)
     else
       raise Mongo::Bulk::Error.new "Invalid Operation"
     end

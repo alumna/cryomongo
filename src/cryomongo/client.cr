@@ -47,6 +47,7 @@ class Mongo::Client
   @pools : Hash(String, Mongo::Connection::Pool(Mongo::Connection)) = Hash(String, Mongo::Connection::Pool(Mongo::Connection)).new
 
   @monitors : Array(SDAM::Monitor) = Array(SDAM::Monitor).new
+  @srv_poller : SDAM::SrvPoller? = nil
   @socket_check_interval : Time::Span = 5.seconds
   @last_scan : Time = Time::UNIX_EPOCH
   # Capacity 1 so a topology change that happens just before server selection
@@ -127,7 +128,10 @@ class Mongo::Client
 
     new_topology.servers.each do |server|
       emit_sdam_event(Monitoring::SDAM::ServerOpeningEvent.new(self.object_id, server.address))
-      add_monitor(server, start_monitoring: @monitoring_enabled)
+      # Load-balanced mode has no monitoring sockets.
+      unless @options.load_balanced
+        add_monitor(server, start_monitoring: @monitoring_enabled)
+      end
     end
 
     # The spec mandates LoadBalanced topology starts with Unknown servers, emits the
@@ -145,10 +149,14 @@ class Mongo::Client
         self.object_id, previous_topology, new_topology.clone
       ))
     end
+
+    start_srv_poller
   end
 
   # Frees all the resources associated with a client.
   def close
+    @srv_poller.try(&.close)
+
     # End sessions while pools are still open. EndSessions needs a socket.
     begin
       @session_pool.close(self)
@@ -249,8 +257,9 @@ class Mongo::Client
     name_only : Bool? = nil,
     authorized_databases : Bool? = nil,
     session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
   ) : Commands::ListDatabases::Result
-    result = self.command(Commands::ListDatabases, session: session, options: {
+    result = self.command(Commands::ListDatabases, session: session, deadline: Mongo::Deadline.from_timeout_ms(timeout_ms), options: {
       filter:               filter,
       name_only:            name_only,
       authorized_databases: authorized_databases,
@@ -288,6 +297,8 @@ class Mongo::Client
     pipeline : Array = [] of BSON,
     *,
     full_document : String? = nil,
+    full_document_before_change : String? = nil,
+    show_expanded_events : Bool? = nil,
     resume_after : BSON? = nil,
     max_await_time_ms : Int64? = nil,
     batch_size : Int32? = nil,
@@ -296,14 +307,20 @@ class Mongo::Client
     start_after : BSON? = nil,
     read_concern : ReadConcern? = nil,
     read_preference : ReadPreference? = nil,
+    comment = nil,
     session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
   ) : Mongo::ChangeStream::Cursor
+    tms = timeout_ms.nil? ? @options.timeout.try(&.total_milliseconds.to_i64) : timeout_ms
+    Mongo.check_max_await_vs_timeout(max_await_time_ms, tms)
     ChangeStream::Cursor.new(
       client: self,
       database: "admin",
       collection: 1,
       pipeline: pipeline.map { |elt| BSON.new(elt) },
       full_document: full_document,
+      full_document_before_change: full_document_before_change,
+      show_expanded_events: show_expanded_events,
       resume_after: resume_after,
       start_after: start_after,
       start_at_operation_time: start_at_operation_time,
@@ -312,7 +329,9 @@ class Mongo::Client
       max_time_ms: max_await_time_ms,
       batch_size: batch_size,
       collation: collation,
-      session: session
+      comment: comment,
+      session: session,
+      timeout_ms: tms
     )
   end
 
@@ -340,14 +359,16 @@ class Mongo::Client
                     causal_consistency : Bool? = nil,
                     snapshot : Bool? = nil,
                     snapshot_time : BSON::Timestamp? = nil,
-                    default_transaction_options : Session::TransactionOptions? = nil) : Session::ClientSession
+                    default_transaction_options : Session::TransactionOptions? = nil,
+                    default_timeout_ms : Int64? = nil) : Session::ClientSession
     Session::ClientSession.new(
       client: self,
       implicit: false,
       causal_consistency: causal_consistency,
       snapshot: snapshot,
       snapshot_time: snapshot_time,
-      default_transaction_options: default_transaction_options
+      default_transaction_options: default_transaction_options,
+      default_timeout_ms: default_timeout_ms
     )
   end
 
@@ -355,7 +376,7 @@ class Mongo::Client
   # Internal #
   ############
 
-  protected def get_connection(server_description : SDAM::ServerDescription) : Mongo::Connection
+  protected def get_connection(server_description : SDAM::ServerDescription, wait : Time::Span? = nil) : Mongo::Connection
     # Fast path: see if the pool already exists
     pool = @connection_pool_lock.synchronize { @pools[server_description.address]? }
 
@@ -370,33 +391,17 @@ class Mongo::Client
       pool = addr_lock.synchronize do
         # Double-check inside the lock
         @connection_pool_lock.synchronize { @pools[server_description.address]? } || begin
+          # Load-balanced pools must not pre-create sockets (each one can pin a
+          # different mongos behind the balancer).
+          initial_size = @options.load_balanced ? 0 : @options.min_pool_size
           new_pool = Mongo::Connection::Pool(Mongo::Connection).new(
-            initial_pool_size: @options.min_pool_size,
+            initial_pool_size: initial_size,
             max_pool_size: @options.max_pool_size,
             max_idle_pool_size: @options.max_pool_size,
             checkout_timeout: @options.wait_queue_timeout.try(&.total_seconds) || 5.0,
             max_idle_time: @options.max_idle_time
           ) do
-            connection = Mongo::Connection.new(server_description, @credentials, @options, is_monitor: false)
-            emit_cmap_event(Monitoring::CMAP::ConnectionCreatedEvent.new(server_description.address, connection.connection_id))
-            legacy = @options.server_api.nil? && !@options.load_balanced
-            result, round_trip_time = connection.handshake(
-              send_metadata: true,
-              appname: @options.appname,
-              legacy: legacy,
-              client_metadata: handshake_client_document,
-              load_balanced: @options.load_balanced == true
-            )
-            connection.authenticate
-            old_rtt = server_description.type.unknown? ? nil : server_description.round_trip_time
-            new_rtt = Connection.average_round_trip_time(round_trip_time, old_rtt)
-            new_description = SDAM::ServerDescription.new(server_description.address, result, new_rtt)
-            topology.update(server_description, new_description)
-            server_description.update(new_description)
-            connection
-          rescue e
-            connection.try &.close
-            raise e
+            establish_connection(server_description)
           end
 
           @connection_pool_lock.synchronize { @pools[server_description.address] = new_pool }
@@ -407,7 +412,7 @@ class Mongo::Client
 
     emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutStartedEvent.new(server_description.address))
     begin
-      conn = pool.checkout
+      conn = pool.checkout(wait)
       emit_cmap_event(Monitoring::CMAP::ConnectionCheckedOutEvent.new(server_description.address, conn.connection_id))
       conn
     rescue error : Mongo::Error::PoolCleared
@@ -416,13 +421,188 @@ class Mongo::Client
     rescue error : Mongo::Error::Connection
       emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "timeout"))
       raise error
+    rescue error
+      emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+      raise error
     end
   end
 
+  # Handshake plus auth. Created is emitted before hello. Ready is emitted after auth.
+  # Hello errors do not clear the pool. Auth errors in load-balanced mode clear that serviceId.
+  private def establish_connection(server_description : SDAM::ServerDescription) : Mongo::Connection
+    connection = Mongo::Connection.new(server_description, @credentials, @options, is_monitor: false)
+    address = server_description.address
+    emit_cmap_event(Monitoring::CMAP::ConnectionCreatedEvent.new(address, connection.connection_id))
+    begin
+      legacy = @options.server_api.nil? && !@options.load_balanced
+      result, round_trip_time = connection.handshake(
+        send_metadata: true,
+        appname: @options.appname,
+        legacy: legacy,
+        client_metadata: handshake_client_document,
+        load_balanced: @options.load_balanced == true
+      )
+      # Connection is a struct: ivar writes inside handshake do not stick. Copy the fields.
+      connection.service_id = result.serviceId
+      connection.handshake_complete = true
+      begin
+        connection.authenticate
+      rescue error
+        fail_setup_connection(server_description, connection, error, handshake_complete: true)
+      end
+      emit_cmap_event(Monitoring::CMAP::ConnectionReadyEvent.new(address, connection.connection_id))
+      old_rtt = server_description.type.unknown? ? nil : server_description.round_trip_time
+      new_rtt = Connection.average_round_trip_time(round_trip_time, old_rtt)
+      new_description = SDAM::ServerDescription.new(address, result, new_rtt)
+      # Keep the monitor RTT window. CSOT minRTT uses monitor hellos only.
+      new_description.copy_rtt_window(server_description) unless server_description.type.unknown?
+      topology.update(server_description, new_description)
+      server_description.update(new_description)
+      connection
+    rescue error
+      raise error if connection.handshake_complete
+      fail_setup_connection(server_description, connection, error, handshake_complete: false)
+    end
+  end
+
+  private def fail_setup_connection(server_description : SDAM::ServerDescription, connection : Mongo::Connection, error : Exception, handshake_complete : Bool) : NoReturn
+    # Auth (hello already done) in load-balanced mode clears that serviceId first.
+    if @options.load_balanced && handshake_complete
+      if sid = connection.service_id
+        clear_connection_pool(server_description, sid)
+      end
+    end
+    emit_cmap_event(Monitoring::CMAP::ConnectionClosedEvent.new(server_description.address, connection.connection_id, "error"))
+    connection.close
+    raise error
+  end
+
   private def release_connection(connection : Mongo::Connection)
-    pool = @connection_pool_lock.synchronize { @pools[connection.server_description.address]? }
-    pool.try &.release(connection)
+    pool = pool_for(connection)
+    reason = pool.try &.release(connection)
     emit_cmap_event(Monitoring::CMAP::ConnectionCheckedInEvent.new(connection.server_description.address, connection.connection_id))
+    if reason
+      emit_cmap_event(Monitoring::CMAP::ConnectionClosedEvent.new(connection.server_description.address, connection.connection_id, reason))
+    end
+  end
+
+  # :nodoc:
+  def checkin_connection(connection : Mongo::Connection) : Nil
+    release_connection(connection)
+  end
+
+  # :nodoc:
+  def discard_connection(connection : Mongo::Connection) : Nil
+    pool = pool_for(connection)
+    pool.try &.drop(connection)
+    emit_cmap_event(Monitoring::CMAP::ConnectionClosedEvent.new(connection.server_description.address, connection.connection_id, "error"))
+  end
+
+  # :nodoc:
+  def checked_out_count : Int32
+    @connection_pool_lock.synchronize do
+      n = 0
+      @pools.each_value { |pool| n += pool.checked_out_count }
+      n
+    end
+  end
+
+  # :nodoc:
+  def mark_cursor_pin(connection : Mongo::Connection) : Nil
+    pool_for(connection).try &.mark_cursor(connection)
+  end
+
+  # :nodoc:
+  def mark_transaction_pin(connection : Mongo::Connection) : Nil
+    pool_for(connection).try &.mark_transaction(connection)
+  end
+
+  private def pool_for(connection : Mongo::Connection) : Mongo::Connection::Pool(Mongo::Connection)?
+    @connection_pool_lock.synchronize { @pools[connection.server_description.address]? }
+  end
+
+  private def checkout_for_command(
+    server_description : SDAM::ServerDescription,
+    session : Session::ClientSession,
+    provided : Mongo::Connection?,
+    deadline : Mongo::Deadline?,
+  ) : {Mongo::Connection, Bool}
+    deadline.try(&.check!)
+    timeout = if d = deadline
+                d.infinite? ? @options.socket_timeout : d.remaining
+              else
+                @options.socket_timeout
+              end
+    if provided
+      provided.apply_timeout(timeout)
+      return {provided, false}
+    end
+    session.drop_dead_pin
+    if conn = session.pinned_connection
+      conn.apply_timeout(timeout)
+      return {conn, false}
+    end
+    wait = if (d = deadline) && !d.infinite?
+             d.remaining
+           else
+             nil
+           end
+    begin
+      conn = get_connection(server_description, wait)
+    rescue error : Mongo::Error::Connection
+      if (d = deadline) && !d.infinite?
+        raise Mongo::Error::Timeout.new("timed out while checking out a connection", cause: error)
+      end
+      raise error
+    end
+    conn.apply_timeout(timeout)
+    {conn, true}
+  end
+
+  private def start_srv_poller : Nil
+    hostname = @options.srv_hostname
+    return unless hostname
+    return if @options.load_balanced
+    return unless @monitoring_enabled
+    poller = SDAM::SrvPoller.new(
+      self,
+      hostname,
+      @options.srv_service_name,
+      @options.heartbeat_frequency,
+      @options.srv_max_hosts
+    )
+    @srv_poller = poller
+    poller.start
+  end
+
+  # :nodoc:
+  def apply_srv_hosts(addresses : Array(String), srv_max_hosts : Int32) : Nil
+    current = topology.servers.map(&.address)
+    current_set = Set(String).new(current)
+    incoming = Set(String).new(addresses)
+
+    current.each do |addr|
+      next if incoming.includes?(addr)
+      if desc = topology.remove_srv_seed(addr)
+        stop_monitoring(desc)
+        close_connection_pool(desc)
+      end
+    end
+
+    new_hosts = addresses.reject { |addr| current_set.includes?(addr) }
+    if srv_max_hosts > 0
+      room = srv_max_hosts - topology.servers.size
+      if room <= 0
+        return
+      end
+      if new_hosts.size > room
+        new_hosts.shuffle!
+        new_hosts = new_hosts[0, room]
+      end
+    end
+    new_hosts.each do |addr|
+      topology.add_srv_seed(addr)
+    end
   end
 
   protected def close_connection_pool(server_description : SDAM::ServerDescription)
@@ -434,6 +614,17 @@ class Mongo::Client
       emit_cmap_event(Monitoring::CMAP::PoolClearedEvent.new(server_description.address))
       pool_to_close.close
       emit_cmap_event(Monitoring::CMAP::PoolClosedEvent.new(server_description.address))
+    end
+  end
+
+  # Load-balanced: increment generation for one serviceId. Other mongos sockets stay.
+  protected def clear_connection_pool(server_description : SDAM::ServerDescription, service_id : BSON::ObjectId) : Nil
+    pool = @connection_pool_lock.synchronize { @pools[server_description.address]? }
+    return unless pool
+    closed = pool.clear(service_id)
+    emit_cmap_event(Monitoring::CMAP::PoolClearedEvent.new(server_description.address, service_id))
+    closed.each do |conn|
+      emit_cmap_event(Monitoring::CMAP::ConnectionClosedEvent.new(server_description.address, conn.connection_id, "stale"))
     end
   end
 

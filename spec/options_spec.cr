@@ -1,5 +1,26 @@
 require "./spec_helper"
 
+describe Mongo::SRV do
+  it "accepts a target that shares the parent domain" do
+    Mongo::SRV.valid_target?("a.example.com", "srv.example.com").should be_true
+  end
+
+  it "rejects a target from another domain" do
+    Mongo::SRV.valid_target?("evil.other.com", "srv.example.com").should be_false
+  end
+
+  it "limits hosts with srvMaxHosts using a shuffle" do
+    hosts = [
+      Mongo::SRV::Host.new("a.example.com:27017", 60.seconds),
+      Mongo::SRV::Host.new("b.example.com:27017", 60.seconds),
+      Mongo::SRV::Host.new("c.example.com:27017", 60.seconds),
+    ]
+    limited = Mongo::SRV.limit_hosts(hosts, 2)
+    limited.size.should eq 2
+    Mongo::SRV.limit_hosts(hosts, 0).size.should eq 3
+  end
+end
+
 describe Mongo::Options do
   it "parses boolean URI values without regard to case" do
     _, options, _, _ = Mongo::URI.parse("mongodb://localhost/?retryWrites=FALSE&retryReads=True", Mongo::Options.new)
@@ -30,6 +51,53 @@ describe Mongo::Options do
   it "parses maxIdleTimeMS as a span" do
     _, options, _, _ = Mongo::URI.parse("mongodb://localhost/?maxIdleTimeMS=1500", Mongo::Options.new)
     options.max_idle_time.should eq 1500.milliseconds
+  end
+
+  it "parses timeoutMS as a span" do
+    _, options, _, _ = Mongo::URI.parse("mongodb://localhost/?timeoutMS=2500", Mongo::Options.new)
+    options.timeout.should eq 2500.milliseconds
+  end
+
+  it "parses timeoutMS=0 as infinite (zero span, not unset)" do
+    _, options, _, _ = Mongo::URI.parse("mongodb://localhost/?timeoutMS=0", Mongo::Options.new)
+    options.timeout.should eq Time::Span.zero
+    deadline = Mongo::Deadline.from_options(options)
+    deadline.should_not be_nil
+    deadline.try(&.infinite?).should be_true
+  end
+
+  it "rejects negative timeoutMS" do
+    expect_raises(Mongo::Error, /timeoutMS/) do
+      Mongo::URI.parse("mongodb://localhost/?timeoutMS=-1", Mongo::Options.new)
+    end
+  end
+
+  it "parses srvMaxHosts and srvServiceName on mongodb+srv URIs after DNS" do
+    # Validation of the names themselves does not need DNS. A non-srv URI is rejected.
+    expect_raises(Mongo::Error, /srvMaxHosts/) do
+      Mongo::URI.parse("mongodb://localhost/?srvMaxHosts=2", Mongo::Options.new)
+    end
+    expect_raises(Mongo::Error, /srvServiceName/) do
+      Mongo::URI.parse("mongodb://localhost/?srvServiceName=custom", Mongo::Options.new)
+    end
+  end
+
+  it "rejects loadBalanced=true with multiple hosts" do
+    expect_raises(Mongo::Error, /loadBalanced/) do
+      Mongo::URI.parse("mongodb://localhost:27017,localhost:27018/?loadBalanced=true", Mongo::Options.new)
+    end
+  end
+
+  it "rejects loadBalanced=true with replicaSet" do
+    expect_raises(Mongo::Error, /loadBalanced/) do
+      Mongo::URI.parse("mongodb://localhost/?loadBalanced=true&replicaSet=rs0", Mongo::Options.new)
+    end
+  end
+
+  it "rejects loadBalanced=true with directConnection=true" do
+    expect_raises(Mongo::Error, /loadBalanced/) do
+      Mongo::URI.parse("mongodb://localhost/?loadBalanced=true&directConnection=true", Mongo::Options.new)
+    end
   end
 
   it "parses maxAdaptiveRetries from the URI" do

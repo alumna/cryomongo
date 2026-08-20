@@ -42,7 +42,9 @@ module Mongo::Session
     snapshot : Bool? = nil,
     snapshot_time : BSON::Timestamp? = nil,
     # The default TransactionOptions to use for transactions started on this session.
-    default_transaction_options : TransactionOptions? = nil
+    default_transaction_options : TransactionOptions? = nil,
+    # CSOT timeoutMS for commit, abort, withTransaction, and endSession.
+    default_timeout_ms : Int64? = nil
 
   # A client session used to logically bind operations together.
   class ClientSession
@@ -63,6 +65,8 @@ module Mongo::Session
     property snapshot_time : BSON::Timestamp? = nil
     # The session options used when creating the session.
     getter options : Options
+    # withTransaction stores the remaining timeout here so callback ops inherit it.
+    property operation_deadline : Mongo::Deadline? = nil
 
     protected getter? implicit : Bool = true
     protected delegate :dirty, :dirty=, :txn_number, to: @server_session
@@ -93,7 +97,8 @@ module Mongo::Session
         causal_consistency: causal,
         snapshot: raw_snapshot,
         snapshot_time: raw_snapshot_time,
-        default_transaction_options: options["default_transaction_options"]?
+        default_transaction_options: options["default_transaction_options"]?,
+        default_timeout_ms: options["default_timeout_ms"]?
       )
       @snapshot_time = raw_snapshot_time
       # endSessions during pool close must not check out from this pool.

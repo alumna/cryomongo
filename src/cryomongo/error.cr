@@ -98,6 +98,13 @@ module Mongo
   class Error::Connection < Error::Client
   end
 
+  # Raised when timeoutMS (CSOT) runs out, or when the server returns MaxTimeMSExpired (code 50).
+  class Error::Timeout < Error::Client
+    def initialize(message : String, cause : Exception? = nil)
+      super(message, cause)
+    end
+  end
+
   # Is raised during server selection when encountering a timeout or a compatibility issue.
   class Error::ServerSelection < Error
   end
@@ -197,6 +204,14 @@ module Mongo
 
     def message
       @errors.join('\n')
+    end
+
+    def code : Int32?
+      @errors.first?.try(&.code)
+    end
+
+    def code_name : String?
+      @errors.first?.try(&.code_name)
     end
   end
 

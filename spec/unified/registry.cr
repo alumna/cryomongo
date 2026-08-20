@@ -5,6 +5,7 @@ module Mongo::Unified
     property collections = Hash(String, Mongo::Collection).new
     property buckets = Hash(String, Mongo::GridFS::Bucket).new
     property sessions = Hash(String, Mongo::Session::ClientSession).new
+    property cursors = Hash(String, Mongo::Cursor).new
     property entities = Hash(String, BSON::Value).new
     property command_events = Hash(String, Array(Mongo::Monitoring::Commands::Event)).new
     property sdam_events = Hash(String, Array(Mongo::Monitoring::SDAM::Event)).new
@@ -20,6 +21,10 @@ module Mongo::Unified
     property threads = Hash(String, Channel(Exception?)).new
 
     def close_all
+      cursors.each_value do |cursor|
+        cursor.close
+      rescue
+      end
       sessions.each_value do |session|
         session.end
       rescue
@@ -35,6 +40,7 @@ module Mongo::Unified
         clients[object_id]? ||
         buckets[object_id]? ||
         sessions[object_id]? ||
+        cursors[object_id]? ||
         raise "Target entity not found: #{object_id}"
     end
   end

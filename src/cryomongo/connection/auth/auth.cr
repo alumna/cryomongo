@@ -1,3 +1,4 @@
+require "./saslprep"
 require "./scram"
 require "./x509"
 require "./plain"

@@ -15,6 +15,8 @@ describe "Unified Test Runner" do
     Mongo::Unified::Runner.utf_topology_name("replicaset").should eq "replicaset"
     Mongo::Unified::Runner.utf_topology_name("sharded").should eq "sharded"
     Mongo::Unified::Runner.utf_topology_name("single").should eq "single"
+    Mongo::Unified::Runner.utf_topology_name("load-balanced").should eq "load-balanced"
+    Mongo::Unified::Runner.utf_topology_name("load_balanced").should eq "load-balanced"
   end
 
   it "bootstraps the environment successfully" do

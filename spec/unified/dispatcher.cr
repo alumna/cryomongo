@@ -11,15 +11,8 @@ module Mongo::Unified::Dispatcher
     "count",
     "mapReduce",
     "waitForPrimaryChange",
-    "iterateUntilDocumentOrError",
-    "iterateOnce",
-    "createFindCursor",
     "recordTopologyDescription",
     "assertTopologyType",
-    "assertNumberConnectionsCheckedOut",
-    "upload",
-    "delete",
-    "rename",
     "createSearchIndex",
     "createSearchIndexes",
     "dropSearchIndex",
@@ -65,6 +58,19 @@ module Mongo::Unified::Dispatcher
                when "assertIndexNotExists"                     then execute_assert_index_not_exists(args, internal_client)
                when "download"                                 then execute_download(args, target)
                when "downloadByName"                           then execute_download_by_name(args, target)
+               when "upload"                                   then execute_upload(args, target)
+               when "delete"                                   then execute_gridfs_delete(args, target)
+               when "rename"
+                 if target.is_a?(Mongo::GridFS::Bucket)
+                   execute_gridfs_rename(args, target)
+                 else
+                   execute_rename_collection(args, target, session)
+                 end
+               when "iterateUntilDocumentOrError"              then execute_iterate_until_document_or_error(target)
+               when "iterateOnce"                              then execute_iterate_once(target)
+               when "createFindCursor"                         then execute_create_find_cursor(args, target, session, op, registry)
+               when "dropIndex"                                then execute_drop_index(args, target, session)
+               when "dropIndexes"                              then execute_drop_indexes(args, target, session)
                when "createCollection"                         then execute_create_collection(args, target, session)
                when "dropCollection"                           then execute_drop_collection(args, target, session)
                when "createIndex"                              then execute_create_index(args, target, session)
@@ -85,6 +91,8 @@ module Mongo::Unified::Dispatcher
                when "listIndexes"                              then execute_list_indexes(args, target, session)
                when "listIndexNames"                           then execute_list_index_names(args, target, session)
                when "runCommand"                               then execute_run_command(args, target, session)
+               when "runCursorCommand"                         then execute_run_cursor_command(args, target, session)
+               when "createCommandCursor"                      then execute_create_command_cursor(args, target, session, op, registry)
                when "createChangeStream"                       then execute_create_change_stream(args, target, session)
                when "aggregate"                                then execute_aggregate(args, target, session)
                when "countDocuments"                           then execute_count_documents(args, target, session)
@@ -104,7 +112,8 @@ module Mongo::Unified::Dispatcher
                when "waitForEvent"                             then execute_wait_for_event(args, registry)
                when "assertEventCount"                         then execute_assert_event_count(args, registry)
                when "wait"                                     then execute_wait(args)
-               when "close"                                    then execute_close(target)
+               when "close"                                    then execute_close(args, target)
+               when "assertNumberConnectionsCheckedOut"        then execute_assert_number_connections_checked_out(args, registry)
                when "appendMetadata"                           then execute_append_metadata(args, target)
                else
                  raise Exception.new("SKIP_TEST")
@@ -116,6 +125,16 @@ module Mongo::Unified::Dispatcher
 
       if expected_error
         raise Exception.new("TEST_FAILED: Expected operation #{op.name} to fail, but it succeeded.")
+      end
+
+      if (entity_name = op.saveResultAsEntity) && result
+        if result.is_a?(Mongo::Cursor)
+          registry.cursors[entity_name] = result
+        elsif result.is_a?(Mongo::Collection)
+          registry.collections[entity_name] = result
+        elsif result.is_a?(BSON::Value)
+          registry.entities[entity_name] = result
+        end
       end
 
       if expected = op.expectResult
@@ -179,6 +198,12 @@ module Mongo::Unified::Dispatcher
         if error.responds_to?(:has_error_label?) && error.has_error_label?(label)
           raise Exception.new("TEST_FAILED: Did not expect error label #{label.inspect} on #{error}")
         end
+      end
+    end
+
+    if expected.isTimeoutError
+      unless error.is_a?(Mongo::Error::Timeout)
+        raise Exception.new("TEST_FAILED: Expected a timeout error, got #{error.class}: #{error}")
       end
     end
   end

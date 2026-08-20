@@ -3,13 +3,19 @@ require "./credentials"
 require "./auth"
 
 # :nodoc:
-struct Mongo::Connection
+# Class so pin, pool, and checkout share one object (generation, serviceId, socket).
+class Mongo::Connection
   @@next_connection_id = Atomic(Int64).new(1)
 
   getter server_description : SDAM::ServerDescription
   getter credentials : Mongo::Credentials
   getter socket : IO
   getter connection_id : Int64
+  property service_id : BSON::ObjectId? = nil
+  # Pool generation at handshake. A later clear with a higher value makes this socket stale.
+  property generation : Int32 = 0
+  # True after hello succeeds. Handshake errors before this must not clear the pool.
+  property handshake_complete : Bool = false
   @sasl_supported_mechs : Array(String)? = nil
   # After the first handshake, later hellos follow helloOk from the server.
   getter? use_hello : Bool = false
@@ -141,7 +147,25 @@ struct Mongo::Connection
 
     @use_hello = !use_legacy || result.helloOk == true
 
+    if load_balanced
+      sid = result.serviceId
+      unless sid
+        raise Mongo::Error.new("Driver attempted to initialize in load balancing mode, but the server does not support this mode.")
+      end
+      @service_id = sid
+    end
+
     {result, round_trip_time}
+  end
+
+  def apply_timeout(span : Time::Span?) : Nil
+    socket = @socket
+    if socket.responds_to?(:read_timeout=)
+      socket.read_timeout = span
+    end
+    if socket.responds_to?(:write_timeout=)
+      socket.write_timeout = span
+    end
   end
 
   def self.average_round_trip_time(round_trip_time : Time::Span, old_rtt : Time::Span?)

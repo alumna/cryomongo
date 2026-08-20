@@ -1,9 +1,15 @@
 class Mongo::Client
-  private def server_selection(command, args, read_preference : ReadPreference) : SDAM::ServerDescription
+  private def server_selection(command, args, read_preference : ReadPreference, deadline : Mongo::Deadline? = nil) : SDAM::ServerDescription
     # See: https://github.com/mongodb/specifications/blob/master/source/server-selection/server-selection.rst#multi-threaded-or-asynchronous-server-selection
     # Use a monotonic clock. Wall time can jump and would shorten or stretch the wait.
     selection_start = Time.instant
     selection_timeout = @options.server_selection_timeout
+    effective = deadline || Mongo::Deadline.from_options(@options)
+    if effective && !effective.infinite?
+      left = effective.remaining
+      selection_timeout = left if left < selection_timeout
+      raise Error::Timeout.new("timed out during server selection") if selection_timeout <= Time::Span.zero
+    end
     # Crystal is concurrent (and can be parallel). The multi-threaded default is false:
     # keep scanning until the timeout. true = one extra scan, then raise.
     try_once = @options.server_selection_try_once
@@ -32,12 +38,12 @@ class Mongo::Client
       return selected_server if selected_server
 
       if try_once && waited_once
-        raise selection_timeout_error(read_preference)
+        raise selection_timeout_error(read_preference, effective)
       end
 
       remaining = selection_timeout - selection_start.elapsed
       if remaining <= Time::Span.zero
-        raise selection_timeout_error(read_preference)
+        raise selection_timeout_error(read_preference, effective)
       end
 
       select
@@ -48,13 +54,18 @@ class Mongo::Client
       waited_once = true
 
       if selection_start.elapsed >= selection_timeout
-        raise selection_timeout_error(read_preference)
+        raise selection_timeout_error(read_preference, effective)
       end
     end
   end
 
-  private def selection_timeout_error(read_preference : ReadPreference)
-    Error::ServerSelection.new "Timeout (#{@options.server_selection_timeout}) reached while trying to select a suitable server with read preference #{read_preference.mode}."
+  private def selection_timeout_error(read_preference : ReadPreference, deadline : Mongo::Deadline? = nil)
+    msg = "Timeout (#{@options.server_selection_timeout}) reached while trying to select a suitable server with read preference #{read_preference.mode}."
+    if deadline && !deadline.infinite?
+      Error::Timeout.new(msg)
+    else
+      Error::ServerSelection.new msg
+    end
   end
 
   private def find_suitable_servers(command, args, read_preference : ReadPreference) : Array(SDAM::ServerDescription)

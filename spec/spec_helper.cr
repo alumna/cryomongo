@@ -5,8 +5,10 @@ require "../src/cryomongo"
 # Use the environment variable or a URI that matches TOPOLOGY.
 ENV["MONGODB_URI"] ||= begin
   case ENV["TOPOLOGY"]?
-  when "standalone", "sharded", "load-balanced"
+  when "standalone", "sharded"
     "mongodb://localhost:27017"
+  when "load-balanced"
+    ENV["SINGLE_MONGOS_LB_URI"]? || "mongodb://127.0.0.1:8000/?loadBalanced=true"
   else
     "mongodb://localhost:27017/?replicaSet=rs0"
   end

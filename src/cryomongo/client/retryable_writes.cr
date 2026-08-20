@@ -7,6 +7,8 @@ class Mongo::Client
     server_description : SDAM::ServerDescription? = nil,
     operation_id : Int64? = nil,
     end_implicit_session : Bool = true,
+    provided_connection : Mongo::Connection? = nil,
+    deadline : Mongo::Deadline? = nil,
     **args,
   )
     provided_server = server_description
@@ -14,13 +16,14 @@ class Mongo::Client
       provided_server || session.server_description,
       command,
       args,
-      read_preference
+      read_preference,
+      deadline
     )
 
     if !topology.supports_sessions? || !server_description.supports_retryable_writes?
-      connection = get_connection(server_description)
+      connection, owns = checkout_for_command(server_description, session, provided_connection, deadline)
       session.pin(server_description)
-      return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, **args)
+      return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, deadline, owns, **args)
     end
 
     session.increment_txn_number unless session.is_transaction?
@@ -32,7 +35,7 @@ class Mongo::Client
     loop do
       begin
         preferred = provided_server || session.server_description
-        server_description = live_retryable_write_server(preferred, command, args, read_preference)
+        server_description = live_retryable_write_server(preferred, command, args, read_preference, deadline)
         if original_error && server_description.type.unknown?
           # TopologyType Single returns Unknown immediately; handshake rediscovers.
         elsif !topology.supports_sessions? || !server_description.supports_retryable_writes?
@@ -40,10 +43,10 @@ class Mongo::Client
           raise Mongo::Error.new("Sessions or retryable writes not supported")
         end
 
-        connection = get_connection(server_description)
+        connection, owns = checkout_for_command(server_description, session, provided_connection, deadline)
         session.pin(server_description)
         overload_retry = original_error.try(&.retryable_overload?) || false
-        return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, **args) { |body|
+        return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, deadline, owns, **args) { |body|
           apply_retryable_write_body(body, command, session, attempt, overload: overload_retry)
         }
       rescue error : Mongo::Error
@@ -65,19 +68,27 @@ class Mongo::Client
         end
 
         attempt += 1
-        if attempt > allowed_retries
+        if d = deadline
+          if !d.infinite? && d.expired?
+            raise Mongo::Error::Timeout.new("retryable write exceeded timeoutMS", cause: error)
+          end
+        elsif attempt > allowed_retries
           raise error
         end
 
         original_error = error
-        session.unpin if error.transient_transaction?
+        session.unpin if error.transient_transaction? || error.unknown_transaction?
         apply_overload_backoff(attempt, error) if overload
       rescue error : Mongo::Client::NetworkError
         wrapped = Error::Network.new(error)
         wrapped.add_retryable_label(server_description.max_wire_version)
         original_error = wrapped
         attempt += 1
-        raise wrapped if attempt > allowed_retries
+        if d = deadline
+          raise Mongo::Error::Timeout.new("retryable write exceeded timeoutMS", cause: wrapped) if !d.infinite? && d.expired?
+        elsif attempt > allowed_retries
+          raise wrapped
+        end
       end
     end
   end
@@ -91,6 +102,7 @@ class Mongo::Client
     command,
     args,
     read_preference : ReadPreference,
+    deadline : Mongo::Deadline? = nil,
   ) : SDAM::ServerDescription
     if preferred
       live = topology.servers.find { |s| s.address == preferred.address }
@@ -102,7 +114,7 @@ class Mongo::Client
         return live
       end
     end
-    server_selection(command, args, read_preference)
+    server_selection(command, args, read_preference, deadline)
   end
 
   private def apply_retryable_write_body(body, command, session, attempt, *, overload = false)
@@ -134,6 +146,8 @@ class Mongo::Client
     server_description : SDAM::ServerDescription? = nil,
     operation_id : Int64? = nil,
     end_implicit_session : Bool = true,
+    provided_connection : Mongo::Connection? = nil,
+    deadline : Mongo::Deadline? = nil,
     **args,
   )
     provided_server = server_description
@@ -143,13 +157,13 @@ class Mongo::Client
 
     loop do
       begin
-        selected = provided_server || session.server_description || server_selection(command, args, read_preference)
+        selected = provided_server || session.server_description || server_selection(command, args, read_preference, deadline)
 
         if session.options.snapshot && selected.max_wire_version < 13
           raise Error::Client.new("Snapshot reads require MongoDB 5.0 or later")
         end
 
-        connection = get_connection(selected)
+        connection, owns = checkout_for_command(selected, session, provided_connection, deadline)
         session.pin(selected)
         return execute_command(
           command,
@@ -159,6 +173,8 @@ class Mongo::Client
           connection,
           operation_id,
           end_implicit_session,
+          deadline,
+          owns,
           **args
         )
       rescue error : Mongo::Error
@@ -177,7 +193,11 @@ class Mongo::Client
 
         allowed_retries = overload ? @options.max_adaptive_retries : 1
         attempt += 1
-        if attempt > allowed_retries
+        if d = deadline
+          if !d.infinite? && d.expired?
+            raise Mongo::Error::Timeout.new("retryable write exceeded timeoutMS", cause: error)
+          end
+        elsif attempt > allowed_retries
           raise error
         end
         original_error = error

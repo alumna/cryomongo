@@ -82,9 +82,11 @@ module Mongo::Monitoring
       getter command : BSON
       # Returns the database name.
       getter database_name : String
+      # Load-balanced: serviceId from hello on this socket.
+      getter service_id : BSON::ObjectId?
 
       # :nodoc:
-      def initialize(@command_name, @request_id, @address, @command, @database_name, @operation_id = nil)
+      def initialize(@command_name, @request_id, @address, @command, @database_name, @operation_id = nil, @service_id = nil)
       end
     end
 
@@ -94,9 +96,11 @@ module Mongo::Monitoring
       getter duration : Time::Span
       # Returns the command reply.
       getter reply : BSON
+      # Load-balanced: serviceId from hello on this socket.
+      getter service_id : BSON::ObjectId?
 
       # :nodoc:
-      def initialize(@command_name, @request_id, @address, @duration, @reply, @operation_id = nil)
+      def initialize(@command_name, @request_id, @address, @duration, @reply, @operation_id = nil, @service_id = nil)
       end
     end
 
@@ -108,9 +112,11 @@ module Mongo::Monitoring
       getter failure : Exception
       # Returns the command reply.
       getter reply : BSON
+      # Load-balanced: serviceId from hello on this socket.
+      getter service_id : BSON::ObjectId?
 
       # :nodoc:
-      def initialize(@command_name, @request_id, @address, @duration, @failure, @reply, @operation_id = nil)
+      def initialize(@command_name, @request_id, @address, @duration, @failure, @reply, @operation_id = nil, @service_id = nil)
       end
     end
   end

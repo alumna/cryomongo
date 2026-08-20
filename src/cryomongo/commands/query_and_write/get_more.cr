@@ -8,7 +8,7 @@ require "../commands"
 module Mongo::Commands::GetMore
   extend ReadCommand
   extend MayUseSecondary
-  extend Retryable
+  # getMore is not a retryable read. Change streams resume with a new aggregate.
   extend self
 
   # Returns a pair of OP_MSG body and sequences associated with the command and arguments.
