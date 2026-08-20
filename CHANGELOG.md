@@ -2,27 +2,32 @@
 
 ## Unreleased
 
-Phase 2 of the roadmap started (cloud, GridFS UTF, SASLprep). Official load-balancer UTF leftovers and CSOT UTF leftovers landed.
+Phase 2 of the roadmap is done (cloud, GridFS UTF, SASLprep, CSOT, load-balanced full spec).
 
 ### Added
 * **auth:** SASLprep (RFC 4013) for SCRAM-SHA-256 passwords. Printable ASCII is unchanged (no extra allocation). Usernames are not prepared.
 * **uri:** `timeoutMS` (CSOT deadline), `srvMaxHosts`, `srvServiceName`. `mongodb+srv` URI validation for `loadBalanced`, `replicaSet`, and `directConnection`. `timeoutMS=0` means infinite. Negative `timeoutMS` is rejected.
 * **sdam:** SRV polling fiber for `mongodb+srv://` on Sharded or Unknown. Adds and removes mongos hosts. Does not run in load-balanced mode. Monitor hellos keep the last 10 RTT samples for CSOT min RTT.
-* **csot:** Remaining `timeoutMS` minus min RTT is sent as `maxTimeMS`. Server code 50 (`MaxTimeMSExpired`) becomes `Error::Timeout`. `timeoutMS` on the client, database, collection, CRUD, indexes, GridFS, `commit_transaction`, and `abort_transaction`. `timeoutMode` (`cursorLifetime` / `iteration`) on find, aggregate, listCollections, and listIndexes. Tailable awaitData sends `maxTimeMS` on find and caps getMore with `maxAwaitTimeMS`. Change streams use iteration timeouts and resume in the same `next` call. GridFS uses one deadline for the whole upload/download (including `listIndexes` before the first write). Retryable reads/writes retry until `timeoutMS` (or forever if `timeoutMS=0`). Wait-queue timeout is `Error::Timeout` when `timeoutMS` is set. `wTimeoutMS` is omitted when `timeoutMS` is set. Official CSOT UTF is 27 files (not `runCursorCommand`).
+* **csot:** Remaining `timeoutMS` minus min RTT is sent as `maxTimeMS`. Server code 50 (`MaxTimeMSExpired`) becomes `Error::Timeout`. `timeoutMS` on the client, database, collection, CRUD, indexes, GridFS, `commit_transaction`, and `abort_transaction`. `timeoutMode` (`cursorLifetime` / `iteration`) on find, aggregate, listCollections, and listIndexes. Tailable awaitData sends `maxTimeMS` on find and caps getMore with `maxAwaitTimeMS`. Change streams use iteration timeouts and resume in the same `next` call. GridFS uses one deadline for the whole upload/download (including `listIndexes` before the first write). Retryable reads/writes retry until `timeoutMS` (or forever if `timeoutMS=0`). Wait-queue timeout is `Error::Timeout` when `timeoutMS` is set. `wTimeoutMS` is omitted when `timeoutMS` is set. Official CSOT UTF is 28 files.
+* **run command:** `Database#run_command` and `#run_cursor_command`. The caller's document is copied. Not retryable. Database read/write concern is not applied. `timeoutMode` and `cursorType` follow CSOT. `batch_size`, `comment`, and `max_time_ms` go on getMore only. Official run-command UTF is copied.
 * **load balancer:** Do not pre-create `minPoolSize` sockets. Require `serviceId` on hello. Pin the TCP socket for a transaction and for an open cursor. Unpin returns the socket to the pool. Pool generation is per `serviceId`. Wait-queue timeout lists cursor / transaction / other in-use counts. `poolClearedEvent` includes `serviceId`. Command events include `serviceId`. CMAP `connectionReadyEvent` and `connectionClosedEvent` with a reason. UTF `assertNumberConnectionsCheckedOut`. Official load-balancer UTF runs (except the JSON `skipReason` file and one per-`serviceId` test that needs two mongos from HAProxy).
-* **testing:** UTF ops `iterateUntilDocumentOrError`, `iterateOnce`, `createFindCursor`, GridFS `upload` / `delete` / `rename`, `dropIndex` / `dropIndexes`, `assertNumberConnectionsCheckedOut`. Official GridFS, collection-management, and index-management JSON. CLAM `redacted-commands.json` and CRUD `create-null-ids.json` now run. GitHub uploads `tmp/utf-timing.log`. GitHub has a load-balanced job: HAProxy via `spec/support/run-load-balancer.sh`, official load-balancer UTF, and offline unit specs.
+* **testing:** UTF ops `iterateUntilDocumentOrError`, `iterateOnce`, `createFindCursor`, `runCursorCommand`, `createCommandCursor`, GridFS `upload` / `delete` / `rename`, `dropIndex` / `dropIndexes`, `assertNumberConnectionsCheckedOut`. Official GridFS, collection-management, index-management, run-command, and CSOT JSON. CLAM `redacted-commands.json` and CRUD `create-null-ids.json` now run. GitHub uploads `tmp/utf-timing.log`. GitHub load-balanced runs full `crystal spec` (HAProxy via `spec/support/run-load-balancer.sh`).
 * **change streams:** `watch` sends `comment` on aggregate and getMore (string or document). `showExpandedEvents` and `fullDocumentBeforeChange` go on `$changeStream`. A labeled getMore error resumes with a new aggregate (getMore is not a retryable read). `maxAwaitTimeMS` must be less than `timeoutMS` when both are set.
 
 ### Changed
 * Cursor `finalize` no longer sends `killCursors` or touches the pool (GC thread). Call `#close`, `#each`, or a block `find`.
-* Load-balanced topology does not start monitor sockets. Sessions are always supported in that mode.
+* Load-balanced topology does not start monitor sockets. Sessions are always supported in that mode. LoadBalancer always allows retryable reads and writes (hello fields stay unset without monitors).
 * `getMore` is not retried as a retryable read. Overload retry still runs.
+* `timeoutMode` iteration starts a fresh `timeoutMS` on each `next` / `try_next` (change streams still own the deadline for resume).
+* HAProxy multi-mongos uses roundrobin and health-checks the normal mongos ports (not the PROXY v2 ports).
 
 ### Fixed
 * Upsert reply with `_id: null` deserializes. Duplicate-key write errors expose `code`.
 * GridFS `rename` errors when the file id is missing. UTF `downloadByName` honors `revision`.
 * UTF matcher: `$date` canonical vs relaxed, `$$type` int/long with `$numberInt`.
 * Find omits `tailable` and `awaitData` unless they are true. Sending `tailable: false` broke Versioned API strict (`crud-api-version-1-strict.json`).
+* A `runCommand` reply with a cursor id pins the load-balanced socket (the raw BSON is scanned for `cursor.id`).
+* UTF `createCollection` stores the collection entity and sends `capped` / `size` / `max`.
 
 ## 0.15.0 - 2026-08-20
 

@@ -19,7 +19,7 @@
 # Local:
 #   sudo scripts/mongo-topology.sh load-balanced
 #   source tmp/lb-uri.env
-#   crystal spec spec/unified_runner_spec.cr
+#   crystal spec
 #
 # Usage:
 #   spec/support/run-load-balancer.sh start
@@ -39,6 +39,10 @@ LB1="${LB_BACKEND_1:-127.0.0.1:27050}"
 LB2="${LB_BACKEND_2:-127.0.0.1:27051}"
 FRONT1="${LB_FRONT_1:-8000}"
 FRONT2="${LB_FRONT_2:-8001}"
+# Health-check the normal mongos ports. The load-balancer ports need PROXY v2,
+# so a plain TCP check there marks the backend down.
+CHECK1="${LB_CHECK_PORT_1:-27017}"
+CHECK2="${LB_CHECK_PORT_2:-27016}"
 
 need_haproxy() {
   if ! command -v haproxy >/dev/null 2>&1; then
@@ -78,11 +82,12 @@ backend mongos_backend
 
 backend mongoses_backend
     mode tcp
-    # leastconn so a pinned socket on one mongos sends the next TCP to the other.
-    balance leastconn
+    # roundrobin so two sequential sockets go to different mongos (leastconn
+    # can send both to one mongos when they start with the same idle count).
+    balance roundrobin
     retries 0
-    server mongos_one ${LB1} send-proxy-v2
-    server mongos_two ${LB2} send-proxy-v2
+    server mongos_one ${LB1} send-proxy-v2 check port ${CHECK1}
+    server mongos_two ${LB2} send-proxy-v2 check port ${CHECK2}
 EOF
 
   haproxy -D -f "$CONF" -p "$PIDFILE"

@@ -1,25 +1,6 @@
 require "./parse"
 
 module Mongo::Unified::Operations
-  struct RawCommand
-    include Mongo::Commands::Command
-    include Mongo::Commands::MayUseSecondary
-    getter name : String
-
-    def initialize(@name : String)
-    end
-
-    def command(**args)
-      bson = args["command_bson"].as(BSON)
-      bson["$db"] = args["database"].as(String) unless bson.has_key?("$db")
-      {bson, nil}
-    end
-
-    def result(bson : BSON)
-      bson
-    end
-  end
-
   # --- Helpers ---
 
   def json_to_bson_value(json : JSON::Any)
@@ -267,14 +248,22 @@ module Mongo::Unified::Operations
     timeseries = args["timeseries"]?.try { |v| BSON.from_json(v.to_json) }
     expire = args["expireAfterSeconds"]?.try { |v| v.as_i64? || v.as_i?.try(&.to_i64) }
     pre_post = args["changeStreamPreAndPostImages"]?.try { |v| BSON.from_json(v.to_json) }
-    target.as(Mongo::Database).command(Mongo::Commands::Create, name: coll_name, session: session, options: {
-      view_on:                         view_on,
-      pipeline:                        pipeline,
-      clustered_index:                 clustered,
-      timeseries:                      timeseries,
-      expire_after_seconds:            expire,
+    capped = args["capped"]?.try(&.as_bool)
+    size = json_i64(args["size"]?)
+    max = json_i64(args["max"]?)
+    db = target.as(Mongo::Database)
+    db.command(Mongo::Commands::Create, name: coll_name, session: session, timeout_ms: op_timeout_ms(args), options: {
+      view_on:                           view_on,
+      pipeline:                          pipeline,
+      clustered_index:                   clustered,
+      timeseries:                        timeseries,
+      expire_after_seconds:              expire,
       change_stream_pre_and_post_images: pre_post,
+      capped:                            capped,
+      size:                              size,
+      max:                               max,
     })
+    db[coll_name]
   end
 
   private def execute_drop_collection(args, target, session)
@@ -485,10 +474,54 @@ module Mongo::Unified::Operations
 
   private def execute_run_command(args, target, session)
     raise "Missing arguments" unless args
-    command_name = args["commandName"].as_s
     command_bson = BSON.from_json(args["command"].to_json)
     read_preference = args["readPreference"]?.try { |rp| Mongo::ReadPreference.from_bson(BSON.from_json(rp.to_json)) }
-    target.as(Mongo::Database).command(RawCommand.new(command_name), command_bson: command_bson, session: session, read_preference: read_preference, timeout_ms: op_timeout_ms(args))
+    target.as(Mongo::Database).run_command(command_bson, session: session, read_preference: read_preference, timeout_ms: op_timeout_ms(args))
+  end
+
+  private def execute_run_cursor_command(args, target, session)
+    cursor = command_cursor(args, target, session)
+    begin
+      cursor.to_a
+    ensure
+      cursor.close
+    end
+  end
+
+  private def execute_create_command_cursor(args, target, session, op, registry)
+    cursor = command_cursor(args, target, session)
+    if name = op.saveResultAsEntity
+      registry.cursors[name] = cursor
+    end
+    cursor
+  end
+
+  private def command_cursor(args, target, session)
+    raise "Missing arguments" unless args
+    command_bson = BSON.from_json(args["command"].to_json)
+    read_preference = args["readPreference"]?.try { |rp| Mongo::ReadPreference.from_bson(BSON.from_json(rp.to_json)) }
+    batch_size = args["batchSize"]?.try(&.as_i)
+    comment = args["comment"]?.try { |c| json_to_bson_value(c) }
+    max_time_ms = json_i64(args["maxTimeMS"]?) || json_i64(args["maxAwaitTimeMS"]?)
+    cursor_type = case args["cursorType"]?.try(&.as_s?)
+                  when "tailable"
+                    Mongo::CursorType::Tailable
+                  when "tailableAwait"
+                    Mongo::CursorType::TailableAwait
+                  when "nonTailable"
+                    Mongo::CursorType::NonTailable
+                  end
+    target.as(Mongo::Database).run_cursor_command(
+      command_bson,
+      session: session,
+      read_preference: read_preference,
+      timeout_ms: op_timeout_ms(args),
+      timeout_mode: op_timeout_mode(args),
+      cursor_type: cursor_type,
+      batch_size: batch_size,
+      comment: comment,
+      max_time_ms: max_time_ms,
+    )
   end
 
   private def execute_create_change_stream(args, target, session)

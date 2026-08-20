@@ -93,6 +93,139 @@ class Mongo::Database
     }
   end
 
+  # Run a raw command on this database. The caller's document is copied.
+  # Driver fields (lsid, $db, $clusterTime) are added on the copy.
+  # Read and write concern from the database are not applied. Not retryable.
+  # If the document already has maxTimeMS and timeoutMS is set, maxTimeMS is overwritten.
+  def run_command(
+    command,
+    *,
+    read_preference : ReadPreference? = nil,
+    session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
+  ) : BSON
+    body = command.is_a?(BSON) ? command : BSON.new(command)
+    name = Commands::RunCommand.first_key(body)
+    result = if rp = read_preference
+               self.command(
+                 Commands::RunCommand.new(name),
+                 command_bson: body,
+                 session: session,
+                 read_preference: rp,
+                 timeout_ms: timeout_ms,
+                 options: {read_preference: rp},
+               )
+             else
+               self.command(
+                 Commands::RunCommand.new(name),
+                 command_bson: body,
+                 session: session,
+                 timeout_ms: timeout_ms,
+               )
+             end
+    raise Mongo::Error.new("Command failed to return a result") unless result
+    result.as(BSON)
+  end
+
+  # Run a command that returns a cursor. getMore stays on the same server
+  # (and the same load-balanced socket). timeoutMode and cursorType follow CSOT.
+  # batch_size, comment, and max_time_ms apply to getMore only.
+  def run_cursor_command(
+    command,
+    *,
+    read_preference : ReadPreference? = nil,
+    session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
+    timeout_mode : Mongo::TimeoutMode? = nil,
+    cursor_type : Mongo::CursorType? = nil,
+    batch_size : Int32? = nil,
+    comment = nil,
+    max_time_ms : Int64? = nil,
+  ) : Mongo::Cursor
+    body = command.is_a?(BSON) ? command : BSON.new(command)
+    name = Commands::RunCommand.first_key(body)
+    tailable = cursor_type.try { |c| c.tailable? || c.tailable_await? } || false
+    await_data = cursor_type.try(&.tailable_await?) || false
+
+    has_timeout = !timeout_ms.nil? || !@timeout_ms.nil? || @client.options.timeout
+    if timeout_mode && !has_timeout
+      raise Mongo::Error.new("timeoutMode requires timeoutMS")
+    end
+    if tailable && timeout_mode.try(&.cursor_lifetime?)
+      raise Mongo::Error.new("tailable cursors do not support timeoutMode cursorLifetime")
+    end
+    if timeout_ms && max_time_ms
+      raise Mongo::Error.new("timeoutMS and getMore maxTimeMS cannot both be set")
+    end
+    Mongo.check_max_await_vs_timeout(max_time_ms, timeout_ms || @timeout_ms || @client.options.timeout.try(&.total_milliseconds.to_i64))
+
+    mode = timeout_mode || (tailable ? Mongo::TimeoutMode::Iteration : Mongo::TimeoutMode::CursorLifetime)
+    deadline = unless timeout_ms.nil?
+                 Mongo::Deadline.from_timeout_ms(timeout_ms)
+               else
+                 inherited_deadline
+               end
+    cmd_deadline = if await_data
+                     deadline
+                   elsif mode.iteration?
+                     deadline.try(&.without_max_time)
+                   else
+                     deadline
+                   end
+    tms = timeout_ms.nil? ? (@timeout_ms || @client.options.timeout.try(&.total_milliseconds.to_i64)) : timeout_ms
+
+    result = send_run_command(
+      name,
+      body,
+      session,
+      read_preference,
+      timeout_ms,
+      cmd_deadline,
+    ) { |reply, cmd_session|
+      qr = Commands::RunCommand.cursor_result(reply)
+      bind_cursor(Cursor.new(
+        @client,
+        qr,
+        batch_size: batch_size,
+        await_time_ms: max_time_ms,
+        tailable: tailable,
+        session: cmd_session,
+        comment: comment,
+        timeout_ms: tms,
+        timeout_mode: mode,
+        deadline: deadline,
+      ), cmd_session)
+    }
+    raise Mongo::Error.new("Command failed to return a result") unless result
+    result
+  end
+
+  private def send_run_command(name, body, session, read_preference, timeout_ms, deadline, &)
+    if rp = read_preference
+      self.command(
+        Commands::RunCommand.new(name),
+        command_bson: body,
+        session: session,
+        read_preference: rp,
+        timeout_ms: timeout_ms,
+        deadline: deadline,
+        options: {read_preference: rp},
+      ) { |reply, cmd_session|
+        yield reply, cmd_session
+      }
+    else
+      self.command(
+        Commands::RunCommand.new(name),
+        command_bson: body,
+        session: session,
+        timeout_ms: timeout_ms,
+        deadline: deadline,
+      ) { |reply, cmd_session|
+        yield reply, cmd_session
+      }
+    end
+  end
+
   # Get a newly allocated `Mongo::Collection` for the collection named *name*.
   def collection(collection : Collection::CollectionKey) : Mongo::Collection
     Collection.new(self, collection)

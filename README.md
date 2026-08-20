@@ -11,7 +11,7 @@
 
 This is a fork of `elbywan/cryomongo`. The goal is to make the driver ready for **MongoDB 8.0** and **Crystal 1.21**. We plan to merge back to the original project when that work is done.
 
-The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). **Phase 1** of [ROADMAP.md](ROADMAP.md) is done. **Phase 2** is in progress (SASLprep, SRV polling, load-balancer pin, GridFS UTF). GitHub Actions runs standalone, replica set, sharded, and load-balanced.
+The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). **Phase 1** and **Phase 2** of [ROADMAP.md](ROADMAP.md) are done. GitHub Actions runs `crystal spec` on standalone, replica set, sharded, and load-balanced.
 
 What is already in place:
 
@@ -26,7 +26,7 @@ The UTF runner is **clear**: unknown operations become Crystal `pending`, they d
 
 The driver is in **beta**. Core CRUD, sessions, and transactions work on standalone, replica set, and sharded MongoDB 8.0.
 
-**Done enough to build apps (Phase 1 and Phase 2 core)**
+**Done enough to build apps (Phase 1 and Phase 2)**
 - CRUD helpers, bulk, aggregation (no mapReduce).
 - Sessions, causal consistency, transactions, convenient `with_transaction`.
 - Retryable reads and writes (including `insertMany` as one command).
@@ -35,14 +35,12 @@ The driver is in **beta**. Core CRUD, sessions, and transactions work on standal
 - Legacy SDAM state-machine tests. Versioned API.
 - SCRAM-SHA-256 with SASLprep, X509, and PLAIN.
 - Change streams: `comment`, `showExpandedEvents`, `fullDocumentBeforeChange`, resume after a labeled getMore error.
-- CSOT `timeoutMS`: remaining time becomes `maxTimeMS`. Code 50 is `Error::Timeout`. Collection / database / operation `timeoutMS`, `timeoutMode`, GridFS lifetime, tailable / change-stream iteration. Official CSOT UTF is 27 files.
-- Load-balancer pin, `serviceId` on command and pool-cleared events, wait-queue cursor/txn counts, pool clear per `serviceId`. Local HAProxy UTF is wired.
+- CSOT `timeoutMS`: remaining time becomes `maxTimeMS`. Code 50 is `Error::Timeout`. Collection / database / operation `timeoutMS`, `timeoutMode`, GridFS lifetime, tailable / change-stream iteration. `run_command` / `run_cursor_command`. Official CSOT UTF is 28 files.
+- Load-balancer pin, `serviceId` on command and pool-cleared events, wait-queue cursor/txn counts, pool clear per `serviceId`. Retryable reads/writes after `failCommand` / `closeConnection`. GitHub load-balanced runs full `crystal spec`.
 - CI matrix: standalone, replica set, sharded, and load-balanced.
 
-**Not done (see ROADMAP Phase 2 leftovers and Phase 3+)**
-- CSOT `runCursorCommand` helper and JSON.
+**Not done (see ROADMAP Phase 3+)**
 - Unified `pool-cleared-error.json` (still skipped).
-- Full `crystal spec` on load-balanced (failCommand / closeConnection).
 - `MONGODB-AWS`, `MONGODB-OIDC`, CSFLE.
 - Connection-pool lock cleanup for true parallel execution contexts.
 - Compression.
@@ -167,7 +165,7 @@ puts cursor.of(User).to_a.to_pretty_json
 - **[Indexes](https://docs.mongodb.com/manual/indexes/index.html)**
 - **[GridFS](https://docs.mongodb.com/manual/core/gridfs/index.html)** (methods accept `session:`)
 - **[Change Streams](https://docs.mongodb.com/manual/changeStreams/index.html)** (`#next` waits; use `#try_next` to poll)
-- **[Admin/Diagnostic commands](docs/Mongo/Commands.html)**
+- **[Admin/Diagnostic commands](docs/Mongo/Commands.html)** and raw `Database#run_command` / `#run_cursor_command`
 - **[Tailable and Awaitable cursors](https://docs.mongodb.com/manual/core/tailable-cursors/index.html)**
 - **[Collation](https://docs.mongodb.com/manual/reference/collation/index.html)**
 - **Standalone, [Sharded](https://docs.mongodb.com/manual/sharding/) or [ReplicaSet](https://docs.mongodb.com/manual/replication/) topologies**
@@ -328,6 +326,15 @@ counter = collection.count_documents({ age: { "$lt": 18 }})
 
 # Estimated count (also Int64)
 counter = collection.estimated_document_count
+
+# Raw command (not retryable; database read/write concern is not applied).
+database = client["database_name"]
+ping = database.run_command({ping: 1})
+puts ping["ok"]
+
+# Command that returns a cursor. getMore stays on the same server.
+cursor = database.run_cursor_command({find: "collection_name", batchSize: 2}, batch_size: 2)
+cursor.each { |doc| puts doc.to_json }
 ```
 
 **Links**

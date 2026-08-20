@@ -91,6 +91,8 @@ module Mongo::Unified::Dispatcher
                when "listIndexes"                              then execute_list_indexes(args, target, session)
                when "listIndexNames"                           then execute_list_index_names(args, target, session)
                when "runCommand"                               then execute_run_command(args, target, session)
+               when "runCursorCommand"                         then execute_run_cursor_command(args, target, session)
+               when "createCommandCursor"                      then execute_create_command_cursor(args, target, session, op, registry)
                when "createChangeStream"                       then execute_create_change_stream(args, target, session)
                when "aggregate"                                then execute_aggregate(args, target, session)
                when "countDocuments"                           then execute_count_documents(args, target, session)
@@ -128,6 +130,8 @@ module Mongo::Unified::Dispatcher
       if (entity_name = op.saveResultAsEntity) && result
         if result.is_a?(Mongo::Cursor)
           registry.cursors[entity_name] = result
+        elsif result.is_a?(Mongo::Collection)
+          registry.collections[entity_name] = result
         elsif result.is_a?(BSON::Value)
           registry.entities[entity_name] = result
         end

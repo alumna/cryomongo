@@ -105,50 +105,60 @@ class Mongo::Cursor
   end
 
   def next
-    loop do
-      if (limit = @limit) && @yielded >= limit
-        return Iterator::Stop::INSTANCE
+    owns_iteration = start_iteration_deadline
+    begin
+      loop do
+        if (limit = @limit) && @yielded >= limit
+          return Iterator::Stop::INSTANCE
+        end
+
+        if element = next_from_batch
+          @yielded += 1
+          return element
+        end
+
+        # Tailable / awaitData / change streams stay open on an empty getMore.
+        # Only a closed cursor (id 0) means the iteration is over.
+        return Iterator::Stop::INSTANCE if @cursor_id == 0
+
+        fetch_more
+
+        # Non-tailable: an empty getMore means the result is exhausted.
+        # Tailable / change streams stay open and wait again.
+        if !@tailable && batch_empty?
+          return Iterator::Stop::INSTANCE
+        end
       end
-
-      if element = next_from_batch
-        @yielded += 1
-        return element
-      end
-
-      # Tailable / awaitData / change streams stay open on an empty getMore.
-      # Only a closed cursor (id 0) means the iteration is over.
-      return Iterator::Stop::INSTANCE if @cursor_id == 0
-
-      fetch_more
-
-      # Non-tailable: an empty getMore means the result is exhausted.
-      # Tailable / change streams stay open and wait again.
-      if !@tailable && batch_empty?
-        return Iterator::Stop::INSTANCE
-      end
+    ensure
+      @iteration_deadline = nil if owns_iteration
     end
   end
 
   # One getMore at most. Returns `nil` when the batch is empty and the cursor is
   # still open (normal for tailable and change-stream cursors).
   def try_next : BSON?
-    return nil if (limit = @limit) && @yielded >= limit
+    owns_iteration = start_iteration_deadline
+    begin
+      return nil if (limit = @limit) && @yielded >= limit
 
-    if element = next_from_batch
-      @yielded += 1
-      return element
+      if element = next_from_batch
+        @yielded += 1
+        return element
+      end
+
+      return nil if @cursor_id == 0
+
+      fetch_more
+
+      if element = next_from_batch
+        @yielded += 1
+        return element
+      end
+
+      nil
+    ensure
+      @iteration_deadline = nil if owns_iteration
     end
-
-    return nil if @cursor_id == 0
-
-    fetch_more
-
-    if element = next_from_batch
-      @yielded += 1
-      return element
-    end
-
-    nil
   end
 
   # Close the cursor and frees underlying resources.
@@ -260,6 +270,16 @@ class Mongo::Cursor
     end
 
     reply
+  end
+
+  # timeoutMode iteration: each next/try_next gets a fresh timeoutMS.
+  # Change streams set @iteration_deadline first so this returns false.
+  private def start_iteration_deadline : Bool
+    return false unless @timeout_mode.iteration?
+    return false unless @timeout_ms
+    return false if @iteration_deadline
+    @iteration_deadline = Mongo::Deadline.from_timeout_ms(@timeout_ms)
+    true
   end
 
   private def get_more_deadline : Mongo::Deadline?

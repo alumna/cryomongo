@@ -140,12 +140,15 @@ class Mongo::SDAM::ServerDescription
   end
 
   def supports_retryable_writes?
+    # Load-balanced ServerDescription fields stay unset (no monitors).
+    return true if @type.load_balancer?
     @max_wire_version >= 6 &&
       @logical_session_timeout_minutes &&
       !@type.standalone?
   end
 
   def supports_retryable_reads?
+    return true if @type.load_balancer?
     @max_wire_version >= 6
   end
 

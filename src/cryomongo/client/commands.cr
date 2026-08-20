@@ -692,6 +692,12 @@ class Mongo::Client
       result.cursor.id != 0
     when Cursor
       true
+    when BSON
+      if id = bson_cursor_id(result)
+        id != 0
+      else
+        false
+      end
     else
       false
     end
@@ -703,6 +709,24 @@ class Mongo::Client
       result.cursor.id
     when Commands::GetMore::Result
       result.cursor.id
+    when BSON
+      bson_cursor_id(result)
+    else
+      nil
+    end
+  end
+
+  # runCommand returns the raw reply. A cursor id in that document must pin
+  # the load-balanced socket the same way Find/Aggregate QueryResult does.
+  private def bson_cursor_id(bson : BSON) : Int64?
+    cursor = bson["cursor"]?
+    return nil unless cursor.is_a?(BSON)
+    id = cursor["id"]?
+    case id
+    when Int64
+      id
+    when Int32
+      id.to_i64
     else
       nil
     end

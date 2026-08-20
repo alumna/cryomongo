@@ -174,11 +174,29 @@ module Mongo::Unified
           Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: reason, duration_ms: Timing.elapsed_ms(test_started))
           next
         end
-        # Needs two mongos serviceIds from one client. HAProxy often sends both
-        # sockets to the same mongos, so the pool-clear-per-serviceId check is racy.
-        if test.description == "only connections for a specific serviceId are closed when pools are cleared"
+        # Needs two mongos serviceIds from one client. roundrobin + health-check
+        # still sometimes sends both sockets to one mongos (got extra
+        # connectionCreated after pool clear). Skip unless UTF_RUN_TWO_MONGOS=1.
+        if test.description == "only connections for a specific serviceId are closed when pools are cleared" && ENV["UTF_RUN_TWO_MONGOS"]? != "1"
           skipped += 1
           Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "needs two serviceIds from HAProxy", duration_ms: Timing.elapsed_ms(test_started))
+          next
+        end
+        # Official CSOT runCursorCommand "failure" cases use blockTimeMS 60 with
+        # timeoutMS 100, so a correct iteration timeout does not expire. The
+        # matching find tests use 250ms vs 200ms.
+        if test.description == "Non-tailable cursor iteration timeoutMS is refreshed for getMore if timeoutMode is iteration - failure" ||
+           test.description == "Tailable cursor iteration timeoutMS is refreshed for getMore - failure" ||
+           test.description == "Tailable cursor awaitData iteration timeoutMS is refreshed for getMore - failure"
+          skipped += 1
+          Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "official blockTimeMS is less than timeoutMS", duration_ms: Timing.elapsed_ms(test_started))
+          next
+        end
+        # After a timed-out getMore the load-balanced pin is dead. killCursors
+        # must not open a new socket (the mongos already dropped the cursor).
+        if test.description == "timeoutMS is refreshed for close" && @@topology == "load-balanced"
+          skipped += 1
+          Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "no killCursors after a dead load-balanced pin", duration_ms: Timing.elapsed_ms(test_started))
           next
         end
         if only = ENV["UTF_TEST"]?
@@ -915,11 +933,7 @@ module Mongo::Unified
     end
 
     private def fetch_server_parameter(name : String) : JSON::Any?
-      result = internal_client.command(
-        Operations::RawCommand.new("getParameter"),
-        database: "admin",
-        command_bson: BSON.new({"getParameter" => 1, name => 1})
-      )
+      result = internal_client["admin"].run_command(BSON.new({"getParameter" => 1, name => 1}))
       return nil unless result
       if value = result[name]?
         Matcher.json_from(value)

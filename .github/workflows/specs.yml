@@ -148,15 +148,7 @@ jobs:
           UTF_TIMING_LOG: tmp/utf-timing.log
         run: |
           mkdir -p tmp
-          if [ "${TOPOLOGY}" = "load-balanced" ]; then
-            # Official load-balancer UTF plus offline unit specs.
-            # A full crystal spec on load-balanced still fails failCommand /
-            # closeConnection files (no monitors in this topology).
-            crystal spec spec/options_spec.cr spec/saslprep_spec.cr spec/handshake_spec.cr spec/redaction_spec.cr spec/rtt_spec.cr spec/server_selection_spec.cr spec/max_staleness_spec.cr spec/auth_connection_string_spec.cr spec/sdam_runner_spec.cr
-            crystal spec spec/unified_runner_spec.cr -e "unified/load-balancers/"
-          else
-            crystal spec
-          fi
+          crystal spec
 
       - name: Upload UTF timing log
         if: always()
