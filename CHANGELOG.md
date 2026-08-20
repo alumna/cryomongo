@@ -22,6 +22,7 @@ Phase 2 of the roadmap started (cloud, GridFS UTF, SASLprep). Official load-bala
 * Upsert reply with `_id: null` deserializes. Duplicate-key write errors expose `code`.
 * GridFS `rename` errors when the file id is missing. UTF `downloadByName` honors `revision`.
 * UTF matcher: `$date` canonical vs relaxed, `$$type` int/long with `$numberInt`.
+* Find omits `tailable` and `awaitData` unless they are true. Sending `tailable: false` broke Versioned API strict (`crud-api-version-1-strict.json`).
 
 ## 0.15.0 - 2026-08-20
 

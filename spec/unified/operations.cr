@@ -425,8 +425,15 @@ module Mongo::Unified::Operations
       hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
       allow_disk_use = args["allowDiskUse"]?.try(&.as_bool)
       max_time_ms = args["maxTimeMS"]?.try(&.as_i64) || args["maxAwaitTimeMS"]?.try(&.as_i64)
-      tailable = args["tailable"]?.try(&.as_bool) || (args["cursorType"]?.try(&.as_s?) == "tailable" || args["cursorType"]?.try(&.as_s?) == "tailableAwait")
-      await_data = args["awaitData"]?.try(&.as_bool) || (args["cursorType"]?.try(&.as_s?) == "tailableAwait")
+      tailable = args["tailable"]?.try(&.as_bool)
+      await_data = args["awaitData"]?.try(&.as_bool)
+      case args["cursorType"]?.try(&.as_s?)
+      when "tailable"
+        tailable = true
+      when "tailableAwait"
+        tailable = true
+        await_data = true
+      end
     end
     comment = args.try(&.["comment"]?).try { |c| json_to_bson_value(c) }
     if target.is_a?(Mongo::GridFS::Bucket)
@@ -973,8 +980,15 @@ module Mongo::Unified::Operations
       allow_disk_use = args["allowDiskUse"]?.try(&.as_bool)
       max_time_ms = args["maxTimeMS"]?.try(&.as_i64) || args["maxAwaitTimeMS"]?.try(&.as_i64)
       comment = args["comment"]?.try { |c| json_to_bson_value(c) }
-      tailable = args["tailable"]?.try(&.as_bool) || (args["cursorType"]?.try(&.as_s?) == "tailable" || args["cursorType"]?.try(&.as_s?) == "tailableAwait")
-      await_data = args["awaitData"]?.try(&.as_bool) || (args["cursorType"]?.try(&.as_s?) == "tailableAwait")
+      tailable = args["tailable"]?.try(&.as_bool)
+      await_data = args["awaitData"]?.try(&.as_bool)
+      case args["cursorType"]?.try(&.as_s?)
+      when "tailable"
+        tailable = true
+      when "tailableAwait"
+        tailable = true
+        await_data = true
+      end
     end
     target.as(Mongo::Collection).find(filter, sort: sort, skip: skip, limit: limit, batch_size: batch_size, collation: collation, hint: hint, allow_disk_use: allow_disk_use, max_time_ms: max_time_ms, comment: comment, session: session, tailable: tailable, await_data: await_data, timeout_ms: op_timeout_ms(args), timeout_mode: op_timeout_mode(args))
   end

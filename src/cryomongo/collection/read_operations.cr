@@ -236,7 +236,7 @@ class Mongo::Collection
       min:                   min.try { BSON.new(min) },
       return_key:            return_key,
       show_record_id:        show_record_id,
-      tailable:              tailable_flag ? true : tailable,
+      tailable:              tailable_flag ? true : nil,
       oplog_replay:          oplog_replay,
       no_cursor_timeout:     no_cursor_timeout,
       await_data:            await_flag ? true : nil,
