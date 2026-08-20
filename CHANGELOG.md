@@ -28,6 +28,8 @@ Phase 2 of the roadmap is done (cloud, GridFS UTF, SASLprep, CSOT, load-balanced
 * Find omits `tailable` and `awaitData` unless they are true. Sending `tailable: false` broke Versioned API strict (`crud-api-version-1-strict.json`).
 * A `runCommand` reply with a cursor id pins the load-balanced socket (the raw BSON is scanned for `cursor.id`).
 * UTF `createCollection` stores the collection entity and sends `capped` / `size` / `max`.
+* `runCommand` does not send `$readPreference` to a standalone, even when the caller asked for a non-primary mode.
+* `getMore` and `killCursors` do not get `readConcern` / `afterClusterTime` (explicit causal sessions).
 
 ## 0.15.0 - 2026-08-20
 

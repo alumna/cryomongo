@@ -106,23 +106,17 @@ class Mongo::Database
   ) : BSON
     body = command.is_a?(BSON) ? command : BSON.new(command)
     name = Commands::RunCommand.first_key(body)
-    result = if rp = read_preference
-               self.command(
-                 Commands::RunCommand.new(name),
-                 command_bson: body,
-                 session: session,
-                 read_preference: rp,
-                 timeout_ms: timeout_ms,
-                 options: {read_preference: rp},
-               )
-             else
-               self.command(
-                 Commands::RunCommand.new(name),
-                 command_bson: body,
-                 session: session,
-                 timeout_ms: timeout_ms,
-               )
-             end
+    # Empty options so mix_read_preference can add $readPreference when the
+    # topology needs it. Do not put read_preference in options here: standalone
+    # must not send $readPreference even if the caller asked for nearest.
+    result = self.command(
+      Commands::RunCommand.new(name),
+      command_bson: body,
+      session: session,
+      read_preference: read_preference,
+      timeout_ms: timeout_ms,
+      options: NamedTuple.new,
+    )
     raise Mongo::Error.new("Command failed to return a result") unless result
     result.as(BSON)
   end
@@ -201,29 +195,17 @@ class Mongo::Database
   end
 
   private def send_run_command(name, body, session, read_preference, timeout_ms, deadline, &)
-    if rp = read_preference
-      self.command(
-        Commands::RunCommand.new(name),
-        command_bson: body,
-        session: session,
-        read_preference: rp,
-        timeout_ms: timeout_ms,
-        deadline: deadline,
-        options: {read_preference: rp},
-      ) { |reply, cmd_session|
-        yield reply, cmd_session
-      }
-    else
-      self.command(
-        Commands::RunCommand.new(name),
-        command_bson: body,
-        session: session,
-        timeout_ms: timeout_ms,
-        deadline: deadline,
-      ) { |reply, cmd_session|
-        yield reply, cmd_session
-      }
-    end
+    self.command(
+      Commands::RunCommand.new(name),
+      command_bson: body,
+      session: session,
+      read_preference: read_preference,
+      timeout_ms: timeout_ms,
+      deadline: deadline,
+      options: NamedTuple.new,
+    ) { |reply, cmd_session|
+      yield reply, cmd_session
+    }
   end
 
   # Get a newly allocated `Mongo::Collection` for the collection named *name*.

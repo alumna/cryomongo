@@ -635,7 +635,13 @@ class Mongo::Client
       add_txn_fields = true
     end
 
-    unless command.is_a?(Commands::EndSessions) || command.is_a?(Commands::Hello)
+    # getMore and killCursors must not get readConcern (including afterClusterTime).
+    takes_read_concern = !command.is_a?(Commands::GetMore) &&
+                         !command.is_a?(Commands::KillCursors) &&
+                         !command.is_a?(Commands::EndSessions) &&
+                         !command.is_a?(Commands::Hello)
+
+    if takes_read_concern
       if session.options.snapshot && !has_read_concern
         read_concern = ReadConcern.new(level: "snapshot", at_cluster_time: session.snapshot_time)
       elsif session.is_transaction? && start_transaction && !has_read_concern
@@ -644,14 +650,14 @@ class Mongo::Client
       if session.is_transaction? && start_transaction
         session.apply_transaction_read_concern = false
       end
-    end
 
-    if !session.is_transaction? && session.options.causal_consistency && read_concern.nil? && !has_read_concern
-      if operation_time = session.operation_time
-        is_read = command.responds_to?(:read_command?) && command.read_command?(**args)
-        is_write = command.responds_to?(:write_command?) && command.write_command?(**args)
-        if is_read || is_write
-          read_concern = ReadConcern.new(after_cluster_time: operation_time)
+      if !session.is_transaction? && session.options.causal_consistency && read_concern.nil? && !has_read_concern
+        if operation_time = session.operation_time
+          is_read = command.responds_to?(:read_command?) && command.read_command?(**args)
+          is_write = command.responds_to?(:write_command?) && command.write_command?(**args)
+          if is_read || is_write
+            read_concern = ReadConcern.new(after_cluster_time: operation_time)
+          end
         end
       end
     end
