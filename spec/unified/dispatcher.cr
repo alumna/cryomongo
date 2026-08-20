@@ -61,7 +61,12 @@ module Mongo::Unified::Dispatcher
                when "downloadByName"                           then execute_download_by_name(args, target)
                when "upload"                                   then execute_upload(args, target)
                when "delete"                                   then execute_gridfs_delete(args, target)
-               when "rename"                                   then execute_gridfs_rename(args, target)
+               when "rename"
+                 if target.is_a?(Mongo::GridFS::Bucket)
+                   execute_gridfs_rename(args, target)
+                 else
+                   execute_rename_collection(args, target, session)
+                 end
                when "iterateUntilDocumentOrError"              then execute_iterate_until_document_or_error(target)
                when "iterateOnce"                              then execute_iterate_once(target)
                when "createFindCursor"                         then execute_create_find_cursor(args, target, session, op, registry)

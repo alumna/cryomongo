@@ -10,6 +10,7 @@ Phase 2 of the roadmap started (cloud, GridFS UTF, SASLprep).
 * **sdam:** SRV polling fiber for `mongodb+srv://` on Sharded or Unknown. Adds and removes mongos hosts. Does not run in load-balanced mode.
 * **load balancer:** Do not pre-create `minPoolSize` sockets. Require `serviceId` on hello. Pin the TCP socket for a transaction and for an open cursor. Unpin returns the socket to the pool.
 * **testing:** UTF ops `iterateUntilDocumentOrError`, `iterateOnce`, `createFindCursor`, GridFS `upload` / `delete` / `rename`, `dropIndex` / `dropIndexes`. Official GridFS, collection-management, and index-management JSON. CLAM `redacted-commands.json` and CRUD `create-null-ids.json` now run.
+* **change streams:** `watch` sends `comment` on aggregate and getMore (string or document).
 
 ### Changed
 * Cursor `finalize` no longer sends `killCursors` or touches the pool (GC thread). Call `#close`, `#each`, or a block `find`.

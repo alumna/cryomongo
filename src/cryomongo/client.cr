@@ -304,6 +304,7 @@ class Mongo::Client
     start_after : BSON? = nil,
     read_concern : ReadConcern? = nil,
     read_preference : ReadPreference? = nil,
+    comment = nil,
     session : Session::ClientSession? = nil,
   ) : Mongo::ChangeStream::Cursor
     ChangeStream::Cursor.new(
@@ -320,6 +321,7 @@ class Mongo::Client
       max_time_ms: max_await_time_ms,
       batch_size: batch_size,
       collation: collation,
+      comment: comment,
       session: session
     )
   end

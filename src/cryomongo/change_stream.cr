@@ -78,6 +78,7 @@ module Mongo::ChangeStream
       collation: Collation?,
       read_concern: ReadConcern?,
       read_preference: ReadPreference?,
+      comment: BSON::Value?,
       collection: Collection::CollectionKey,
       database: String)
     # postBatchResumeToken from the current aggregate/getMore batch.
@@ -96,6 +97,7 @@ module Mongo::ChangeStream
       @yielded = 0
       @session = @session || Session::ClientSession.new(@client)
       @resume_token = options["start_after"]? || options["resume_after"]?
+      @comment = options["comment"]?
 
       @cursor_id = 0
       @batch_size = options["batch_size"]?
@@ -246,6 +248,7 @@ module Mongo::ChangeStream
       collation : Collation? = nil,
       read_concern : ReadConcern? = nil,
       read_preference : ReadPreference? = nil,
+      comment : BSON::Value? = nil,
       collection : Collection::CollectionKey = nil,
       database : String = nil,
     )
@@ -274,6 +277,7 @@ module Mongo::ChangeStream
         options: {
           cursor:    batch_size.try { {batchSize: batch_size} },
           collation: collation,
+          comment:   comment,
         }
       )
     end

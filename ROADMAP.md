@@ -44,7 +44,7 @@ This phase addresses the complexities of running in modern cloud environments, h
 - [ ] **Client-Side Operations Timeout (CSOT):** URI `timeoutMS` starts a deadline used for server selection and socket wait. Full CSOT (maxTimeMS rules, UTF) is still open.
 
 ### Advanced Application Features (Needs Test Hookup)
-- [ ] **Change Streams:** Iterate helpers exist. `clusterTime`, `errors`, and `resume-allowlist` pass on sharded. Four files are skipped (`showExpandedEvents`, pre/post images, resume errorLabels). `change-streams.json` asks for replica set.
+- [ ] **Change Streams:** Iterate helpers exist. `watch` sends `comment`. `change-streams.json` passes on a replica set (22 tests). `clusterTime`, `errors`, and `resume-allowlist` pass on sharded. Four files are skipped (`showExpandedEvents`, pre/post images, resume errorLabels).
 - [x] **GridFS:** Official UTF `upload` / `download` / `downloadByName` / `delete` / `rename` pass on sharded 8.0.
 - [x] **Index Management:** Official `index-rawdata.json` runs (`rawData` ignored on 8.0). Search-index ops still `SKIP_TEST`.
 - [x] **Enumerate Collections & Databases:** Official collection-management UTF runs (create / collMod / listCollections / timeseries / clustered index).

@@ -454,12 +454,13 @@ module Mongo::Unified::Operations
     batch_size = args.try(&.["batchSize"]?).try(&.as_i)
     max_await = args.try(&.["maxAwaitTimeMS"]?).try(&.as_i64)
     full_document = args.try(&.["fullDocument"]?).try(&.as_s)
+    comment = args.try(&.["comment"]?).try { |c| json_to_bson_value(c) }
     if target.is_a?(Mongo::Collection)
-      target.watch(pipeline, batch_size: batch_size, max_await_time_ms: max_await, full_document: full_document, session: session)
+      target.watch(pipeline, batch_size: batch_size, max_await_time_ms: max_await, full_document: full_document, comment: comment, session: session)
     elsif target.is_a?(Mongo::Database)
-      target.watch(pipeline, batch_size: batch_size, max_await_time_ms: max_await, full_document: full_document, session: session)
+      target.watch(pipeline, batch_size: batch_size, max_await_time_ms: max_await, full_document: full_document, comment: comment, session: session)
     elsif target.is_a?(Mongo::Client)
-      target.watch(pipeline, batch_size: batch_size, max_await_time_ms: max_await, full_document: full_document, session: session)
+      target.watch(pipeline, batch_size: batch_size, max_await_time_ms: max_await, full_document: full_document, comment: comment, session: session)
     end
   end
 
@@ -860,6 +861,22 @@ module Mongo::Unified::Operations
     id = json_to_bson_value(args["id"])
     new_name = args["newFilename"].as_s
     target.as(Mongo::GridFS::Bucket).rename(id, new_name)
+  end
+
+  private def execute_rename_collection(args, target, session)
+    raise "Missing arguments" unless args
+    coll = target.as(Mongo::Collection)
+    to = args["to"].as_s
+    drop_target = args["dropTarget"]?.try(&.as_bool)
+    coll.database.command(
+      Mongo::Commands::RenameCollection,
+      collection: coll.name,
+      to: "#{coll.database.name}.#{to}",
+      session: session,
+      options: {
+        drop_target: drop_target,
+      }
+    )
   end
 
   private def execute_iterate_until_document_or_error(target)
