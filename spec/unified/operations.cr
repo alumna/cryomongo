@@ -867,6 +867,16 @@ module Mongo::Unified::Operations
   end
 
   private def count_matching_events(registry : Registry, client_id : String, event : JSON::Any) : Int32
+    if event["poolCreatedEvent"]?
+      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::CMAP::PoolCreatedEvent)
+      }
+    end
+    if event["poolReadyEvent"]?
+      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::CMAP::PoolReadyEvent)
+      }
+    end
     if event["poolClearedEvent"]?
       return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
         e.is_a?(Mongo::Monitoring::CMAP::PoolClearedEvent)

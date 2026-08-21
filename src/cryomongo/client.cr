@@ -155,6 +155,9 @@ class Mongo::Client
       emit_sdam_event(Monitoring::SDAM::TopologyDescriptionChangedEvent.new(
         self.object_id, previous_topology, new_topology.clone
       ))
+      # No monitors. The seed is already usable: create the pool and mark it ready.
+      # Do not fill minPoolSize (load-balanced spec).
+      new_topology.servers.each { |server| ready_pool(server) }
     end
 
     start_srv_poller
@@ -175,12 +178,13 @@ class Mongo::Client
     end
 
     pools_to_close = @pools.lock { |h|
-      values = h.values.dup
+      pairs = h.to_a
       h.clear
-      values
+      pairs
     }
-    pools_to_close.each do |pool|
+    pools_to_close.each do |address, pool|
       pool.close
+      emit_cmap_event(Monitoring::CMAP::PoolClosedEvent.new(address))
     rescue e
       Log.warn { "Error while trying to close connection pool. #{e}" }
     end
@@ -405,6 +409,10 @@ class Mongo::Client
   ############
 
   protected def get_connection(server_description : SDAM::ServerDescription, wait : Time::Span? = nil) : Mongo::Connection
+    # Fallback: a data-bearing server should already have a ready pool from SDAM.
+    if server_description.data_bearing? || topology.type.single? || @options.load_balanced
+      ready_pool(server_description)
+    end
     pool = pool_at(server_description.address) || create_pool(server_description)
 
     emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutStartedEvent.new(server_description.address))
@@ -428,7 +436,8 @@ class Mongo::Client
     @pools.lock { |h| h[address]? }
   end
 
-  # Insert an empty pool under the map lock (no I/O). Fill minPoolSize after unlock.
+  # Insert an empty paused pool under the map lock (no I/O). CMAP PoolCreatedEvent
+  # is emitted once. minPoolSize fill starts from ready_pool after a successful check.
   private def create_pool(server_description : SDAM::ServerDescription) : Mongo::Connection::Pool(Mongo::Connection)
     address = server_description.address
     created = false
@@ -450,10 +459,37 @@ class Mongo::Client
         new_pool
       end
     end
-    if created && !@options.load_balanced
-      pool.ensure_min(@options.min_pool_size)
+    if created
+      emit_cmap_event(Monitoring::CMAP::PoolCreatedEvent.new(address))
     end
     pool
+  end
+
+  # After a successful hello: create the pool if needed, emit PoolReadyEvent once,
+  # then fill minPoolSize in the background (not on load-balanced).
+  protected def ready_pool(server_description : SDAM::ServerDescription) : Nil
+    return if server_description.type.unknown? || server_description.type.rs_ghost?
+    unless server_description.data_bearing? || topology.type.single? || @options.load_balanced
+      return
+    end
+    pool = create_pool(server_description)
+    return unless pool.mark_ready
+    emit_cmap_event(Monitoring::CMAP::PoolReadyEvent.new(server_description.address))
+    return if @options.load_balanced
+    address = server_description.address
+    pool.start_min_size(@options.min_pool_size) do |error|
+      handle_populate_error(address, error)
+    end
+  end
+
+  # Shutdown / recovering hello during minPoolSize fill: mark Unknown and clear.
+  # Handshake network errors are Phase 3.4 (must not change the description).
+  private def handle_populate_error(address : String, error : Exception) : Nil
+    desc = topology.servers.find { |s| s.address == address }
+    return unless desc
+    if error.is_a?(Mongo::Error::Command) && error.state_change?
+      apply_state_change_error(desc, error)
+    end
   end
 
   # Handshake plus auth. Created is emitted before hello. Ready is emitted after auth.

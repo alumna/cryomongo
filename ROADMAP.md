@@ -89,7 +89,7 @@ Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CR
 
 ## Remaining work (MongoDB 8.0, toward production grade)
 
-Phases 1–3 are done. GitHub is green. The driver is production-capable for core 8.0. The items below are still needed to get nearer to an official-driver equivalent on MongoDB **8.0**. Details: `FIXES.md`. Un-skip a UTF file only after it passes.
+Phases 1–3 are done. GitHub is green. The driver is production-capable for core 8.0 (CRUD, sessions, transactions). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). The **3.x** sub-phases below close remaining 8.0 holes. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
 
 ### Out of scope until the user asks
 
@@ -101,59 +101,106 @@ Do not treat these as the next work.
 - **Atlas Search.** Keep `SKIP_TEST` for search-index ops. Do not copy search-index JSON.
 - Official JSON `skipReason` that is a server or spec bug (`lb-connection-establishment.json` on 8.0; CSOT `runCursorCommand` “failure” tests with `blockTimeMS` < `timeoutMS`; DRIVERS-2032 handshake skips).
 
-### Skipped unified SDAM that must run
+### Phase 3.1 — CMAP pool at discovery (this conversation)
 
-Hardcoded in `spec/unified/runner.cr` (`SKIP_FILES` and `/logging-`). These were skipped because the feature is missing. They must not stay skipped.
+Foundation for later CMAP / SDAM files. Create the pool when a monitor check finds a data-bearing server (or on load-balanced init). Emit `poolCreatedEvent` / `poolReadyEvent`. Fill `minPoolSize` in a background fiber after ready. A shutdown command error (code 91) during that fill marks the server Unknown and clears the pool.
 
-- [ ] `interruptInUse-pool-clear.json` — `interruptInUseConnections` (close in-use sockets).
-- [ ] `backpressure-network-error-fail-replicaset.json` and `backpressure-network-timeout-fail-replicaset.json` — `SystemOverloadedError` on handshake network / timeout.
-- [ ] `backpressure-network-error-fail-single.json` and `backpressure-network-timeout-fail-single.json` — same on standalone.
-- [ ] `backpressure-server-description-unchanged-on-min-pool-size-population-error.json` — handshake fail must not change the server description.
-- [ ] `find-shutdown-error.json` and `insert-shutdown-error.json` — ignore stale-generation so UTF does not see two Unknown events.
-- [ ] `hello-command-error.json` and `hello-network-error.json` — monitor hello `failCommand`.
-- [ ] `minPoolSize-error.json` and `pool-clear-min-pool-size-error.json` — `poolCreatedEvent` / `poolReadyEvent`; create the pool at discovery; fill `minPoolSize` in the background.
-- [ ] `serverMonitoringMode.json` — URI `serverMonitoringMode`; `ServerHeartbeatStartedEvent` / `Succeeded` / `Failed`.
-- [ ] `replicaset-emit-topology-changed-before-close.json` — wants 4 topology events. Local one-member `rs0` only gets 3. GitHub Docker is 3 members: **try un-skip there**. Standalone / sharded / load-balanced emit files already run.
-- [ ] `logging-standalone.json`, `logging-replicaset.json`, `logging-sharded.json`, `logging-loadbalanced.json` — SDAM / CMAP log messages.
+- [x] `poolCreatedEvent` / `poolReadyEvent`. Create the pool at discovery, not only on first checkout.
+- [x] Background `minPoolSize` after `poolReadyEvent` (not on the checkout path). Default `minPoolSize` is 0 (CMAP spec).
+- [x] Un-skip `minPoolSize-error.json` (standalone).
+- [x] Honest README: drop the lone BETA. Keep 0.x. Core CRUD / sessions / transactions on MongoDB 8.0.
 
-### UTF ops and files that still raise `SKIP_TEST`
+`pool-clear-min-pool-size-error.json` stays skipped until 3.4 (handshake network during fill) and 3.10 (auth test). Checkout while the pool is paused still allows a new handshake; full paused-checkout (CMAP JSON) is 3.5 / 3.11.
 
-- [ ] `waitForPrimaryChange`, `recordTopologyDescription`, `assertTopologyType` — un-skip `rediscover-quickly-after-step-down.json`.
-- [ ] Client `bulkWrite` — un-skip `crud/client-bulkWrite-*.json`, `retryable-writes/client-bulkWrite-*.json`, `transactions/client-bulkWrite.json`, `causal-consistency-clientBulkWrite.json`.
-- [ ] `let` on find / aggregate / updates / deletes / findOneAnd* — un-skip CRUD `*-let.json` and `aggregate-let.json`.
-- [ ] Legacy `count` command — un-skip `count-rawdata.json`, `retryable-reads/count.json`, `count-serverErrors.json`, `transactions/count.json`.
-- [ ] `mapReduce` — un-skip `retryable-reads/mapReduce.json`.
+GitHub Docker `replicaset` is **one** member, same as local `rs0`. The old note that GitHub is 3 members was wrong. `replicaset-emit-topology-changed-before-close.json` stays skipped until 3.13.
 
-### Auth on the server (not AWS / OIDC)
+### Phase 3.2 — Monitor hello errors
 
-CI sets `auth: true` requirements to not met. After users exist on mongod:
+- [ ] Handle monitor hello command and network `failCommand`.
+- [ ] Un-skip `hello-command-error.json` and `hello-network-error.json`.
+
+### Phase 3.3 — Heartbeat events and `serverMonitoringMode`
+
+- [ ] URI `serverMonitoringMode` (`auto` / `poll` / `stream`).
+- [ ] `ServerHeartbeatStartedEvent` / `Succeeded` / `Failed`.
+- [ ] Un-skip `serverMonitoringMode.json`.
+
+### Phase 3.4 — Handshake backpressure
+
+Handshake network / timeout while filling the pool: `SystemOverloadedError` + `RetryableError`. Do not change the server description.
+
+- [ ] Un-skip `backpressure-network-error-fail-replicaset.json` and `backpressure-network-timeout-fail-replicaset.json`.
+- [ ] Un-skip `backpressure-network-error-fail-single.json` and `backpressure-network-timeout-fail-single.json`.
+- [ ] Un-skip `backpressure-server-description-unchanged-on-min-pool-size-population-error.json`.
+- [ ] Un-skip the non-auth test in `pool-clear-min-pool-size-error.json` if it passes.
+
+### Phase 3.5 — `interruptInUseConnections`
+
+- [ ] Close in-use sockets when the pool is cleared with that flag.
+- [ ] Un-skip `interruptInUse-pool-clear.json`.
+- [ ] Checkout while paused: non-timeout network error that does not mark the server Unknown (needed for official CMAP JSON).
+
+### Phase 3.6 — Concurrent shutdown stale-generation
+
+- [ ] Ignore stale-generation errors so UTF does not see two Unknown events.
+- [ ] Un-skip `find-shutdown-error.json` and `insert-shutdown-error.json`.
+
+### Phase 3.7 — UTF topology helpers
+
+- [ ] `waitForPrimaryChange`, `recordTopologyDescription`, `assertTopologyType`.
+- [ ] Un-skip `rediscover-quickly-after-step-down.json`.
+
+### Phase 3.8 — Collection CRUD leftovers
+
+- [ ] `let` on find / aggregate / updates / deletes / findOneAnd*. Un-skip CRUD `*-let.json` and `aggregate-let.json`.
+- [ ] Legacy `count` command (not `countDocuments`). Un-skip `count-rawdata.json`, `retryable-reads/count.json`, `count-serverErrors.json`, `transactions/count.json`.
+- [ ] `mapReduce` helper. Un-skip `retryable-reads/mapReduce.json`.
+- [ ] Copy GridFS `deleteByName` / `renameByName` (5 of 8 copied) and non-search index-management JSON (1 of 7 copied).
+
+### Phase 3.9 — Client `bulkWrite`
+
+- [ ] Client-level `bulkWrite` (MongoDB 8.0).
+- [ ] Un-skip `crud/client-bulkWrite-*.json`, `retryable-writes/client-bulkWrite-*.json`, `transactions/client-bulkWrite.json`, `causal-consistency-clientBulkWrite.json`.
+
+### Phase 3.10 — Auth on CI, speculative auth, monitor auth
+
+CI sets `auth: true` to not met. After users exist on mongod (not AWS / OIDC):
 
 - [ ] Honor `auth: true` in `meets_requirements?`.
-- [ ] Un-skip `retryable-reads/handshakeError.json` and `retryable-writes/handshakeError.json` (also needs speculative auth).
+- [ ] Speculative auth. Monitor sockets must authenticate.
+- [ ] Un-skip `retryable-reads/handshakeError.json` and `retryable-writes/handshakeError.json`.
 - [ ] Un-skip unified SDAM `auth-error.json`, `auth-misc-command-error.json`, `auth-network-error.json`, `auth-network-timeout-error.json`, `auth-shutdown-error.json`, `pool-clear-checkout-error.json`.
 - [ ] Live SCRAM / X509 / PLAIN prose (X509 needs TLS certs).
-- [ ] Speculative auth. Monitor sockets must authenticate.
 
-### Features still missing on MongoDB 8.0
+### Phase 3.11 — SDAM / CMAP logging and remaining official JSON
 
-- [ ] `poolCreatedEvent` / `poolReadyEvent`. Create the pool when the server is discovered.
-- [ ] `interruptInUseConnections`.
-- [ ] Heartbeat events and `serverMonitoringMode`.
-- [ ] Monitor hello error handling.
-- [ ] Handshake backpressure labels.
-- [ ] SDAM / CMAP logging.
-- [ ] snappy / zstd wire compression (zlib is done).
+- [ ] SDAM / CMAP log messages. Un-skip `logging-standalone.json`, `logging-replicaset.json`, `logging-sharded.json`, `logging-loadbalanced.json`.
+- [ ] CLAM UTF: match `reply` on succeeded / failed events. Copy the other 22 of 23 CLAM files as matching allows.
+- [ ] Copy official CMAP JSON (35 files, none copied) after 3.1 and 3.5 exist.
+
+### Phase 3.12 — URI, compression, sessions, IO, load-balancer leftovers
+
 - [ ] `tls_certificate_key_file_password` and OCSP / CRL flags (parsed, unused).
 - [ ] `auth_mechanism_properties` beyond URI validation (GSSAPI and similar).
+- [ ] snappy / zstd wire compression (zlib is done).
 - [ ] `enableOverloadRetargeting` (parsed, unused).
 - [ ] Fiber-local implicit session (acquire/release still runs per command).
 - [ ] Return the OP_MSG receive buffer to the Channel pool after `BSON.view` (do not claim zero-allocation).
-- [ ] CLAM UTF: match `reply` on succeeded / failed events. Copy the other 22 of 23 CLAM files as matching allows.
-- [ ] Copy official CMAP JSON (35 files, none copied) after pool-ready and interruptInUse exist.
-- [ ] Copy GridFS `deleteByName` / `renameByName` (5 of 8 GridFS files copied) and the non-search index-management files (1 of 7 copied).
 - [ ] Move pool generation / handshake-before-complete from `spec/sdam_runner_spec.cr` into production if the legacy SDAM JSON still needs that.
 - [ ] Load-balanced CSOT: after a dead pin, `killCursors` must not open a new socket (`timeoutMS is refreshed for close`).
 - [ ] Two mongos `serviceId`s from HAProxy (`UTF_RUN_TWO_MONGOS=1`) for `sdam-error-handling.json`.
+
+### Phase 3.13 — Replica-set topology-lifecycle and leftover skip audit
+
+`replicaset-emit-topology-changed-before-close.json` wants **4** `topologyDescriptionChanged` events before close. One-member `rs0` (local **and** GitHub Docker) only gets 3, so `waitForEvent` hangs. Standalone / sharded / load-balanced emit files already run.
+
+- [ ] Add a 3-member replica set (native `scripts/mongo-topology.sh` and GitHub Docker), **or** skip this file only when the set has one member.
+- [ ] Un-skip `replicaset-emit-topology-changed-before-close.json` when the topology can emit 4 events.
+- [ ] Audit leftover skips from Phases 1–3 that should not have stayed skipped.
+
+### Phase 3.14 — Performance review and improvement
+
+Not a spec hole. Review every hot path after 3.1–3.13: allocations, `insertOne` vs Node / Python, pool checkout, BSON receive buffer return, fiber-local sessions if not done in 3.12, DriverBench, and execution-context use. Change only what measurements support.
 
 ---
 
