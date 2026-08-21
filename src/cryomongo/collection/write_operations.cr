@@ -46,10 +46,11 @@ class Mongo::Collection
     comment = nil,
     session : Session::ClientSession? = nil,
     timeout_ms : Int64? = nil,
+    deadline : Mongo::Deadline? = nil,
   ) : Commands::Common::InsertResult?
     raise Mongo::Error.new "Tried to insert an empty document array" unless documents.size > 0
     docs = Commands::Insert.with_ids(documents)
-    result = self.command(Commands::Insert, documents: docs, session: session, timeout_ms: timeout_ms, options: {
+    result = self.command(Commands::Insert, documents: docs, session: session, timeout_ms: timeout_ms, deadline: deadline, options: {
       ordered:                    ordered,
       write_concern:              write_concern,
       bypass_document_validation: bypass_document_validation,

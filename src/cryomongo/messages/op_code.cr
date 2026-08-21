@@ -21,6 +21,8 @@ module Mongo::Messages
     Command = 2010
     # Cluster internal protocol representing a reply to an OP_COMMAND.
     CommandReply = 2011
+    # Compressed opcode body (zlib / snappy / zstd). Wraps another opcode.
+    Compressed = 2012
     # Send a message using the format introduced in MongoDB 3.6.
     Msg = 2013
   end

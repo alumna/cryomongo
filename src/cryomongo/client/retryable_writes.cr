@@ -20,7 +20,10 @@ class Mongo::Client
       deadline
     )
 
-    if !topology.supports_sessions? || !server_description.supports_retryable_writes?
+    # Unknown is temporary. Handshake rediscovers. Standalone has no retryable writes.
+    if !server_description.type.unknown? &&
+       (!topology.supports_sessions? || !server_description.supports_retryable_writes?) &&
+       !session.is_transaction?
       connection, owns = checkout_for_command(server_description, session, provided_connection, deadline)
       session.pin(server_description)
       return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, deadline, owns, **args)
@@ -36,18 +39,24 @@ class Mongo::Client
       begin
         preferred = provided_server || session.server_description
         server_description = live_retryable_write_server(preferred, command, args, read_preference, deadline)
-        if original_error && server_description.type.unknown?
-          # TopologyType Single returns Unknown immediately; handshake rediscovers.
-        elsif !topology.supports_sessions? || !server_description.supports_retryable_writes?
+        # Unknown: handshake rediscovers. Standalone: send once, no txnNumber.
+        if !server_description.type.unknown? &&
+           (!topology.supports_sessions? || !server_description.supports_retryable_writes?) &&
+           !session.is_transaction?
           raise original_error if original_error
-          raise Mongo::Error.new("Sessions or retryable writes not supported")
+          connection, owns = checkout_for_command(server_description, session, provided_connection, deadline)
+          session.pin(server_description)
+          return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, deadline, owns, **args)
         end
 
         connection, owns = checkout_for_command(server_description, session, provided_connection, deadline)
         session.pin(server_description)
         overload_retry = original_error.try(&.retryable_overload?) || false
+        if command.is_a?(Commands::CommitTransaction)
+          session.majority_commit_wc = (attempt > 0 || !!session.transitions_from.try(&.committed?)) && !overload_retry
+        end
         return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, deadline, owns, **args) { |body|
-          apply_retryable_write_body(body, command, session, attempt, overload: overload_retry)
+          apply_retryable_write_body(body, session, server_description)
         }
       rescue error : Mongo::Error
         error.add_retryable_label(server_description.max_wire_version)
@@ -94,9 +103,8 @@ class Mongo::Client
   end
 
   # Prefer a live copy of the pinned server. After closeConnection that
-  # address is Unknown; wait for a suitable server instead of using the stale
-  # pin (which would skip retries). The session stays pinned; pin() refreshes
-  # the description after connect.
+  # address is Unknown. Handshake on get_connection rediscovers it. Waiting
+  # only on the monitor can miss that (pool-cleared-error).
   private def live_retryable_write_server(
     preferred : SDAM::ServerDescription?,
     command,
@@ -109,32 +117,45 @@ class Mongo::Client
       if live && !live.type.unknown? && live.supports_retryable_writes?
         return live
       end
-      # TopologyType Single returns Unknown immediately. Handshake rediscovers.
-      if live && live.type.unknown? && topology.type.single?
-        return live
+      # Handshake this Unknown member only when no other mongos/primary is known.
+      # A sharded commit retry must move to the other mongos (recovery token).
+      if live && live.type.unknown?
+        other_writable = topology.servers.any? { |s|
+          s.address != live.address && (s.type.rs_primary? || s.type.mongos? || s.type.load_balancer?)
+        }
+        return live unless other_writable
+      end
+    end
+    # Waiters after PoolCleared have no pin. Handshake an Unknown member only
+    # when no writable server is already known.
+    writable = false
+    unknown = nil.as(SDAM::ServerDescription?)
+    topology.servers.each do |server|
+      if server.type.rs_primary? || server.type.mongos? || server.type.standalone? || server.type.load_balancer?
+        writable = true
+        break
+      end
+      if unknown.nil? && server.type.unknown?
+        unknown = server
+      end
+    end
+    if !writable
+      if found = unknown
+        return found
       end
     end
     server_selection(command, args, read_preference, deadline)
   end
 
-  private def apply_retryable_write_body(body, command, session, attempt, *, overload = false)
-    if topology.supports_sessions?
-      body["txnNumber"] = session.txn_number unless session.is_transaction?
+  private def apply_retryable_write_body(body, session, server_description)
+    # Same txnNumber as the first attempt, even when the topology is Unknown.
+    # Standalone rejects txnNumber. After handshake the description is Standalone.
+    unless session.is_transaction?
+      live = topology.servers.find { |s| s.address == server_description.address } || server_description
+      if live.type.unknown? || live.supports_retryable_writes?
+        body["txnNumber"] = session.txn_number
+      end
     end
-
-    # Majority WC is for a commit retry after an unknown result. An overload
-    # error means the server did not run the commit, so keep the original WC.
-    # see: https://github.com/mongodb/specifications/blob/master/source/transactions/transactions.rst#majority-write-concern-is-used-when-retrying-committransaction
-    already_committed = command.is_a?(Commands::CommitTransaction) && session.transitions_from.try(&.committed?)
-    unknown_commit_retry = command.is_a?(Commands::CommitTransaction) && attempt > 0 && !overload
-    if already_committed || unknown_commit_retry
-      write_concern = body["writeConcern"]?
-      write_concern = write_concern ? WriteConcern.from_bson(write_concern.as(BSON)) : WriteConcern.new
-      write_concern.w = "majority"
-      write_concern.w_timeout ||= 10_000
-      body = body.copy_with({writeConcern: write_concern})
-    end
-
     body
   end
 

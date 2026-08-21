@@ -35,7 +35,9 @@ class Mongo::Client
   end
 
   private def start_monitoring
-    @monitors.each { spawn &.scan }
+    @monitors.each do |monitor|
+      spawn monitor.scan
+    end
   end
 
   protected def add_monitor(server_description : SDAM::ServerDescription, *, start_monitoring = true)

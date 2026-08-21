@@ -26,8 +26,23 @@ struct Mongo::Messages::Message
       @contents = Mongo::Messages::OpReply.new(io, header)
     when .msg?
       @contents = Mongo::Messages::OpMsg.new(io: io, header: header)
+    when .compressed?
+      inner_header, plain = Messages.read_compressed(io, header)
+      @header = inner_header
+      @contents = contents_from_bytes(inner_header, plain)
     else
       raise Mongo::Error.new "Received unexpected message op_code: #{header.op_code}"
+    end
+  end
+
+  private def contents_from_bytes(header : Header, bytes : Bytes) : Part
+    case header.op_code
+    when .reply?
+      Mongo::Messages::OpReply.new(bytes, header)
+    when .msg?
+      Mongo::Messages::OpMsg.new(bytes, header)
+    else
+      raise Mongo::Error.new "Received unexpected compressed op_code: #{header.op_code}"
     end
   end
 

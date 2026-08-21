@@ -35,23 +35,33 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
 
   def initialize(io : IO, header : Messages::Header)
     size = header.body_size
-    msg_bytes = Bytes.new(size)
-    io.read_fully(msg_bytes)
+    msg_bytes = Messages::BufferPool.checkout(size)
+    begin
+      Messages.read_exact(io, msg_bytes[0, size])
+    rescue error
+      Messages::BufferPool.checkin(msg_bytes)
+      raise error
+    end
+    initialize(msg_bytes, header, used: size)
+  end
+
+  def initialize(msg_bytes : Bytes, header : Messages::Header, used : Int32 = msg_bytes.size)
     @payload_bytes = msg_bytes
-    msg_view = IO::Memory.new(msg_bytes, writable: false)
+    view_bytes = msg_bytes[0, used]
+    msg_view = IO::Memory.new(view_bytes, writable: false)
 
     @flag_bits = Flags.from_value(msg_view.read_bytes(UInt32, IO::ByteFormat::LittleEndian))
     @sections = typeof(@sections).new
 
     has_checksum = @flag_bits.checksum_present?
-    limit_pos = size - (has_checksum ? 4 : 0)
+    limit_pos = used - (has_checksum ? 4 : 0)
 
     while msg_view.pos < limit_pos
       payload_type = msg_view.read_bytes(UInt8, IO::ByteFormat::LittleEndian)
 
       case payload_type
       when 0_u8
-        payload = Messages.read_bson_view(msg_bytes, msg_view)
+        payload = Messages.read_bson_view(view_bytes, msg_view)
         @sections << SectionBody.new(payload)
       when 1_u8
         marker = msg_view.pos
@@ -63,7 +73,7 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
         contents = Array(BSON).new
 
         while msg_view.pos - marker < sequence_size
-          contents << Messages.read_bson_view(msg_bytes, msg_view)
+          contents << Messages.read_bson_view(view_bytes, msg_view)
         end
 
         @sections << SectionDocumentSequence.new(

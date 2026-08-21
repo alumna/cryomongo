@@ -20,6 +20,8 @@ dependencies:
 targets:
   cryomongo:
     main: src/cryomongo.cr
+  driver_bench:
+    main: bench/driver_bench.cr
 
 crystalline:
   main: .crystalline_main.cr

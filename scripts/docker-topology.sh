@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# Start MongoDB 8.0 in Docker. Same layouts as GitHub Actions.
+#
+# Usage:
+#   sudo scripts/docker-topology.sh standalone
+#   sudo scripts/docker-topology.sh replicaset
+#   sudo scripts/docker-topology.sh sharded
+#   sudo scripts/docker-topology.sh load-balanced
+#   sudo scripts/docker-topology.sh stop
+#
+# Needs Docker. Host ports: 27017, and 27016 for a second mongos.
+# load-balanced also maps mongos load-balancer ports 27050 and 27051.
+# After load-balanced: spec/support/run-load-balancer.sh start && source tmp/lb-uri.env
+#
+# Optional: MONGO_IMAGE (default mongo:8.0).
+
+set -euo pipefail
+
+IMAGE="${MONGO_IMAGE:-mongo:8.0}"
+MONGOD_PARAMS="--setParameter enableTestCommands=1 --setParameter acceptApiVersion2=1 --setParameter transactionLifetimeLimitSeconds=20"
+MONGOS_PARAMS="--setParameter enableTestCommands=1 --setParameter acceptApiVersion2=1"
+
+dump_logs() {
+  local name="$1"
+  echo "----- docker logs: $name -----" >&2
+  docker logs "$name" >&2 || true
+}
+
+wait_running() {
+  local name="$1"
+  local extra=()
+  if [ -n "${2:-}" ]; then
+    extra=(--port "$2")
+  fi
+  for _ in $(seq 1 40); do
+    if docker exec "$name" mongosh "${extra[@]}" --quiet --eval 'db.runCommand({ping:1}).ok' >/dev/null 2>&1; then
+      return 0
+    fi
+    if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || echo false)" != "true" ]; then
+      echo "$name is not running" >&2
+      dump_logs "$name"
+      return 1
+    fi
+    sleep 1
+  done
+  echo "timed out waiting for $name" >&2
+  dump_logs "$name"
+  return 1
+}
+
+wait_primary() {
+  local name="$1" port="$2"
+  for _ in $(seq 1 40); do
+    if docker exec "$name" mongosh --port "$port" --quiet --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "$name did not become primary" >&2
+  dump_logs "$name"
+  return 1
+}
+
+stop_all() {
+  docker rm -f mongos2 mongos shard cfg mongo 2>/dev/null || true
+  docker network rm mongo-test 2>/dev/null || true
+}
+
+start_standalone() {
+  stop_all
+  docker run --name mongo -d -p 27017:27017 --tmpfs /data/db "$IMAGE" $MONGOD_PARAMS
+  wait_running mongo
+  echo "standalone is ready on 27017"
+}
+
+start_replicaset() {
+  stop_all
+  docker run --name mongo -d -p 27017:27017 --tmpfs /data/db "$IMAGE" --replSet rs0 $MONGOD_PARAMS
+  wait_running mongo
+  docker exec mongo mongosh --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]})'
+  wait_primary mongo 27017
+  echo "replicaset is ready on 27017"
+}
+
+# $1 = empty or "lb". lb maps PROXY v2 ports and sets loadBalancerPort.
+start_sharded() {
+  local lb="${1:-}"
+  stop_all
+  docker network create mongo-test
+  docker run -d --name cfg --network mongo-test --network-alias cfg --tmpfs /data/db "$IMAGE" \
+    mongod --configsvr --replSet cfg --port 27019 --bind_ip_all $MONGOD_PARAMS
+  docker run -d --name shard --network mongo-test --network-alias shard --tmpfs /data/db "$IMAGE" \
+    mongod --shardsvr --replSet shard0 --port 27018 --bind_ip_all $MONGOD_PARAMS
+  wait_running cfg 27019
+  wait_running shard 27018
+  docker exec cfg mongosh --port 27019 --eval 'rs.initiate({_id:"cfg",configsvr:true,members:[{_id:0,host:"cfg:27019"}]})'
+  docker exec shard mongosh --port 27018 --eval 'rs.initiate({_id:"shard0",members:[{_id:0,host:"shard:27018"}]})'
+  wait_primary cfg 27019
+  wait_primary shard 27018
+
+  local mongos_lb="" mongos2_lb=""
+  local mongos_ports="-p 27017:27017"
+  local mongos2_ports="-p 27016:27017"
+  if [ "$lb" = "lb" ]; then
+    # mongos 8.0 uses --setParameter loadBalancerPort, not --loadBalancerPort.
+    mongos_lb="--setParameter loadBalancerPort=27050"
+    mongos2_lb="--setParameter loadBalancerPort=27051"
+    mongos_ports="-p 27017:27017 -p 27050:27050"
+    mongos2_ports="-p 27016:27017 -p 27051:27051"
+  fi
+
+  docker run -d --name mongos --network mongo-test $mongos_ports "$IMAGE" \
+    mongos --configdb cfg/cfg:27019 --bind_ip_all $MONGOS_PARAMS $mongos_lb
+  wait_running mongos
+  docker exec mongos mongosh --eval 'sh.addShard("shard0/shard:27018")'
+  docker run -d --name mongos2 --network mongo-test $mongos2_ports "$IMAGE" \
+    mongos --configdb cfg/cfg:27019 --bind_ip_all $MONGOS_PARAMS $mongos2_lb
+  wait_running mongos2
+  echo "sharded cluster is ready on 27017 and 27016"
+  if [ "$lb" = "lb" ]; then
+    echo "load-balancer ports: 27050 (mongos 27017) and 27051 (mongos 27016)"
+  fi
+}
+
+start_load_balanced() {
+  start_sharded lb
+  echo "Start HAProxy with: spec/support/run-load-balancer.sh start"
+  echo "Then: source tmp/lb-uri.env"
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  stop) stop_all ;;
+  standalone) start_standalone ;;
+  replicaset) start_replicaset ;;
+  sharded) start_sharded ;;
+  load-balanced) start_load_balanced ;;
+  *)
+    echo "usage: $0 stop|standalone|replicaset|sharded|load-balanced" >&2
+    exit 2
+    ;;
+esac

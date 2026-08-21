@@ -10,7 +10,7 @@ module Mongo::Commands::Hello
 
   # Returns a pair of OP_MSG body and sequences associated with the command and arguments.
   # *client* is the handshake metadata document. Omit it on later heartbeats.
-  def command(appname : String? = nil, legacy : Bool = false, *, client : BSON? = nil, load_balanced : Bool = false)
+  def command(appname : String? = nil, legacy : Bool = false, *, client : BSON? = nil, load_balanced : Bool = false, compression : Array(String) = [] of String)
     cmd_name = legacy ? "isMaster" : "hello"
     body = BSON.build do |builder|
       builder[cmd_name] = 1
@@ -19,6 +19,7 @@ module Mongo::Commands::Hello
       builder["backpressure"] = "2"
       builder["loadBalanced"] = true if load_balanced
       builder["client"] = client if client
+      builder["compression"] = compression
     end
     {body, nil}
   end

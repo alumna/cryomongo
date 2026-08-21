@@ -419,19 +419,24 @@ class Mongo::Client
       # Mark the socket dead so checkin uses reason "error", not "stale".
       connection.close
       Mongo::Log.error(exception: error) { "Network error" } unless server_description
-      # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#network-or-command-error-during-server-check
-      if @options.load_balanced
-        handle_load_balanced_error(server_description, connection, error)
-      else
-        server_description.try { |desc|
-          Mongo::Log.error(exception: error) { "I/O error with server address: #{desc.address}" }
-          description = SDAM::ServerDescription.new(desc.address)
-          description.error = error.message
-          description.last_update_time = desc.last_update_time
-          topology.update(desc, description)
-          close_connection_pool(desc)
-          @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
-        }
+      # After handshake, a socket timeout is a slow operation, not a dead server.
+      # closeConnection / reset still mark Unknown and clear the pool.
+      timeout_after_handshake = error.is_a?(IO::TimeoutError)
+      unless timeout_after_handshake
+        # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#network-or-command-error-during-server-check
+        if @options.load_balanced
+          handle_load_balanced_error(server_description, connection, error)
+        else
+          server_description.try { |desc|
+            Mongo::Log.error(exception: error) { "I/O error with server address: #{desc.address}" }
+            description = SDAM::ServerDescription.new(desc.address)
+            description.error = error.message
+            description.last_update_time = desc.last_update_time
+            topology.update(desc, description)
+            clear_pool(desc)
+            @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
+          }
+        end
       end
       session.try &.dirty = true
       error = Error::Network.new(error)
@@ -475,6 +480,7 @@ class Mongo::Client
 
     raise error
   ensure
+    session.majority_commit_wc = false
     release_connection(connection) if connection && owns_connection
     if end_implicit_session && !keeps_implicit_session?(result)
       session.try &.end if session.try(&.implicit?)
@@ -512,7 +518,7 @@ class Mongo::Client
     description.last_update_time = desc.last_update_time
     description.topology_version = error.topology_version
     topology.update(desc, description)
-    close_connection_pool(desc) if error.shutdown?
+    clear_pool(desc) if error.shutdown?
     @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
   end
 
@@ -611,10 +617,14 @@ class Mongo::Client
     session : Session::ClientSession,
     unacknowledged : Bool,
     command,
-    server_description : SDAM::ServerDescription,
+    _server_description : SDAM::ServerDescription,
     **args,
   ) : BSON
-    return body unless topology.supports_sessions?
+    in_txn = session.is_transaction?
+    # After a state-change the only mongos can be Unknown and LSTM is cleared,
+    # so supports_sessions? is false. Implicit retryable writes still need lsid.
+    # Unacknowledged implicit writes never send session fields.
+    return body if unacknowledged && session.implicit? && !in_txn
 
     if unacknowledged
       # Sessions are not compatible with unacknowledged writes
@@ -628,7 +638,7 @@ class Mongo::Client
     read_concern = nil.as(ReadConcern?)
     has_read_concern = body.has_key?("readConcern")
 
-    if session.is_transaction? && server_description.supports_retryable_writes?
+    if in_txn
       if session.transitions_from.try(&.starting?) || session.apply_transaction_read_concern?
         start_transaction = true
       end
@@ -662,7 +672,7 @@ class Mongo::Client
       end
     end
 
-    return body unless add_lsid || cluster_time || add_txn_fields || read_concern
+    return body unless add_lsid || cluster_time || add_txn_fields || read_concern || session.majority_commit_wc?
 
     body.append do |builder|
       builder["lsid"] = session.session_id if add_lsid
@@ -673,6 +683,26 @@ class Mongo::Client
         builder["autocommit"] = false
       end
       builder["readConcern"] = read_concern if read_concern
+    end
+    # Retry / follow-up commit: keep j and wtimeout, set w to majority.
+    # see: transactions spec, majority write concern when retrying commitTransaction
+    if session.majority_commit_wc? && command.is_a?(Commands::CommitTransaction)
+      raw = body["writeConcern"]?
+      write_concern = raw.is_a?(BSON) ? WriteConcern.from_bson(raw) : WriteConcern.new
+      write_concern.w = "majority"
+      write_concern.w_timeout ||= 10_000_i64
+      old = body
+      body = BSON.build do |builder|
+        old.each { |key, value, code|
+          next if key == "writeConcern"
+          if value.is_a?(BSON) && code.array?
+            builder.append_array(key, value)
+          else
+            builder[key] = value
+          end
+        }
+        builder["writeConcern"] = write_concern
+      end
     end
     body
   end

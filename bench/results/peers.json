@@ -1,0 +1,295 @@
+{
+  "schema": 1,
+  "note": "Published DriverBench or BSON scores from other language drivers. Hardware, MongoDB version, and data files are not the same as cryomongo runs. Use these as a direction check, not a ranking.",
+  "entries": [
+    {
+      "id": "node-js-bson-main-2022",
+      "language": "javascript",
+      "driver": "mongodb/node-mongodb-native",
+      "bson": "js-bson",
+      "year": 2022,
+      "source": {
+        "url": "https://github.com/mongodb/node-mongodb-native/pull/3419",
+        "kind": "github-pr",
+        "ref": "3419",
+        "sample": "main (GitHub Actions job linked in the PR)"
+      },
+      "hardware": "GitHub Actions. Not MongoDB Evergreen DriverBench hosts. GridFS uses the spec ~50 MB file.",
+      "tasks_mb_s": {
+        "flat bson encode": 94.251,
+        "flat bson decode": 82.874,
+        "deep bson encode": 25.002,
+        "deep bson decode": 24.654,
+        "full bson encode": 50.022,
+        "full bson decode": 55.689,
+        "run command hello": 0.040,
+        "find one by id": 2.537,
+        "small insertOne": 0.528,
+        "large insertOne": 13.682,
+        "find many": 33.561,
+        "small insertMany": 13.403,
+        "large insertMany": 16.841,
+        "gridfs upload": 255.173,
+        "gridfs download": 480.759
+      },
+      "composites_mb_s": {
+        "BSONBench": 55.415,
+        "SingleBench": 5.582,
+        "MultiBench": 159.947,
+        "ReadBench": 172.285,
+        "WriteBench": 59.925,
+        "DriverBench": 116.105
+      },
+      "notes": [
+        "First of two samples in PR 3419. This is the unmodified main branch.",
+        "parallelBench was NaN (not implemented in that runner)."
+      ]
+    },
+    {
+      "id": "node-js-bson-js-sdsl-pr-2022",
+      "language": "javascript",
+      "driver": "mongodb/node-mongodb-native",
+      "bson": "js-bson",
+      "year": 2022,
+      "source": {
+        "url": "https://github.com/mongodb/node-mongodb-native/pull/3419",
+        "kind": "github-pr",
+        "ref": "3419",
+        "sample": "perf/migrate-deque branch (same PR, not merged)"
+      },
+      "hardware": "GitHub Actions. Same caveats as node-js-bson-main-2022.",
+      "tasks_mb_s": {
+        "flat bson encode": 116.140,
+        "flat bson decode": 105.610,
+        "deep bson encode": 30.502,
+        "deep bson decode": 31.369,
+        "full bson encode": 58.735,
+        "full bson decode": 76.383,
+        "run command hello": 0.066,
+        "find one by id": 4.001,
+        "small insertOne": 0.820,
+        "large insertOne": 18.726,
+        "find many": 45.298,
+        "small insertMany": 16.440,
+        "large insertMany": 22.129,
+        "gridfs upload": 400.043,
+        "gridfs download": 702.510
+      },
+      "composites_mb_s": {
+        "BSONBench": 69.790,
+        "SingleBench": 7.849,
+        "MultiBench": 237.284,
+        "ReadBench": 250.603,
+        "WriteBench": 91.632,
+        "DriverBench": 171.117
+      },
+      "notes": [
+        "Second sample in PR 3419. The deque change was not merged.",
+        "Use the main sample as the conservative Node floor. This row shows noise plus a small internal change."
+      ]
+    },
+    {
+      "id": "java-evergreen-ascii-2025",
+      "language": "java",
+      "driver": "mongodb/mongo-java-driver",
+      "year": 2025,
+      "source": {
+        "url": "https://github.com/mongodb/mongo-java-driver/pull/1651",
+        "kind": "github-pr",
+        "ref": "1651",
+        "sample": "ASCII DriverBench suite after string-write opts (patched mean)"
+      },
+      "hardware": "MongoDB Evergreen DriverBench hosts. Dedicated machines, official data files.",
+      "tasks_mb_s": {
+        "flat bson encode": 238.03,
+        "deep bson encode": 56.97,
+        "full bson encode": 176.65,
+        "large insertOne": 67.18,
+        "large insertMany": 62.48,
+        "small insertMany": 28.30
+      },
+      "tasks_mb_s_before_opt": {
+        "flat bson encode": 105.49,
+        "deep bson encode": 47.02,
+        "full bson encode": 110.68,
+        "large insertOne": 50.52,
+        "large insertMany": 46.75,
+        "small insertMany": 25.09
+      },
+      "notes": [
+        "Only the tasks published in the PR table. Decode scores and composites were not in that table.",
+        "The PR labeled patched means as ops/s in one column header; the numbers are MB/s (same DriverBench unit)."
+      ]
+    },
+    {
+      "id": "java-evergreen-utf8-2025",
+      "language": "java",
+      "driver": "mongodb/mongo-java-driver",
+      "year": 2025,
+      "source": {
+        "url": "https://github.com/mongodb/mongo-java-driver/pull/1651",
+        "kind": "github-pr",
+        "ref": "1651",
+        "sample": "UTF-8 3-byte character DriverBench suite after string-write opts"
+      },
+      "hardware": "MongoDB Evergreen DriverBench hosts. Documents use 3-byte UTF-8 code units.",
+      "tasks_mb_s": {
+        "flat bson encode": 193.47,
+        "deep bson encode": 124.3,
+        "full bson encode": 151.8,
+        "large insertOne": 53.28,
+        "large insertMany": 46.0,
+        "small insertMany": 53.85
+      },
+      "tasks_mb_s_before_opt": {
+        "flat bson encode": 95.79,
+        "deep bson encode": 91.31,
+        "full bson encode": 86.3,
+        "large insertOne": 42.8,
+        "large insertMany": 35.5,
+        "small insertMany": 43.6
+      },
+      "notes": [
+        "UTF-8 3-byte strings are a harder encode path than ASCII. Compare UTF-8 to UTF-8, not to the ASCII suite."
+      ]
+    },
+    {
+      "id": "python-sync-8.0-2025",
+      "language": "python",
+      "driver": "mongodb/mongo-python-driver",
+      "year": 2025,
+      "source": {
+        "url": "https://github.com/mongodb/mongo-python-driver/pull/2188",
+        "kind": "github-pr",
+        "ref": "2188",
+        "sample": "Shane Harvey 8.0 non-ssl sync column (MB/s)"
+      },
+      "hardware": "MongoDB Evergreen perf hosts. Official DriverBench.",
+      "tasks_mb_s": {
+        "find many": 67.383,
+        "find one by id": 4.449,
+        "gridfs download": 635.621,
+        "gridfs upload": 442.662,
+        "large insertMany": 98.292,
+        "large insertOne": 99.409,
+        "run command hello": 0.065,
+        "small insertMany": 36.707,
+        "small collection bulkWrite mixed": 0.637,
+        "small insertOne": 0.871,
+        "large client bulkWrite insert": 83.661,
+        "small client bulkWrite insert": 23.885,
+        "small client bulkWrite mixed": 1.533
+      },
+      "notes": [
+        "Sync PyMongo column from the async-vs-sync table on PR 2188 (8.0, no TLS).",
+        "LargeDocClientBulkInsert / SmallDocClientBulkInsert are client.bulk_write. cryomongo has no client bulk API.",
+        "SmallDocBulkMixedOps is collection mixed bulkWrite.",
+        "FindManyAndEmptyCursor8Tasks sync 47.116 is a parallel variant, not the spec find-many task."
+      ]
+    },
+    {
+      "id": "python-async-8.0-2025",
+      "language": "python",
+      "driver": "mongodb/mongo-python-driver",
+      "year": 2025,
+      "source": {
+        "url": "https://github.com/mongodb/mongo-python-driver/pull/2188",
+        "kind": "github-pr",
+        "ref": "2188",
+        "sample": "Shane Harvey 8.0 non-ssl async column (MB/s)"
+      },
+      "hardware": "MongoDB Evergreen perf hosts. Official DriverBench.",
+      "tasks_mb_s": {
+        "find many": 69.775,
+        "find one by id": 1.212,
+        "gridfs download": 794.822,
+        "gridfs upload": 502.297,
+        "large insertMany": 96.994,
+        "large insertOne": 153.199,
+        "run command hello": 0.028,
+        "small insertMany": 35.552,
+        "small collection bulkWrite mixed": 0.323,
+        "small insertOne": 0.487
+      },
+      "notes": [
+        "Async PyMongo is faster than sync on GridFS and large insertOne, slower on find one and small insertOne.",
+        "FindOneByID80Tasks 2.128 and FindManyAndEmptyCursor80Tasks 64.478 are extra async-only tasks."
+      ]
+    },
+    {
+      "id": "python-collection-vs-client-bulk-8.0-2024",
+      "language": "python",
+      "driver": "mongodb/mongo-python-driver",
+      "year": 2024,
+      "source": {
+        "url": "https://github.com/mongodb/mongo-python-driver/pull/1796",
+        "kind": "github-pr",
+        "ref": "1796",
+        "sample": "Evergreen perf_8.0_standalone patch, comment by Shane Harvey"
+      },
+      "hardware": "MongoDB Evergreen, MongoDB 8.0 standalone.",
+      "tasks_mb_s": {
+        "large insertMany": 104.507,
+        "small insertMany": 41.530,
+        "small collection bulkWrite mixed": 0.647,
+        "large client bulkWrite insert": 21.087,
+        "small client bulkWrite insert": 8.437,
+        "small client bulkWrite mixed": 1.354
+      },
+      "notes": [
+        "Collection bulkWrite / insertMany is much faster than client.bulk_write in this snapshot.",
+        "cryomongo has no client bulkWrite API yet, so only the collection numbers are a peer for current code."
+      ]
+    },
+    {
+      "id": "go-bson-unmarshal-v2-2025",
+      "language": "go",
+      "driver": "mongodb/mongo-go-driver",
+      "year": 2025,
+      "source": {
+        "url": "https://github.com/mongodb/mongo-go-driver/pull/2022",
+        "kind": "github-pr",
+        "ref": "2022",
+        "sample": "v2 bson BenchmarkUnmarshal after sync.Pool (PR numbers)"
+      },
+      "hardware": "Contributor machine (goos/goarch from the PR, not Evergreen DriverBench). Documents are official-style json.gz in some rows, structs in others.",
+      "tasks_mb_s": {
+        "simple struct decode": 617.22,
+        "nested struct decode": 1843.79,
+        "simple map decode": 244.94,
+        "deep bson json.gz to map": 188.94,
+        "deep bson json.gz to D": 194.56,
+        "flat bson json.gz to map": 312.07,
+        "flat bson json.gz to D": 525.57,
+        "full bson json.gz to map": 221.88,
+        "full bson json.gz to D": 273.38
+      },
+      "notes": [
+        "This is encoding/decoding micro-benchmarks, not DriverBench live tasks. No insertOne / find scores in the PR.",
+        "Crystal BSON decode of hashes is closer to Go decode-to-map than decode-to-struct.",
+        "v1 unmarshal of simple_struct was 773.22 MB/s; nested_struct 2955.96 MB/s. The PR traded some struct speed for map/deep speed."
+      ]
+    },
+    {
+      "id": "go-bson-marshal-code-2022",
+      "language": "go",
+      "driver": "mongodb/mongo-go-driver",
+      "year": 2022,
+      "source": {
+        "url": "https://github.com/mongodb/mongo-go-driver/pull/1323",
+        "kind": "github-pr",
+        "ref": "1323",
+        "sample": "CodeMarshal/CodeUnmarshal after eliminating marshal allocs"
+      },
+      "hardware": "darwin arm64 contributor machine. Dataset is the Go 'code' BSON corpus, not DriverBench flat/deep/full.",
+      "tasks_mib_s": {
+        "CodeUnmarshal": 840.4,
+        "CodeMarshal": 2444.3
+      },
+      "notes": [
+        "Units in the PR are Mi/s (binary mebibytes), not SI MB/s. Multiply by 1.048576 for a rough SI figure (881 / 2562 MB/s).",
+        "Useful only as a compiled-language BSON ceiling, not as a DriverBench row."
+      ]
+    }
+  ]
+}

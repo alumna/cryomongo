@@ -30,7 +30,7 @@ This phase focuses on ensuring the driver is safe, doesn't leak resources, and p
 - [x] **Client Backpressure:** `SystemOverloadedError` backoff. UTF retry-loop / max-attempts files pass.
 - [x] **SDAM RTT:** Monitor updates RTT. Prose test checks a non-zero RTT after heartbeats.
 - [x] **Transactions:** Write concern is not inherited from the collection inside a transaction.
-- [x] **CMAP:** `PoolClearedError` is retried. Prose test passes. The unified `pool-cleared-error.json` file is still skipped (rediscovery race).
+- [x] **CMAP:** `PoolClearedError` is retried. Prose test passes. Unified `pool-cleared-error.json` passes (generation bump, waiters woken, handshake rediscovery).
 
 ---
 
@@ -65,8 +65,8 @@ Phase 2 is done. GitHub runs `crystal spec` on standalone, replica set, sharded,
 - Change-stream `nsType` needs MongoDB 8.1.
 - Search-index UTF needs Atlas. Keep `SKIP_TEST`.
 - Live SCRAM / X509 / PLAIN prose needs users on the server.
-- Unified `pool-cleared-error.json` is a Phase 1 CMAP leftover (rediscovery race) -- try to fix this when you have the opportunity to do so.
-- Compression, AWS, OIDC, and CSFLE are Phase 3–5.
+- Unified `pool-cleared-error.json` passes (pool generation + handshake rediscovery).
+- Compression zlib is Phase 3 (done). AWS, OIDC, and CSFLE are Phase 4–5. snappy / zstd are later.
 
 ---
 
@@ -74,18 +74,20 @@ Phase 2 is done. GitHub runs `crystal spec` on standalone, replica set, sharded,
 
 This phase optimizes the driver to take full advantage of Crystal's new `-Dpreview_mt` / `Execution Contexts` and reduces network overhead.
 
+Phase 3 is done for the items in this phase. Local replica set is green: 776 examples, 0 failures, 104 pending, including `CRYSTAL_WORKERS=2 crystal spec -Dpreview_mt -Dexecution_context` with `compressors=zlib`. GitHub should run the same flags on every topology. snappy / zstd and a fiber-local implicit session are later work. Details are in `FIXES.md`.
+
 ### Concurrency
-- [ ] **CI Parallel Testing:** Ensure the CI pipeline compiles the test suite with `crystal spec -Dpreview_mt -Dexecution_context` to surface potential race conditions under true parallel thread execution.
-- [ ] **Connection Pool Refactoring:** Analyze and remove nested `Sync::Mutex` locks in `Mongo::Connection::Pool` and `Mongo::Client#get_connection` to prevent thread starvation under high fiber contention. 
+- [x] **CI Parallel Testing:** GitHub runs `crystal spec -Dpreview_mt -Dexecution_context` and sets `CRYSTAL_WORKERS=2` so the default execution context is resized.
+- [x] **Connection Pool Refactoring:** One lock for the address-to-pool map. Handshake I/O no longer nests that lock with a per-address mutex.
 
 ### Zero-Allocation & Network I/O
-- [ ] **Compression (OP_COMPRESSED):** Implement wire protocol compression (zlib, snappy, or zstd) to drastically reduce bandwidth on large queries.
-- [ ] **Greedy Network Reads:** Upgrade socket reading to use Crystal 1.20's `IO#read_greedy` combined with a `Channel(Bytes)` buffer pool to eliminate repetitive `Bytes` slice allocations per incoming `OP_MSG`.
-- [ ] **SDAM Event Optimization:** Ensure APM/SDAM `Monitoring::Observable` broadcasts do not allocate intermediate arrays or closure objects in the hot path.
-- [ ] **Reduced or zero-allocation:** Check the codebase for all possible opportunities to reduce allocations even more, including zero-allocation operations whenever possible.
+- [x] **Compression (OP_COMPRESSED):** zlib on the wire. URI `compressors` / `zlibCompressionLevel`. snappy and zstd are not wired yet.
+- [x] **Greedy Network Reads:** OP_MSG / OP_REPLY / header use `IO#read_greedy` and a `Channel(Bytes)` buffer pool. A short frame raises `IO::EOFError` (retryable network error).
+- [x] **SDAM Event Optimization:** `Monitoring::Observable` copy-on-write subscriber list. Broadcast does not allocate a copy on the hot path.
+- [x] **Reduced or zero-allocation:** Server-selection pick without a window Array. GridFS batched `insertMany` and one find cursor for download (zero-length files do not query chunks). Connection compression staging reuses `IO::Memory`.
 
 ### Validation
-- [ ] **Benchmarking:** Implement the official MongoDB Driver Benchmarking spec to formally measure and prove the performance gains of the zero-allocation BSON and Crystal 1.21 optimizations.
+- [x] **Benchmarking:** `bench/driver_bench.cr` runs BSON DriverBench plus live single-doc / multi-doc / GridFS / fiber-parallel insert when `MONGODB_URI` is set. `BENCH_FULL=1` uses the spec time bounds. Each run writes JSON under `bench/results/`. See [BENCHMARK.md](BENCHMARK.md).
 
 ---
 

@@ -23,7 +23,7 @@ module Mongo::SDAM::Selector
     when .unknown?
       [] of ServerDescription
     when .single?
-      servers.dup
+      servers
     when .load_balanced?
       servers.select(&.type.load_balancer?)
     when .sharded?
@@ -54,9 +54,24 @@ module Mongo::SDAM::Selector
 
   # One server from the latency window, or nil if the list is empty.
   def pick(servers : Array(ServerDescription), local_threshold : Time::Span = DEFAULT_LOCAL_THRESHOLD) : ServerDescription?
-    window = in_latency_window(servers, local_threshold)
-    return window[0]? if window.size < 2
-    window.sample(1)[0]
+    case servers.size
+    when 0
+      nil
+    when 1
+      servers[0]
+    else
+      min_rtt = servers.min_of(&.round_trip_time)
+      n = 0
+      servers.each { |server| n += 1 if server.round_trip_time - min_rtt <= local_threshold }
+      return nil if n == 0
+      chosen = Random.rand(n)
+      servers.each do |server|
+        next unless server.round_trip_time - min_rtt <= local_threshold
+        return server if chosen == 0
+        chosen -= 1
+      end
+      nil
+    end
   end
 
   def validate_max_staleness!(

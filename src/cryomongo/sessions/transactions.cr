@@ -37,6 +37,8 @@ module Mongo::Session
     getter current_transaction_options = TransactionOptions.new
     # True until the first command of the current transaction is assembled (readConcern belongs there).
     property? apply_transaction_read_concern : Bool = false
+    # Retry / follow-up commitTransaction uses majority write concern.
+    property? majority_commit_wc : Bool = false
     # Server description if the session is pinned to a specific mongos.
     getter server_description : SDAM::ServerDescription? = nil
     # Load-balanced: the TCP socket this transaction must keep using.

@@ -13,13 +13,13 @@ jobs:
       matrix:
         include:
           - topology: standalone
-            uri: mongodb://localhost:27017
+            uri: mongodb://localhost:27017/?compressors=zlib
           - topology: replicaset
-            uri: mongodb://localhost:27017/?replicaSet=rs0
+            uri: mongodb://localhost:27017/?replicaSet=rs0&compressors=zlib
           - topology: sharded
-            uri: mongodb://localhost:27017,localhost:27016
+            uri: mongodb://localhost:27017,localhost:27016/?compressors=zlib
           - topology: load-balanced
-            uri: mongodb://127.0.0.1:8000/?loadBalanced=true
+            uri: mongodb://127.0.0.1:8000/?loadBalanced=true&compressors=zlib
     runs-on: ubuntu-24.04
     name: MongoDB 8.0 ${{ matrix.topology }}
     steps:
@@ -27,101 +27,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Start MongoDB ${{ matrix.topology }} (8.0)
-        env:
-          TOPOLOGY: ${{ matrix.topology }}
-        run: |
-          set -euo pipefail
-          MONGOD_PARAMS="--setParameter enableTestCommands=1 --setParameter acceptApiVersion2=1 --setParameter transactionLifetimeLimitSeconds=20"
-          # mongos rejects mongod-only parameters such as transactionLifetimeLimitSeconds
-          MONGOS_PARAMS="--setParameter enableTestCommands=1 --setParameter acceptApiVersion2=1"
-
-          dump_logs() {
-            local name="$1"
-            echo "----- docker logs: $name -----" >&2
-            docker logs "$name" >&2 || true
-          }
-
-          wait_running() {
-            local name="$1"
-            local extra=()
-            if [ -n "${2:-}" ]; then
-              extra=(--port "$2")
-            fi
-            for _ in $(seq 1 40); do
-              if docker exec "$name" mongosh "${extra[@]}" --quiet --eval 'db.runCommand({ping:1}).ok' >/dev/null 2>&1; then
-                return 0
-              fi
-              if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || echo false)" != "true" ]; then
-                echo "$name is not running" >&2
-                dump_logs "$name"
-                return 1
-              fi
-              sleep 1
-            done
-            echo "timed out waiting for $name" >&2
-            dump_logs "$name"
-            return 1
-          }
-
-          wait_primary() {
-            local name="$1" port="$2"
-            for _ in $(seq 1 40); do
-              if docker exec "$name" mongosh --port "$port" --quiet --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)' >/dev/null 2>&1; then
-                return 0
-              fi
-              sleep 1
-            done
-            echo "$name did not become primary" >&2
-            dump_logs "$name"
-            return 1
-          }
-
-          case "$TOPOLOGY" in
-            standalone)
-              docker run --name mongo -d -p 27017:27017 --tmpfs /data/db mongo:8.0 $MONGOD_PARAMS
-              wait_running mongo
-              ;;
-            replicaset)
-              docker run --name mongo -d -p 27017:27017 --tmpfs /data/db mongo:8.0 --replSet rs0 $MONGOD_PARAMS
-              wait_running mongo
-              docker exec mongo mongosh --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]})'
-              wait_primary mongo 27017
-              ;;
-            sharded|load-balanced)
-              docker network create mongo-test
-              docker run -d --name cfg --network mongo-test --network-alias cfg --tmpfs /data/db mongo:8.0 \
-                mongod --configsvr --replSet cfg --port 27019 --bind_ip_all $MONGOD_PARAMS
-              docker run -d --name shard --network mongo-test --network-alias shard --tmpfs /data/db mongo:8.0 \
-                mongod --shardsvr --replSet shard0 --port 27018 --bind_ip_all $MONGOD_PARAMS
-              wait_running cfg 27019
-              wait_running shard 27018
-              docker exec cfg mongosh --port 27019 --eval 'rs.initiate({_id:"cfg",configsvr:true,members:[{_id:0,host:"cfg:27019"}]})'
-              docker exec shard mongosh --port 27018 --eval 'rs.initiate({_id:"shard0",members:[{_id:0,host:"shard:27018"}]})'
-              wait_primary cfg 27019
-              wait_primary shard 27018
-              # load-balanced UTF talks to HAProxy PROXY v2 on 8000/8001. mongos 8.0
-              # takes --setParameter loadBalancerPort (not --loadBalancerPort).
-              mongos_lb=""
-              mongos2_lb=""
-              mongos_ports="-p 27017:27017"
-              mongos2_ports="-p 27016:27017"
-              if [ "$TOPOLOGY" = "load-balanced" ]; then
-                mongos_lb="--setParameter loadBalancerPort=27050"
-                mongos2_lb="--setParameter loadBalancerPort=27051"
-                mongos_ports="-p 27017:27017 -p 27050:27050"
-                mongos2_ports="-p 27016:27017 -p 27051:27051"
-              fi
-              docker run -d --name mongos --network mongo-test $mongos_ports mongo:8.0 \
-                mongos --configdb cfg/cfg:27019 --bind_ip_all $MONGOS_PARAMS $mongos_lb
-              wait_running mongos
-              docker exec mongos mongosh --eval 'sh.addShard("shard0/shard:27018")'
-              # Pin / recovery-token UTF needs two mongos (useMultipleMongoses: true).
-              docker run -d --name mongos2 --network mongo-test $mongos2_ports mongo:8.0 \
-                mongos --configdb cfg/cfg:27019 --bind_ip_all $MONGOS_PARAMS $mongos2_lb
-              wait_running mongos2
-              ;;
-          esac
-
+        run: scripts/docker-topology.sh ${{ matrix.topology }}
       - name: Install HAProxy (load-balanced)
         if: matrix.topology == 'load-balanced'
         run: |
@@ -143,12 +49,13 @@ jobs:
         env:
           TOPOLOGY: ${{ matrix.topology }}
           MONGODB_URI: ${{ matrix.uri }}
-          SINGLE_MONGOS_LB_URI: mongodb://127.0.0.1:8000/?loadBalanced=true
-          MULTI_MONGOS_LB_URI: mongodb://127.0.0.1:8001/?loadBalanced=true
+          SINGLE_MONGOS_LB_URI: mongodb://127.0.0.1:8000/?loadBalanced=true&compressors=zlib
+          MULTI_MONGOS_LB_URI: mongodb://127.0.0.1:8001/?loadBalanced=true&compressors=zlib
           UTF_TIMING_LOG: tmp/utf-timing.log
+          CRYSTAL_WORKERS: "2"
         run: |
           mkdir -p tmp
-          crystal spec
+          crystal spec -Dpreview_mt -Dexecution_context
 
       - name: Upload UTF timing log
         if: always()

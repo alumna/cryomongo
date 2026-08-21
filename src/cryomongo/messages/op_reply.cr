@@ -35,10 +35,20 @@ struct Mongo::Messages::OpReply < Mongo::Messages::Part
 
   def initialize(io : IO, header : Messages::Header)
     size = header.body_size
-    msg_bytes = Bytes.new(size)
-    io.read_fully(msg_bytes)
+    msg_bytes = Messages::BufferPool.checkout(size)
+    begin
+      Messages.read_exact(io, msg_bytes[0, size])
+    rescue error
+      Messages::BufferPool.checkin(msg_bytes)
+      raise error
+    end
+    initialize(msg_bytes, header, used: size)
+  end
+
+  def initialize(msg_bytes : Bytes, header : Messages::Header, used : Int32 = msg_bytes.size)
     @payload_bytes = msg_bytes
-    msg_view = IO::Memory.new(msg_bytes, writable: false)
+    view_bytes = msg_bytes[0, used]
+    msg_view = IO::Memory.new(view_bytes, writable: false)
 
     @response_flags = ResponseFlags.from_value(msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian))
     @cursor_id = msg_view.read_bytes(Int64, IO::ByteFormat::LittleEndian)
@@ -47,8 +57,8 @@ struct Mongo::Messages::OpReply < Mongo::Messages::Part
 
     @documents = [] of BSON
 
-    while msg_view.pos < size
-      @documents << Messages.read_bson_view(msg_bytes, msg_view)
+    while msg_view.pos < used
+      @documents << Messages.read_bson_view(view_bytes, msg_view)
     end
   end
 end
