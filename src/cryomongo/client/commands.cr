@@ -621,10 +621,10 @@ class Mongo::Client
     **args,
   ) : BSON
     in_txn = session.is_transaction?
-    # After a network / state-change error the selected server can be Unknown
-    # and the topology can look like it has no sessions. commit, abort, and
-    # retryable writes still need lsid / txnNumber / autocommit.
-    return body unless topology.supports_sessions? || in_txn || !session.implicit?
+    # After a state-change the only mongos can be Unknown and LSTM is cleared,
+    # so supports_sessions? is false. Implicit retryable writes still need lsid.
+    # Unacknowledged implicit writes never send session fields.
+    return body if unacknowledged && session.implicit? && !in_txn
 
     if unacknowledged
       # Sessions are not compatible with unacknowledged writes

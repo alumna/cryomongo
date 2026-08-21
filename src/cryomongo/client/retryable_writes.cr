@@ -39,11 +39,14 @@ class Mongo::Client
       begin
         preferred = provided_server || session.server_description
         server_description = live_retryable_write_server(preferred, command, args, read_preference, deadline)
-        if server_description.type.unknown?
-          # Handshake rediscovers. Do not treat Unknown as "retryable writes off".
-        elsif !topology.supports_sessions? || !server_description.supports_retryable_writes?
+        # Unknown: handshake rediscovers. Standalone: send once, no txnNumber.
+        if !server_description.type.unknown? &&
+           (!topology.supports_sessions? || !server_description.supports_retryable_writes?) &&
+           !session.is_transaction?
           raise original_error if original_error
-          raise Mongo::Error.new("Sessions or retryable writes not supported")
+          connection, owns = checkout_for_command(server_description, session, provided_connection, deadline)
+          session.pin(server_description)
+          return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, deadline, owns, **args)
         end
 
         connection, owns = checkout_for_command(server_description, session, provided_connection, deadline)
@@ -53,7 +56,7 @@ class Mongo::Client
           session.majority_commit_wc = (attempt > 0 || !!session.transitions_from.try(&.committed?)) && !overload_retry
         end
         return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, deadline, owns, **args) { |body|
-          apply_retryable_write_body(body, session)
+          apply_retryable_write_body(body, session, server_description)
         }
       rescue error : Mongo::Error
         error.add_retryable_label(server_description.max_wire_version)
@@ -114,8 +117,13 @@ class Mongo::Client
       if live && !live.type.unknown? && live.supports_retryable_writes?
         return live
       end
+      # Handshake this Unknown member only when no other mongos/primary is known.
+      # A sharded commit retry must move to the other mongos (recovery token).
       if live && live.type.unknown?
-        return live
+        other_writable = topology.servers.any? { |s|
+          s.address != live.address && (s.type.rs_primary? || s.type.mongos? || s.type.load_balancer?)
+        }
+        return live unless other_writable
       end
     end
     # Waiters after PoolCleared have no pin. Handshake an Unknown member only
@@ -139,9 +147,15 @@ class Mongo::Client
     server_selection(command, args, read_preference, deadline)
   end
 
-  private def apply_retryable_write_body(body, session)
+  private def apply_retryable_write_body(body, session, server_description)
     # Same txnNumber as the first attempt, even when the topology is Unknown.
-    body["txnNumber"] = session.txn_number unless session.is_transaction?
+    # Standalone rejects txnNumber. After handshake the description is Standalone.
+    unless session.is_transaction?
+      live = topology.servers.find { |s| s.address == server_description.address } || server_description
+      if live.type.unknown? || live.supports_retryable_writes?
+        body["txnNumber"] = session.txn_number
+      end
+    end
     body
   end
 

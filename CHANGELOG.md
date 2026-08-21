@@ -20,7 +20,7 @@ Phase 3 of the roadmap: pool locks, parallel spec CI, zlib OP_COMPRESSED, less w
 * **utf:** Outcome documents are read with sort `{_id: 1}`. Unified SDAM files that only need existing ops now run (still skipped: interruptInUse, logging, handshake backpressure labels, concurrent shutdown extra Unknown, minPoolSize pool-ready, monitor hello errors, heartbeat events, replica-set topology-lifecycle). Standalone / sharded / load-balanced topology-lifecycle files run.
 
 ### Fixed
-* **sessions:** After a network or state-change error, commit / abort and retryable writes still send `lsid`, `txnNumber`, and `autocommit` (the selected server can be Unknown). A commit retry keeps `j` / `wtimeout` and sets `w` to majority. Handshake rediscovers an Unknown member instead of treating it as "retryable writes off".
+* **sessions:** After a network or state-change error, commit / abort and retryable writes still send `lsid`, `txnNumber`, and `autocommit`. That includes an Unknown server and a sharded topology where the only mongos is Unknown and the session timeout is cleared. A commit retry keeps `j` / `wtimeout` and sets `w` to majority. Handshake rediscovers an Unknown member instead of treating it as "retryable writes off". Standalone writes do not send `txnNumber`. A sharded commit retry uses another mongos when one is already known.
 * **utf:** Subscribe to SDAM before monitors start, and `waitForEvent` counts `topologyDescriptionChangedEvent`.
 * **io:** A short socket read after `read_greedy` is `IO::EOFError` again. A generic `Mongo::Error` skipped retry and pool clear on failCommand `closeConnection`.
 * **gridfs:** A zero-length download does not query chunks (GridFS spec). An extra empty chunk is ignored.
