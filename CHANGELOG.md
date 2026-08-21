@@ -17,9 +17,11 @@ Phase 3 of the roadmap: pool locks, parallel spec CI, zlib OP_COMPRESSED, less w
 * **selection:** `Selector.pick` does not build a latency-window Array.
 * **gridfs:** Upload sends chunk `insertMany` batches. Download reads chunks with one find cursor. Upload fills each chunk with `read_greedy`. A zero-length file does not query chunks.
 * **io:** OP_MSG / OP_REPLY / header reads use `read_greedy`. A short frame raises `IO::EOFError` (same as `read_fully`) so retryable reads/writes and pool clear still treat it as a network error. A `Channel(Bytes)` pool lends receive buffers.
-* **utf:** Outcome documents are read with sort `{_id: 1}`. Unified SDAM files that only need existing ops now run (still skipped: interruptInUse, logging, handshake backpressure labels, concurrent shutdown extra Unknown, topology-lifecycle events).
+* **utf:** Outcome documents are read with sort `{_id: 1}`. Unified SDAM files that only need existing ops now run (still skipped: interruptInUse, logging, handshake backpressure labels, concurrent shutdown extra Unknown, minPoolSize pool-ready, monitor hello errors, heartbeat events, replica-set topology-lifecycle). Standalone / sharded / load-balanced topology-lifecycle files run.
 
 ### Fixed
+* **sessions:** After a network or state-change error, commit / abort and retryable writes still send `lsid`, `txnNumber`, and `autocommit` (the selected server can be Unknown). A commit retry keeps `j` / `wtimeout` and sets `w` to majority. Handshake rediscovers an Unknown member instead of treating it as "retryable writes off".
+* **utf:** Subscribe to SDAM before monitors start, and `waitForEvent` counts `topologyDescriptionChangedEvent`.
 * **io:** A short socket read after `read_greedy` is `IO::EOFError` again. A generic `Mongo::Error` skipped retry and pool clear on failCommand `closeConnection`.
 * **gridfs:** A zero-length download does not query chunks (GridFS spec). An extra empty chunk is ignored.
 

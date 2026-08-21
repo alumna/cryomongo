@@ -20,7 +20,10 @@ class Mongo::Client
       deadline
     )
 
-    if !topology.supports_sessions? || !server_description.supports_retryable_writes?
+    # Unknown is temporary. Handshake rediscovers. Standalone has no retryable writes.
+    if !server_description.type.unknown? &&
+       (!topology.supports_sessions? || !server_description.supports_retryable_writes?) &&
+       !session.is_transaction?
       connection, owns = checkout_for_command(server_description, session, provided_connection, deadline)
       session.pin(server_description)
       return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, deadline, owns, **args)
@@ -36,8 +39,8 @@ class Mongo::Client
       begin
         preferred = provided_server || session.server_description
         server_description = live_retryable_write_server(preferred, command, args, read_preference, deadline)
-        if original_error && server_description.type.unknown?
-          # TopologyType Single returns Unknown immediately; handshake rediscovers.
+        if server_description.type.unknown?
+          # Handshake rediscovers. Do not treat Unknown as "retryable writes off".
         elsif !topology.supports_sessions? || !server_description.supports_retryable_writes?
           raise original_error if original_error
           raise Mongo::Error.new("Sessions or retryable writes not supported")
@@ -46,8 +49,11 @@ class Mongo::Client
         connection, owns = checkout_for_command(server_description, session, provided_connection, deadline)
         session.pin(server_description)
         overload_retry = original_error.try(&.retryable_overload?) || false
+        if command.is_a?(Commands::CommitTransaction)
+          session.majority_commit_wc = (attempt > 0 || !!session.transitions_from.try(&.committed?)) && !overload_retry
+        end
         return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, deadline, owns, **args) { |body|
-          apply_retryable_write_body(body, command, session, attempt, overload: overload_retry)
+          apply_retryable_write_body(body, session)
         }
       rescue error : Mongo::Error
         error.add_retryable_label(server_description.max_wire_version)
@@ -133,24 +139,9 @@ class Mongo::Client
     server_selection(command, args, read_preference, deadline)
   end
 
-  private def apply_retryable_write_body(body, command, session, attempt, *, overload = false)
-    if topology.supports_sessions?
-      body["txnNumber"] = session.txn_number unless session.is_transaction?
-    end
-
-    # Majority WC is for a commit retry after an unknown result. An overload
-    # error means the server did not run the commit, so keep the original WC.
-    # see: https://github.com/mongodb/specifications/blob/master/source/transactions/transactions.rst#majority-write-concern-is-used-when-retrying-committransaction
-    already_committed = command.is_a?(Commands::CommitTransaction) && session.transitions_from.try(&.committed?)
-    unknown_commit_retry = command.is_a?(Commands::CommitTransaction) && attempt > 0 && !overload
-    if already_committed || unknown_commit_retry
-      write_concern = body["writeConcern"]?
-      write_concern = write_concern ? WriteConcern.from_bson(write_concern.as(BSON)) : WriteConcern.new
-      write_concern.w = "majority"
-      write_concern.w_timeout ||= 10_000
-      body = body.copy_with({writeConcern: write_concern})
-    end
-
+  private def apply_retryable_write_body(body, session)
+    # Same txnNumber as the first attempt, even when the topology is Unknown.
+    body["txnNumber"] = session.txn_number unless session.is_transaction?
     body
   end
 

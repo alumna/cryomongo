@@ -59,6 +59,9 @@ class Mongo::Client
   @commands_observable = Monitoring::Observable(Monitoring::Commands::Event).new
   @sdam_observable = Monitoring::Observable(Monitoring::SDAM::Event).new
   @cmap_observable = Monitoring::Observable(Monitoring::CMAP::Event).new
+  # UTF subscribes before monitors run. Constructor events wait here until then.
+  @pending_sdam_events = [] of Monitoring::SDAM::Event
+  @defer_sdam_events = false
   @handshake_extra = [] of Handshake::DriverInfo
   @handshake_client : BSON? = nil
 
@@ -82,6 +85,7 @@ class Mongo::Client
   def initialize(connection_string : String = "mongodb://localhost:27017", *, options : Mongo::Options = Mongo::Options.new, start_monitoring = true)
     seeds, @options, @credentials, @default_auth_db = Mongo::URI.parse(connection_string, options)
     @monitoring_enabled = start_monitoring
+    @defer_sdam_events = !start_monitoring
 
     if (w = @options.w) || (w_timeout = @options.w_timeout) || (journal = @options.journal)
       @write_concern = WriteConcern.new(w: w, w_timeout: w_timeout.try(&.total_milliseconds.to_i64), j: journal)
@@ -154,6 +158,9 @@ class Mongo::Client
     end
 
     start_srv_poller
+    # Later topology events must reach subscribers (legacy SDAM JSON). Constructor
+    # events stay in @pending_sdam_events until start_sdam_monitoring.
+    @defer_sdam_events = false
   end
 
   # Frees all the resources associated with a client.
@@ -230,7 +237,21 @@ class Mongo::Client
   end
 
   protected def emit_sdam_event(event : Monitoring::SDAM::Event)
-    @sdam_observable.broadcast(event)
+    if @defer_sdam_events
+      @pending_sdam_events << event
+    else
+      @sdam_observable.broadcast(event)
+    end
+  end
+
+  # UTF: subscribe first, then flush constructor events and start monitors.
+  # Production `Client.new` already started monitors; this is a no-op then.
+  def start_sdam_monitoring : Nil
+    return if @monitoring_enabled
+    @monitoring_enabled = true
+    @pending_sdam_events.each { |event| @sdam_observable.broadcast(event) }
+    @pending_sdam_events.clear
+    start_monitoring
   end
 
   ##################

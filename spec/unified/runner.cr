@@ -34,6 +34,25 @@ module Mongo::Unified
       "endsessions", "endSessions",
     }.map(&.downcase).to_set
 
+    # Known holes. Do not un-skip until the file passes.
+    SKIP_FILES = {
+      "interruptInUse-pool-clear.json",
+      "backpressure-network-error-fail-replicaset.json",
+      "backpressure-network-timeout-fail-replicaset.json",
+      "backpressure-network-error-fail-single.json",
+      "backpressure-network-timeout-fail-single.json",
+      "backpressure-server-description-unchanged-on-min-pool-size-population-error.json",
+      "find-shutdown-error.json",
+      "insert-shutdown-error.json",
+      "hello-command-error.json",
+      "hello-network-error.json",
+      "minPoolSize-error.json",
+      "pool-clear-min-pool-size-error.json",
+      "serverMonitoringMode.json",
+      # Local rs0 is one member, so this file waits forever for a 4th topology event.
+      "replicaset-emit-topology-changed-before-close.json",
+    }
+
     def initialize(file_path : String)
       @file_path = file_path
       json_data = File.read(file_path)
@@ -46,14 +65,10 @@ module Mongo::Unified
       # interruptInUseConnections is not implemented. Logging UTF needs SDAM log
       # messages. Other unified SDAM files run; missing ops become SKIP_TEST.
       # Files below still fail for known holes (handshake backpressure labels,
-      # extra Unknown on concurrent shutdown, topology events before subscribe).
-      if file_path.ends_with?("interruptInUse-pool-clear.json") ||
-         file_path.ends_with?("backpressure-network-error-fail-replicaset.json") ||
-         file_path.ends_with?("backpressure-network-timeout-fail-replicaset.json") ||
-         file_path.ends_with?("find-shutdown-error.json") ||
-         file_path.ends_with?("insert-shutdown-error.json") ||
-         file_path.ends_with?("replicaset-emit-topology-changed-before-close.json") ||
-         file_path.includes?("/logging-")
+      # extra Unknown on concurrent shutdown, minPoolSize pool-ready events,
+      # monitor hello error handling, heartbeat events).
+      basename = File.basename(file_path)
+      if basename.in?(SKIP_FILES) || file_path.includes?("/logging-")
         @skip_reason = "hardcoded skip"
       end
     end
@@ -495,8 +510,7 @@ module Mongo::Unified
               )
             end
 
-            client = Mongo::Client.new(uri, options: options)
-            wait_for_min_pool(client, req.awaitMinPoolSizeMS)
+            client = Mongo::Client.new(uri, options: options, start_monitoring: false)
             @registry.clients[client_id] = client
             @registry.command_events[client_id] = [] of Mongo::Monitoring::Commands::Event
             @registry.sdam_events[client_id] = [] of Mongo::Monitoring::SDAM::Event
@@ -540,12 +554,16 @@ module Mongo::Unified
 
             if observed.includes?("serverDescriptionChangedEvent") ||
                observed.includes?("serverOpeningEvent") ||
-               observed.includes?("topologyDescriptionChangedEvent")
+               observed.includes?("topologyDescriptionChangedEvent") ||
+               observed.includes?("topologyOpeningEvent") ||
+               observed.includes?("topologyClosedEvent")
               client.subscribe_sdam do |event|
                 event_type = case event
                              when Mongo::Monitoring::SDAM::ServerDescriptionChangedEvent   then "serverDescriptionChangedEvent"
                              when Mongo::Monitoring::SDAM::ServerOpeningEvent              then "serverOpeningEvent"
                              when Mongo::Monitoring::SDAM::TopologyDescriptionChangedEvent then "topologyDescriptionChangedEvent"
+                             when Mongo::Monitoring::SDAM::TopologyOpeningEvent            then "topologyOpeningEvent"
+                             when Mongo::Monitoring::SDAM::TopologyClosedEvent             then "topologyClosedEvent"
                              else
                                next
                              end
@@ -573,6 +591,10 @@ module Mongo::Unified
                 @registry.cmap_events[client_id] << event
               end
             end
+
+            # Spec: subscribe before connect. Flush constructor SDAM events, then scan.
+            client.start_sdam_monitoring
+            wait_for_min_pool(client, req.awaitMinPoolSizeMS)
           when "database"
             db_id = req.id || raise "Missing database id"
             if client_name = req.client

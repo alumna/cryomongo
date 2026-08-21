@@ -892,6 +892,21 @@ module Mongo::Unified::Operations
         e.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckedInEvent)
       }
     end
+    if event["topologyDescriptionChangedEvent"]?
+      return (registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::SDAM::TopologyDescriptionChangedEvent)
+      }
+    end
+    if event["topologyOpeningEvent"]?
+      return (registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::SDAM::TopologyOpeningEvent)
+      }
+    end
+    if event["topologyClosedEvent"]?
+      return (registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::SDAM::TopologyClosedEvent)
+      }
+    end
     if expected = event["serverDescriptionChangedEvent"]?
       return (registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).count { |e|
         match_server_description_changed?(e, expected)
