@@ -32,8 +32,11 @@ class Mongo::Connection::Pool(T)
   @idle = Set(T).new
   # connections waiting to be stablished (they are not in *@idle* nor in *@total*)
   @inflight : Int32
-  # indicates if the pool has been cleared
+  # CMAP: paused until a monitor check marks the pool ready. Closed is terminal.
+  @paused : Bool = true
   @closed : Bool = false
+  # One background fiber fills minPoolSize after ready.
+  @populate_running : Bool = false
   # last time each idle connection was released (keyed by socket object_id)
   @idle_since = Hash(UInt64, Time::Instant).new
   # Non-load-balanced generation. Incremented on a full pool clear.
@@ -62,22 +65,38 @@ class Mongo::Connection::Pool(T)
     @initial_pool_size.times { build_resource }
   end
 
-  # Create idle sockets up to minPoolSize. Called after the pool is in the
-  # client map so handshake I/O does not hold the address-map lock.
-  def ensure_min(n : Int32) : Nil
-    return if n <= 0
-    limit = n
-    if @max_pool_size > 0 && limit > @max_pool_size
-      limit = @max_pool_size
+  # True after close().
+  def closed? : Bool
+    sync { @closed }
+  end
+
+  # CMAP paused: minPoolSize fill must not run. Checkout still works (Phase 3.5 will reject it).
+  def paused? : Bool
+    sync { @paused }
+  end
+
+  # Transition paused -> ready. Returns true when this call made the change (emit PoolReadyEvent).
+  def mark_ready : Bool
+    sync do
+      return false if @closed
+      return false unless @paused
+      @paused = false
+      true
     end
-    held = [] of T
-    begin
-      loop do
-        break if sync { @closed || @total.size >= limit || !can_increase_pool? }
-        held << checkout
-      end
+  end
+
+  # Fill idle sockets up to minPoolSize in a background fiber. Handshake I/O does
+  # not hold the pool mutex. Stops when paused, closed, or a populate error runs.
+  def start_min_size(n : Int32, &on_error : Exception ->) : Nil
+    return if n <= 0
+    sync do
+      return if @closed || @paused || @populate_running
+      @populate_running = true
+    end
+    spawn do
+      populate_min(n, &on_error)
     ensure
-      held.each { |resource| release(resource) }
+      sync { @populate_running = false }
     end
   end
 
@@ -85,6 +104,7 @@ class Mongo::Connection::Pool(T)
   def close : Nil
     sync do
       @closed = true
+      @paused = true
       @availability_channel.close
       @total.each &.close
       @total.clear
@@ -138,6 +158,8 @@ class Mongo::Connection::Pool(T)
         @service_generations[sid] = (@service_generations[sid]? || 0) + 1
       else
         @generation += 1
+        # Full clear: stop minPoolSize fill until the next ready().
+        @paused = true
       end
       # Wake waiters. They see the new generation (or a closed channel) and
       # raise PoolCleared instead of waiting for the dead socket.
@@ -426,6 +448,49 @@ class Mongo::Connection::Pool(T)
     select
     when @availability_channel.send nil
     else
+    end
+  end
+
+  private def populate_min(n : Int32, &on_error : Exception ->) : Nil
+    limit = n
+    if @max_pool_size > 0 && limit > @max_pool_size
+      limit = @max_pool_size
+    end
+    loop do
+      started = sync do
+        if @closed || @paused || @total.size + @inflight >= limit || !can_increase_pool?
+          false
+        else
+          @inflight += 1
+          true
+        end
+      end
+      break unless started
+      created = nil.as(T?)
+      begin
+        created = @factory.call
+      rescue error
+        sync { @inflight -= 1 }
+        on_error.call(error)
+        break
+      end
+      keep = false
+      sync do
+        @inflight -= 1
+        if created_conn = created
+          if @closed || @paused
+            created_conn.close
+          else
+            created_conn.generation = generation_for(created_conn.service_id)
+            add_service_count(created_conn.service_id)
+            @total << created_conn
+            @idle << created_conn
+            mark_idle(created_conn)
+            keep = true
+          end
+        end
+      end
+      signal_available if keep
     end
   end
 

@@ -160,6 +160,7 @@ class Mongo::SDAM::TopologyDescription
 
   def update(old_description : ServerDescription, new_description : ServerDescription)
     topology_changed = false
+    ready_desc = nil.as(ServerDescription?)
 
     @lock.synchronize do
       # Snapshot the entire state *before* any mutations for accurate SDAM events
@@ -285,8 +286,17 @@ class Mongo::SDAM::TopologyDescription
       end
 
       topology_changed = true
+
+      if srv = @servers.find { |s| s.address == new_description.address }
+        unless srv.type.unknown? || srv.type.rs_ghost?
+          if srv.data_bearing? || @type.single? || @type.load_balanced?
+            ready_desc = srv
+          end
+        end
+      end
     end
   ensure
+    @client.ready_pool(ready_desc) if ready_desc
     @client.on_topology_update if topology_changed
   end
 

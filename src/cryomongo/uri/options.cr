@@ -34,8 +34,8 @@ struct Mongo::Options
   getter max_pool_size : Int32 = 100
   # The maximum replication lag, in wall clock time, that a secondary can suffer and still be eligible for server selection
   getter max_staleness_seconds : Int32? = nil
-  # The maximum number of clients or connections able to be created by a pool at a given time
-  getter min_pool_size : Int32 = 1
+  # The minimum number of connections in a pool. Spec default is 0.
+  getter min_pool_size : Int32 = 0
   # Default read concern for the client
   getter read_concern_level : String? = nil
   # Default read preference for the client (excluding tags)

@@ -2,22 +2,22 @@
 
 ## Unreleased
 
-Phase 3 of the roadmap: pool locks, parallel spec CI, zlib OP_COMPRESSED, less work on the hot path, DriverBench, and CMAP pool clear. GitHub `crystal spec` is green on standalone (**29.73s**), replica set (**2:38**), sharded (**6:06**), and load-balanced (**2:56**): 780 examples, 0 failures, 0 errors.
+Phase 3 of the roadmap is done. Remaining 8.0 work is Phase 3.1–3.14. **3.1:** CMAP pool at discovery (`poolCreatedEvent` / `poolReadyEvent`, background `minPoolSize`). GitHub `crystal spec` is green on standalone (**29.73s**), replica set (**2:38**), sharded (**6:06**), and load-balanced (**2:56**): 780 examples, 0 failures, 0 errors.
 
 ### Added
-* **compression:** OP_COMPRESSED with zlib. URI `compressors` / `zlibCompressionLevel` are used. Handshake sends the list. Unknown names (including snappy and zstd until they are wired) are dropped with a warning. hello and auth commands stay uncompressed. GitHub spec jobs use `compressors=zlib`.
+* **cmap:** `poolCreatedEvent` and `poolReadyEvent`. The pool is created when a monitor check finds a data-bearing server (load-balanced: at client init). `minPoolSize` is filled in a background fiber after ready. A shutdown hello (code 91) during that fill marks the server Unknown and clears the pool. Unified `minPoolSize-error.json` runs. Load-balanced still does not pre-create sockets.
 * **testing:** `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` so the default execution context is resized. Offline compression specs. Live zlib ping/insert prose. DriverBench (`bench/driver_bench.cr`, `BENCHMARK.md`): BSON encode/decode (`to_h` for decode), live single-doc / multi-doc / GridFS / fiber-parallel insert. Each run writes `bench/results/<utc>-<mode>-<topology>.json` and updates `index.json`. `peers.json` holds published Node / Java / Python / Go numbers. WriteBench no longer includes the extra parallel task. GitHub starts MongoDB through `scripts/docker-topology.sh`.
 * **scripts:** Topology helpers at `scripts/` (native and Docker). `load-balanced` maps mongos `loadBalancerPort` 27050/27051.
 
 ### Changed
-* **pool:** One lock for the address-to-pool map (`Sync::Exclusive`). The pool is created empty under that lock. `minPoolSize` sockets are opened after unlock. Per-address nested locks are gone.
+* **pool:** One lock for the address-to-pool map (`Sync::Exclusive`). The pool is created empty and paused under that lock. A successful SDAM check marks it ready and starts `minPoolSize` fill after unlock. Default `minPoolSize` is 0 (CMAP spec). Per-address nested locks are gone.
 * **cmap:** A network error (not a socket timeout) bumps pool generation, wakes waiters with `PoolClearedError`, and keeps the pool. The pool is not deleted. Retryable writes handshake an Unknown member when no primary is known. Unified `pool-cleared-error.json` runs.
 * **sdam:** A socket timeout after handshake does not mark the server Unknown and does not clear the pool (slow operation, not a dead server).
 * **apm:** `Monitoring::Observable` uses a copy-on-write subscriber list. Broadcast does not dup the list on every event.
 * **selection:** `Selector.pick` does not build a latency-window Array.
 * **gridfs:** Upload sends chunk `insertMany` batches. Download reads chunks with one find cursor. Upload fills each chunk with `read_greedy`. A zero-length file does not query chunks.
 * **io:** OP_MSG / OP_REPLY / header reads use `read_greedy`. A short frame raises `IO::EOFError` (same as `read_fully`) so retryable reads/writes and pool clear still treat it as a network error. A `Channel(Bytes)` pool lends receive buffers.
-* **utf:** Outcome documents are read with sort `{_id: 1}`. Unified SDAM files that only need existing ops now run. Standalone / sharded / load-balanced topology-lifecycle files run. Still skipped on purpose until the hole is closed (see `FIXES.md` / `ROADMAP.md`): interruptInUse, logging, handshake backpressure labels, concurrent shutdown extra Unknown, minPoolSize pool-ready, monitor hello errors, heartbeat events, replica-set topology-lifecycle (try GitHub 3-node).
+* **utf:** Outcome documents are read with sort `{_id: 1}`. Unified SDAM files that only need existing ops now run. Standalone / sharded / load-balanced topology-lifecycle files run. Unified `minPoolSize-error.json` runs. Still skipped on purpose until the hole is closed (see `FIXES.md` / `ROADMAP.md` Phase 3.1–3.14): interruptInUse, logging, handshake backpressure labels, concurrent shutdown extra Unknown, monitor hello errors, heartbeat events, replica-set topology-lifecycle (one-member `rs0` locally and on GitHub).
 
 ### Fixed
 * **sessions:** After a network or state-change error, commit / abort and retryable writes still send `lsid`, `txnNumber`, and `autocommit`. That includes an Unknown server and a sharded topology where the only mongos is Unknown and the session timeout is cleared. A commit retry keeps `j` / `wtimeout` and sets `w` to majority. Handshake rediscovers an Unknown member instead of treating it as "retryable writes off". Standalone writes do not send `txnNumber`. A sharded commit retry uses another mongos when one is already known.

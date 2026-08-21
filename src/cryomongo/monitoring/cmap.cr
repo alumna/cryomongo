@@ -7,6 +7,19 @@ module Mongo::Monitoring::CMAP
     end
   end
 
+  struct PoolCreatedEvent < Event
+    def initialize(address : String)
+      super(address)
+    end
+  end
+
+  # Monitor check found a usable server. Checkout and minPoolSize fill may start.
+  struct PoolReadyEvent < Event
+    def initialize(address : String)
+      super(address)
+    end
+  end
+
   struct PoolClearedEvent < Event
     # Load-balanced: only connections with this serviceId were cleared.
     getter service_id : BSON::ObjectId?

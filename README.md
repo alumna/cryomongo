@@ -11,7 +11,9 @@
 
 This is a fork of `elbywan/cryomongo`. The goal is to make the driver ready for **MongoDB 8.0** and **Crystal 1.21**. We plan to merge back to the original project when that work is done.
 
-The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). **Phase 1**, **Phase 2**, and **Phase 3** of [ROADMAP.md](ROADMAP.md) are done. GitHub Actions `crystal spec` is green on standalone, replica set, sharded, and load-balanced (**780** examples, 0 failures): standalone **29.73s**, replica set **2:38**, sharded **6:06**, load-balanced **2:56**. Spec jobs resize the default execution context (`CRYSTAL_WORKERS=2`) and use zlib wire compression.
+The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). Semver is **0.x**. **Phase 1**, **Phase 2**, and **Phase 3** of [ROADMAP.md](ROADMAP.md) are done. GitHub Actions `crystal spec` is green on standalone, replica set, sharded, and load-balanced (**780** examples, 0 failures): standalone **29.73s**, replica set **2:38**, sharded **6:06**, load-balanced **2:56**. Spec jobs resize the default execution context (`CRYSTAL_WORKERS=2`) and use zlib wire compression.
+
+The driver is ready for **core CRUD, sessions, and transactions** on MongoDB 8.0. **1.0** waits on client-side encryption (Phase 4) and cloud auth (Phase 5: AWS / OIDC). Remaining 8.0 work is [ROADMAP.md](ROADMAP.md) Phase 3.1–3.14.
 
 What is already in place:
 
@@ -25,7 +27,7 @@ The UTF runner is **clear**: unknown operations become Crystal `pending`, they d
 
 ### Where the work stands
 
-The driver is in **beta**. Core CRUD, sessions, and transactions work on standalone, replica set, and sharded MongoDB 8.0.
+The driver is **0.x**. It is ready for core CRUD, sessions, and transactions on standalone, replica set, and sharded MongoDB 8.0. It is not an official-driver equivalent for every MongoDB shop. **1.0** waits on CSFLE and cloud auth.
 
 **Done enough to build apps (Phase 1, Phase 2, and Phase 3)**
 - CRUD helpers, bulk, aggregation (no mapReduce).
@@ -42,12 +44,12 @@ The driver is in **beta**. Core CRUD, sessions, and transactions work on standal
 - zlib OP_COMPRESSED (`compressors=zlib`). Pool map lock is not nested with handshake I/O.
 - Unified `pool-cleared-error.json`. Socket timeouts after handshake do not mark the server Unknown.
 
-**Not done yet (MongoDB 8.0). See [ROADMAP.md](ROADMAP.md) Remaining work and [FIXES.md](FIXES.md).**
-- Unified SDAM still skipped: `interruptInUseConnections`, handshake backpressure labels, monitor hello errors, `minPoolSize` pool-ready, heartbeat events / `serverMonitoringMode`, concurrent shutdown extra Unknown, SDAM logging. Try un-skip `replicaset-emit-topology-changed-before-close.json` on the GitHub 3-member replica set.
+**Not done yet (MongoDB 8.0). See [ROADMAP.md](ROADMAP.md) Phase 3.1–3.14 and [FIXES.md](FIXES.md).**
+- Unified SDAM still skipped: `interruptInUseConnections`, handshake backpressure labels, monitor hello errors, heartbeat events / `serverMonitoringMode`, concurrent shutdown extra Unknown, SDAM logging. `minPoolSize-error.json` now runs. `replicaset-emit-topology-changed-before-close.json` needs a 3-member replica set (local and GitHub Docker are one member).
 - UTF ops still `SKIP_TEST`: client `bulkWrite`, `let` on CRUD, legacy `count`, `mapReduce`, `waitForPrimaryChange` / `recordTopologyDescription` / `assertTopologyType`.
 - No users on CI, so `auth: true` UTF does not run (handshake-error files, unified SDAM auth-error files). Speculative auth and monitor auth are missing.
 - snappy / zstd. TLS key-file password and OCSP flags are parsed and unused. Official CMAP JSON is not copied. CLAM is 1 of 23 files. GridFS `deleteByName` / `renameByName` not copied.
-- CSFLE (`libmongocrypt`) is Phase 4.
+- CSFLE (`libmongocrypt`) is Phase 4. AWS / OIDC is Phase 5.
 
 **Out of scope until we ask for it**
 - `MONGODB-AWS`, `MONGODB-OIDC`.
@@ -57,8 +59,6 @@ The driver is in **beta**. Core CRUD, sessions, and transactions work on standal
 #### Cryomongo is a MongoDB driver written in pure Crystal (no C library).
 
 *Works with MongoDB 8.0+. Tested against 8.0.*
-
-**BETA.**
 
 > If you are looking for a higher-level object-document mapper library, you might want to check out the [`moongoon`](https://github.com/elbywan/moongoon) shard.
 

@@ -70,6 +70,9 @@ start_standalone() {
 }
 
 start_replicaset() {
+  stop_all
+  # Standalone --fork can hold 27017 until the kernel releases the port.
+  sleep 1
   "$ROOT/scripts/mongo-rs.sh" configure-systemd
 }
 

@@ -46,7 +46,6 @@ module Mongo::Unified
       "insert-shutdown-error.json",
       "hello-command-error.json",
       "hello-network-error.json",
-      "minPoolSize-error.json",
       "pool-clear-min-pool-size-error.json",
       "serverMonitoringMode.json",
       # Local rs0 is one member, so this file waits forever for a 4th topology event.
@@ -65,8 +64,8 @@ module Mongo::Unified
       # interruptInUseConnections is not implemented. Logging UTF needs SDAM log
       # messages. Other unified SDAM files run; missing ops become SKIP_TEST.
       # Files below still fail for known holes (handshake backpressure labels,
-      # extra Unknown on concurrent shutdown, minPoolSize pool-ready events,
-      # monitor hello error handling, heartbeat events).
+      # extra Unknown on concurrent shutdown, monitor hello error handling,
+      # heartbeat events). minPoolSize pool-ready is Phase 3.1.
       basename = File.basename(file_path)
       if basename.in?(SKIP_FILES) || file_path.includes?("/logging-")
         @skip_reason = "hardcoded skip"
@@ -575,6 +574,8 @@ module Mongo::Unified
             if observed.any? { |name| name.starts_with?("pool") || name.starts_with?("connection") }
               client.subscribe_cmap do |event|
                 event_type = case event
+                             when Mongo::Monitoring::CMAP::PoolCreatedEvent               then "poolCreatedEvent"
+                             when Mongo::Monitoring::CMAP::PoolReadyEvent                 then "poolReadyEvent"
                              when Mongo::Monitoring::CMAP::PoolClearedEvent               then "poolClearedEvent"
                              when Mongo::Monitoring::CMAP::PoolClosedEvent                then "poolClosedEvent"
                              when Mongo::Monitoring::CMAP::ConnectionCreatedEvent         then "connectionCreatedEvent"
@@ -906,7 +907,15 @@ module Mongo::Unified
       expected_events.each_with_index do |expected, index|
         break if index >= actual.size
         actual_event = actual[index]
-        if expected["connectionCreatedEvent"]?
+        if expected["poolCreatedEvent"]?
+          unless actual_event.is_a?(Mongo::Monitoring::CMAP::PoolCreatedEvent)
+            raise Exception.new("TEST_FAILED: cmap event #{index} expected poolCreatedEvent, got #{actual_event.class}")
+          end
+        elsif expected["poolReadyEvent"]?
+          unless actual_event.is_a?(Mongo::Monitoring::CMAP::PoolReadyEvent)
+            raise Exception.new("TEST_FAILED: cmap event #{index} expected poolReadyEvent, got #{actual_event.class}")
+          end
+        elsif expected["connectionCreatedEvent"]?
           unless actual_event.is_a?(Mongo::Monitoring::CMAP::ConnectionCreatedEvent)
             raise Exception.new("TEST_FAILED: cmap event #{index} expected connectionCreatedEvent, got #{actual_event.class}")
           end
