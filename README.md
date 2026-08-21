@@ -11,7 +11,7 @@
 
 This is a fork of `elbywan/cryomongo`. The goal is to make the driver ready for **MongoDB 8.0** and **Crystal 1.21**. We plan to merge back to the original project when that work is done.
 
-The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). **Phase 1**, **Phase 2**, and **Phase 3** of [ROADMAP.md](ROADMAP.md) are done. GitHub Actions `crystal spec` is green on standalone, replica set, sharded, and load-balanced. Spec jobs also resize the default execution context (`CRYSTAL_WORKERS=2`) and use zlib wire compression.
+The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). **Phase 1**, **Phase 2**, and **Phase 3** of [ROADMAP.md](ROADMAP.md) are done. GitHub Actions `crystal spec` is green on standalone, replica set, sharded, and load-balanced (**780** examples, 0 failures): standalone **29.73s**, replica set **2:38**, sharded **6:06**, load-balanced **2:56**. Spec jobs resize the default execution context (`CRYSTAL_WORKERS=2`) and use zlib wire compression.
 
 What is already in place:
 
@@ -21,7 +21,7 @@ What is already in place:
 * **Auth:** SCRAM-SHA-1, SCRAM-SHA-256 (SASLprep on the password), X509, and PLAIN.
 * **Compression:** zlib via URI `compressors=zlib`. snappy and zstd are not wired yet.
 
-The UTF runner is **clear**: unknown operations become Crystal `pending`, they do not fake a pass. Many official suites are not wired yet. See [ROADMAP.md](ROADMAP.md).
+The UTF runner is **clear**: unknown operations become Crystal `pending`, they do not fake a pass. Files that are still skipped because a feature is missing (not AWS / OIDC / MongoDB 8.1+) are listed in [ROADMAP.md](ROADMAP.md) and [FIXES.md](FIXES.md).
 
 ### Where the work stands
 
@@ -42,10 +42,17 @@ The driver is in **beta**. Core CRUD, sessions, and transactions work on standal
 - zlib OP_COMPRESSED (`compressors=zlib`). Pool map lock is not nested with handshake I/O.
 - Unified `pool-cleared-error.json`. Socket timeouts after handshake do not mark the server Unknown.
 
-**Not done (see ROADMAP Phase 4+)**
-- `MONGODB-AWS`, `MONGODB-OIDC`, CSFLE.
-- snappy / zstd wire compression.
-- Client bulkWrite. Official CMAP JSON. `interruptInUseConnections`.
+**Not done yet (MongoDB 8.0). See [ROADMAP.md](ROADMAP.md) Remaining work and [FIXES.md](FIXES.md).**
+- Unified SDAM still skipped: `interruptInUseConnections`, handshake backpressure labels, monitor hello errors, `minPoolSize` pool-ready, heartbeat events / `serverMonitoringMode`, concurrent shutdown extra Unknown, SDAM logging. Try un-skip `replicaset-emit-topology-changed-before-close.json` on the GitHub 3-member replica set.
+- UTF ops still `SKIP_TEST`: client `bulkWrite`, `let` on CRUD, legacy `count`, `mapReduce`, `waitForPrimaryChange` / `recordTopologyDescription` / `assertTopologyType`.
+- No users on CI, so `auth: true` UTF does not run (handshake-error files, unified SDAM auth-error files). Speculative auth and monitor auth are missing.
+- snappy / zstd. TLS key-file password and OCSP flags are parsed and unused. Official CMAP JSON is not copied. CLAM is 1 of 23 files. GridFS `deleteByName` / `renameByName` not copied.
+- CSFLE (`libmongocrypt`) is Phase 4.
+
+**Out of scope until we ask for it**
+- `MONGODB-AWS`, `MONGODB-OIDC`.
+- MongoDB newer than 8.0 (example: change-stream `nsType` needs 8.1).
+- Atlas Search.
 
 #### Cryomongo is a MongoDB driver written in pure Crystal (no C library).
 

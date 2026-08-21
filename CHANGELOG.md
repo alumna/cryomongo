@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Phase 3 of the roadmap: pool locks, parallel spec CI, zlib OP_COMPRESSED, less work on the hot path, DriverBench, and CMAP pool clear.
+Phase 3 of the roadmap: pool locks, parallel spec CI, zlib OP_COMPRESSED, less work on the hot path, DriverBench, and CMAP pool clear. GitHub `crystal spec` is green on standalone (**29.73s**), replica set (**2:38**), sharded (**6:06**), and load-balanced (**2:56**): 780 examples, 0 failures, 0 errors.
 
 ### Added
 * **compression:** OP_COMPRESSED with zlib. URI `compressors` / `zlibCompressionLevel` are used. Handshake sends the list. Unknown names (including snappy and zstd until they are wired) are dropped with a warning. hello and auth commands stay uncompressed. GitHub spec jobs use `compressors=zlib`.
@@ -17,7 +17,7 @@ Phase 3 of the roadmap: pool locks, parallel spec CI, zlib OP_COMPRESSED, less w
 * **selection:** `Selector.pick` does not build a latency-window Array.
 * **gridfs:** Upload sends chunk `insertMany` batches. Download reads chunks with one find cursor. Upload fills each chunk with `read_greedy`. A zero-length file does not query chunks.
 * **io:** OP_MSG / OP_REPLY / header reads use `read_greedy`. A short frame raises `IO::EOFError` (same as `read_fully`) so retryable reads/writes and pool clear still treat it as a network error. A `Channel(Bytes)` pool lends receive buffers.
-* **utf:** Outcome documents are read with sort `{_id: 1}`. Unified SDAM files that only need existing ops now run (still skipped: interruptInUse, logging, handshake backpressure labels, concurrent shutdown extra Unknown, minPoolSize pool-ready, monitor hello errors, heartbeat events, replica-set topology-lifecycle). Standalone / sharded / load-balanced topology-lifecycle files run.
+* **utf:** Outcome documents are read with sort `{_id: 1}`. Unified SDAM files that only need existing ops now run. Standalone / sharded / load-balanced topology-lifecycle files run. Still skipped on purpose until the hole is closed (see `FIXES.md` / `ROADMAP.md`): interruptInUse, logging, handshake backpressure labels, concurrent shutdown extra Unknown, minPoolSize pool-ready, monitor hello errors, heartbeat events, replica-set topology-lifecycle (try GitHub 3-node).
 
 ### Fixed
 * **sessions:** After a network or state-change error, commit / abort and retryable writes still send `lsid`, `txnNumber`, and `autocommit`. That includes an Unknown server and a sharded topology where the only mongos is Unknown and the session timeout is cleared. A commit retry keeps `j` / `wtimeout` and sets `w` to majority. Handshake rediscovers an Unknown member instead of treating it as "retryable writes off". Standalone writes do not send `txnNumber`. A sharded commit retry uses another mongos when one is already known.

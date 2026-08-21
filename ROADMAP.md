@@ -13,7 +13,7 @@ This phase focuses on ensuring the driver is safe, doesn't leak resources, and p
 ### Testing Infrastructure
 - [x] **Strict UTF Dispatcher:** Unknown operations raise `SKIP_TEST` (no silent pass).
 - [x] **Topology CI Matrix:** GitHub Actions runs standalone, replica set, sharded, and load-balanced. Push a PR to run that matrix.
-- [x] **Dynamic Test Skipping:** `runOnRequirements` uses live topology or `TOPOLOGY`. A few files stay skipped because the feature is not implemented (`interruptInUseConnections`, most unified SDAM).
+- [x] **Dynamic Test Skipping:** `runOnRequirements` uses live topology or `TOPOLOGY`. Files that still skip because a feature is missing are listed under Remaining work (not AWS / OIDC / MongoDB 8.1+).
 
 ### Core Specifications (JSON & Legacy)
 - [x] CRUD, Retryable Reads, Retryable Writes (UTF)
@@ -58,15 +58,11 @@ Phase 2 is done. GitHub runs `crystal spec` on standalone, replica set, sharded,
 
 - [x] **Official load-balancer UTF leftovers:** `assertNumberConnectionsCheckedOut`. Wait-queue error lists cursor / txn / other in-use counts. `serviceId` on `poolClearedEvent` and on command events. Pin CMAP checkedOut / checkedIn (`cursors.json` and `transactions.json`). Pool clear per `serviceId`. `non-lb-connection-establishment.json` stays pending on load-balanced. `lb-connection-establishment.json` stays skipped (MongoDB 8.0 still accepts `loadBalanced=false` on the LB port). One `sdam-error-handling` test stays skipped (HAProxy often sends both sockets to one mongos).
 - [x] **CSOT API and more UTF:** `timeoutMS` on collection / database / operation, `timeoutMode` on find, aggregate, listCollections, and listIndexes. Session `defaultTimeoutMS` and `with_transaction` deadline. GridFS stream lifetime, tailable `timeoutMode` / `maxAwaitTimeMS`, change-stream iteration, override / session JSON. `Database#run_command` and `#run_cursor_command`. Official CSOT UTF is 28 files. Official run-command UTF is copied.
-- [x] **Widen the GitHub load-balanced job.** LoadBalancer always allows retryable reads and writes (no monitor hello). `failCommand` / `closeConnection` UTF retries. GitHub `crystal spec` (766 examples, 0 failures): standalone **23.86s / 219 pending**, replica set **3:36 / 104 pending**, sharded **7:05 / 112 pending**, load-balanced **2:58 / 137 pending**.
+- [x] **Widen the GitHub load-balanced job.** LoadBalancer always allows retryable reads and writes (no monitor hello). `failCommand` / `closeConnection` UTF retries. Phase 2 close numbers (766 examples): standalone **23.86s / 219 pending**, replica set **3:36 / 104 pending**, sharded **7:05 / 112 pending**, load-balanced **2:58 / 137 pending**. Phase 3 GitHub numbers are in the Phase 3 section.
 
-### Stay open after Phase 2 (not in the close-Phase-2 pass)
+### Stay open after Phase 2 (moved)
 
-- Change-stream `nsType` needs MongoDB 8.1.
-- Search-index UTF needs Atlas. Keep `SKIP_TEST`.
-- Live SCRAM / X509 / PLAIN prose needs users on the server.
-- Unified `pool-cleared-error.json` passes (pool generation + handshake rediscovery).
-- Compression zlib is Phase 3 (done). AWS, OIDC, and CSFLE are Phase 4–5. snappy / zstd are later.
+Unified `pool-cleared-error.json` passes. zlib is Phase 3 (done). Everything still open is in **Remaining work** or **Out of scope** below.
 
 ---
 
@@ -74,7 +70,7 @@ Phase 2 is done. GitHub runs `crystal spec` on standalone, replica set, sharded,
 
 This phase optimizes the driver to take full advantage of Crystal's new `-Dpreview_mt` / `Execution Contexts` and reduces network overhead.
 
-Phase 3 is done for the items in this phase. Local replica set is green: 776 examples, 0 failures, 104 pending, including `CRYSTAL_WORKERS=2 crystal spec -Dpreview_mt -Dexecution_context` with `compressors=zlib`. GitHub should run the same flags on every topology. snappy / zstd and a fiber-local implicit session are later work. Details are in `FIXES.md`.
+Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=zlib` is green on every topology (**780** examples, 0 failures, 0 errors): standalone **29.73s / 212 pending**, replica set **2:38 / 96 pending**, sharded **6:06 / 103 pending**, load-balanced **2:56 / 136 pending**. What is still skipped, and what is out of scope, is listed below and in `FIXES.md`.
 
 ### Concurrency
 - [x] **CI Parallel Testing:** GitHub runs `crystal spec -Dpreview_mt -Dexecution_context` and sets `CRYSTAL_WORKERS=2` so the default execution context is resized.
@@ -91,13 +87,85 @@ Phase 3 is done for the items in this phase. Local replica set is green: 776 exa
 
 ---
 
-## Phase 4: The Final Boss (Post-1.0)
+## Remaining work (MongoDB 8.0, toward production grade)
 
-- [ ] **Client-Side Field Level Encryption (CSFLE / Queryable Encryption):** Write Crystal bindings for the `libmongocrypt` C library, intercept queries, encrypt fields locally, and implement the associated legacy CSFLE test suite.
+Phases 1–3 are done. GitHub is green. The driver is production-capable for core 8.0. The items below are still needed to get nearer to an official-driver equivalent on MongoDB **8.0**. Details: `FIXES.md`. Un-skip a UTF file only after it passes.
+
+### Out of scope until the user asks
+
+Do not treat these as the next work.
+
+- **Phase 5:** `MONGODB-AWS` (SigV4, AWS accounts).
+- **Phase 5:** `MONGODB-OIDC` (identity provider). UTF `mongodb-oidc-no-retry.json` stays pending.
+- **MongoDB newer than 8.0.** Example: change-stream `nsType` needs **8.1**. Do not add 8.1+ fields now.
+- **Atlas Search.** Keep `SKIP_TEST` for search-index ops. Do not copy search-index JSON.
+- Official JSON `skipReason` that is a server or spec bug (`lb-connection-establishment.json` on 8.0; CSOT `runCursorCommand` “failure” tests with `blockTimeMS` < `timeoutMS`; DRIVERS-2032 handshake skips).
+
+### Skipped unified SDAM that must run
+
+Hardcoded in `spec/unified/runner.cr` (`SKIP_FILES` and `/logging-`). These were skipped because the feature is missing. They must not stay skipped.
+
+- [ ] `interruptInUse-pool-clear.json` — `interruptInUseConnections` (close in-use sockets).
+- [ ] `backpressure-network-error-fail-replicaset.json` and `backpressure-network-timeout-fail-replicaset.json` — `SystemOverloadedError` on handshake network / timeout.
+- [ ] `backpressure-network-error-fail-single.json` and `backpressure-network-timeout-fail-single.json` — same on standalone.
+- [ ] `backpressure-server-description-unchanged-on-min-pool-size-population-error.json` — handshake fail must not change the server description.
+- [ ] `find-shutdown-error.json` and `insert-shutdown-error.json` — ignore stale-generation so UTF does not see two Unknown events.
+- [ ] `hello-command-error.json` and `hello-network-error.json` — monitor hello `failCommand`.
+- [ ] `minPoolSize-error.json` and `pool-clear-min-pool-size-error.json` — `poolCreatedEvent` / `poolReadyEvent`; create the pool at discovery; fill `minPoolSize` in the background.
+- [ ] `serverMonitoringMode.json` — URI `serverMonitoringMode`; `ServerHeartbeatStartedEvent` / `Succeeded` / `Failed`.
+- [ ] `replicaset-emit-topology-changed-before-close.json` — wants 4 topology events. Local one-member `rs0` only gets 3. GitHub Docker is 3 members: **try un-skip there**. Standalone / sharded / load-balanced emit files already run.
+- [ ] `logging-standalone.json`, `logging-replicaset.json`, `logging-sharded.json`, `logging-loadbalanced.json` — SDAM / CMAP log messages.
+
+### UTF ops and files that still raise `SKIP_TEST`
+
+- [ ] `waitForPrimaryChange`, `recordTopologyDescription`, `assertTopologyType` — un-skip `rediscover-quickly-after-step-down.json`.
+- [ ] Client `bulkWrite` — un-skip `crud/client-bulkWrite-*.json`, `retryable-writes/client-bulkWrite-*.json`, `transactions/client-bulkWrite.json`, `causal-consistency-clientBulkWrite.json`.
+- [ ] `let` on find / aggregate / updates / deletes / findOneAnd* — un-skip CRUD `*-let.json` and `aggregate-let.json`.
+- [ ] Legacy `count` command — un-skip `count-rawdata.json`, `retryable-reads/count.json`, `count-serverErrors.json`, `transactions/count.json`.
+- [ ] `mapReduce` — un-skip `retryable-reads/mapReduce.json`.
+
+### Auth on the server (not AWS / OIDC)
+
+CI sets `auth: true` requirements to not met. After users exist on mongod:
+
+- [ ] Honor `auth: true` in `meets_requirements?`.
+- [ ] Un-skip `retryable-reads/handshakeError.json` and `retryable-writes/handshakeError.json` (also needs speculative auth).
+- [ ] Un-skip unified SDAM `auth-error.json`, `auth-misc-command-error.json`, `auth-network-error.json`, `auth-network-timeout-error.json`, `auth-shutdown-error.json`, `pool-clear-checkout-error.json`.
+- [ ] Live SCRAM / X509 / PLAIN prose (X509 needs TLS certs).
+- [ ] Speculative auth. Monitor sockets must authenticate.
+
+### Features still missing on MongoDB 8.0
+
+- [ ] `poolCreatedEvent` / `poolReadyEvent`. Create the pool when the server is discovered.
+- [ ] `interruptInUseConnections`.
+- [ ] Heartbeat events and `serverMonitoringMode`.
+- [ ] Monitor hello error handling.
+- [ ] Handshake backpressure labels.
+- [ ] SDAM / CMAP logging.
+- [ ] snappy / zstd wire compression (zlib is done).
+- [ ] `tls_certificate_key_file_password` and OCSP / CRL flags (parsed, unused).
+- [ ] `auth_mechanism_properties` beyond URI validation (GSSAPI and similar).
+- [ ] `enableOverloadRetargeting` (parsed, unused).
+- [ ] Fiber-local implicit session (acquire/release still runs per command).
+- [ ] Return the OP_MSG receive buffer to the Channel pool after `BSON.view` (do not claim zero-allocation).
+- [ ] CLAM UTF: match `reply` on succeeded / failed events. Copy the other 22 of 23 CLAM files as matching allows.
+- [ ] Copy official CMAP JSON (35 files, none copied) after pool-ready and interruptInUse exist.
+- [ ] Copy GridFS `deleteByName` / `renameByName` (5 of 8 GridFS files copied) and the non-search index-management files (1 of 7 copied).
+- [ ] Move pool generation / handshake-before-complete from `spec/sdam_runner_spec.cr` into production if the legacy SDAM JSON still needs that.
+- [ ] Load-balanced CSOT: after a dead pin, `killCursors` must not open a new socket (`timeoutMS is refreshed for close`).
+- [ ] Two mongos `serviceId`s from HAProxy (`UTF_RUN_TWO_MONGOS=1`) for `sdam-error-handling.json`.
+
+---
+
+## Phase 4: Client-side encryption (Post-1.0)
+
+In scope for production-grade completeness. Not AWS / OIDC / MongoDB 8.1+. Start only when the user asks.
+
+- [ ] **Client-Side Field Level Encryption (CSFLE / Queryable Encryption):** Crystal bindings for `libmongocrypt`, intercept queries, encrypt fields locally, official CSFLE suite (224 files, none copied).
 
 ## Phase 5: Cloud and External Authentication
 
-This phase will be done with the help of the community, because it requires external services and accounts, in order to be done.
+Out of scope until the user asks. Needs external services and accounts.
 
 ### Cloud Authentication Specs
 - [ ] `MONGODB-OIDC` (Machine-flow auth)
