@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "runs": [
+    {
+      "file": "2026-08-21T093500Z-short-replica-set.json",
+      "recorded_at": "2026-08-21T09:35:00Z",
+      "mode": "short",
+      "topology": "replica-set",
+      "release": false,
+      "composites": {
+        "BSONBench": 378.9,
+        "SingleBench": 26.02,
+        "MultiBench": 407.92,
+        "ReadBench": 793.08,
+        "WriteBench": 120.28,
+        "DriverBench": 456.68
+      }
+    },
+    {
+      "file": "2026-08-21T100223Z-full-replica-set.json",
+      "recorded_at": "2026-08-21T10:02:23Z",
+      "mode": "full",
+      "topology": "replica-set",
+      "release": true,
+      "composites": {
+        "BSONBench": 843.1,
+        "SingleBench": 129.88,
+        "MultiBench": 554.55,
+        "ReadBench": 911.73,
+        "WriteBench": 261.36,
+        "DriverBench": 586.54
+      }
+    }
+  ]
+}

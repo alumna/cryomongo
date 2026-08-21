@@ -162,25 +162,7 @@ module Mongo::GridFS
     end
 
     private def consume_upload(reader, id, filename, chunk_size, metadata, session, deadline)
-      index = 0
-      length = 0_i64
-      buffer = Bytes.new(chunk_size)
-      loop do
-        read_bytes = fill_slice(reader, buffer.to_slice)
-        break if read_bytes == 0
-        data = buffer.to_slice[0, read_bytes]
-        chunks.insert_one({
-          files_id: id,
-          n:        index,
-          data:     data,
-        }, write_concern: write_concern, session: session, deadline: deadline)
-        length += read_bytes
-        index += 1_i64
-        break if read_bytes < chunk_size
-      rescue IO::EOFError
-        break
-      end
-
+      length = upload_chunks_from(reader, id, chunk_size, session, deadline)
       insert_file_document(id, length, chunk_size, filename, metadata, session, deadline)
     ensure
       reader.close
@@ -220,21 +202,7 @@ module Mongo::GridFS
       deadline = start_deadline(timeout_ms)
 
       check_indexes(bucket, chunks, session, deadline)
-
-      index = 0
-      length = 0_i64
-      buffer = Bytes.new(chunk_size_bytes)
-      while (read_bytes = stream.read(buffer.to_slice)) > 0
-        data = buffer.to_slice[0, read_bytes]
-        chunks.insert_one({
-          files_id: id,
-          n:        index,
-          data:     data,
-        }, write_concern: write_concern, session: session, deadline: deadline)
-        length += read_bytes
-        index += 1_i64
-      end
-
+      length = upload_chunks_from(stream, id, chunk_size_bytes, session, deadline)
       insert_file_document(id, length, chunk_size_bytes, filename, metadata, session, deadline)
 
       id
@@ -255,20 +223,13 @@ module Mongo::GridFS
     def open_download_stream(id : FileID, *, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil) : IO forall FileID
       deadline = start_deadline(timeout_ms)
       file = get_file(id, session, deadline)
-      count = chunk_count(file)
-      remaining = file.length
 
       # to_i32 naturally raises on overflow. Using `!` was an unsafe bypass.
       reader, writer = Pipe.create(capacity: file.chunk_size.to_i32)
 
       wait, error = start_stream_job {
         begin
-          count.times { |n|
-            chunk = get_chunk(id, n, session, deadline)
-            integrity_check!(file, chunk, remaining)
-            writer.write(chunk.data)
-            remaining -= chunk.data.size
-          }
+          each_chunk(file, session, deadline) { |chunk| writer.write(chunk.data) }
         ensure
           writer.close
         end
@@ -290,15 +251,7 @@ module Mongo::GridFS
     def download_to_stream(id : FileID, destination : IO, *, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil) : Nil forall FileID
       deadline = start_deadline(timeout_ms)
       file = get_file(id, session, deadline)
-      count = chunk_count(file)
-      remaining = file.length
-
-      count.times { |n|
-        chunk = get_chunk(id, n, session, deadline)
-        integrity_check!(file, chunk, remaining)
-        destination.write(chunk.data)
-        remaining -= chunk.data.size
-      }
+      each_chunk(file, session, deadline) { |chunk| destination.write(chunk.data) }
     end
 
     # Opens a `IO` stream from which the application can read the contents of the stored file
@@ -332,20 +285,13 @@ module Mongo::GridFS
     def open_download_stream_by_name(filename : String, revision : Int32 = -1, *, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil) : IO
       deadline = start_deadline(timeout_ms)
       file = get_file_by_name(filename, revision, session, deadline)
-      count = chunk_count(file)
 
       # to_i32 naturally raises on overflow. Using `!` was an unsafe bypass.
       reader, writer = Pipe.create(capacity: file.chunk_size.to_i32)
 
       wait, error = start_stream_job {
         begin
-          remaining = file.length
-          count.times { |n|
-            chunk = get_chunk(file._id, n, session, deadline)
-            integrity_check!(file, chunk, remaining)
-            writer.write(chunk.data)
-            remaining -= chunk.data.size
-          }
+          each_chunk(file, session, deadline) { |chunk| writer.write(chunk.data) }
         ensure
           writer.close
         end
@@ -367,15 +313,7 @@ module Mongo::GridFS
     def download_to_stream_by_name(filename : String, destination : IO, revision : Int32 = -1, *, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil) : Nil
       deadline = start_deadline(timeout_ms)
       file = get_file_by_name(filename, revision, session, deadline)
-      count = chunk_count(file)
-      remaining = file.length
-
-      count.times { |n|
-        chunk = get_chunk(file._id, n, session, deadline)
-        integrity_check!(file, chunk, remaining)
-        destination.write(chunk.data)
-        remaining -= chunk.data.size
-      }
+      each_chunk(file, session, deadline) { |chunk| destination.write(chunk.data) }
     end
 
     # Given an *id*, delete this stored file’s files collection document and associated chunks from a GridFS bucket.
@@ -549,6 +487,67 @@ module Mongo::GridFS
 
       def fill_slice(io : IO, slice : Bytes)
         io.read_greedy(slice)
+      end
+
+      CHUNK_BATCH = 8
+
+      # One insertMany per batch. Copy each chunk out of the read buffer first.
+      def upload_chunks_from(io, id, chunk_size, session, deadline)
+        index = 0
+        length = 0_i64
+        buffer = Bytes.new(chunk_size)
+        docs = [] of BSON
+        loop do
+          read_bytes = fill_slice(io, buffer.to_slice)
+          break if read_bytes == 0
+          docs << BSON.new({
+            files_id: id,
+            n:        index,
+            data:     buffer[0, read_bytes].dup,
+          })
+          if docs.size >= CHUNK_BATCH
+            flush_chunk_docs(docs, session, deadline)
+          end
+          length += read_bytes
+          index += 1
+          break if read_bytes < chunk_size
+        rescue IO::EOFError
+          break
+        end
+        flush_chunk_docs(docs, session, deadline)
+        length
+      end
+
+      def flush_chunk_docs(docs, session, deadline)
+        return if docs.empty?
+        chunks.insert_many(docs, write_concern: write_concern, session: session, deadline: deadline)
+        docs.clear
+      end
+
+      # One find cursor for all chunks, in order. A zero-length file must not
+      # query chunks (GridFS spec). An extra empty chunk is ignored.
+      def each_chunk(file, session, deadline, &)
+        return if file.length == 0
+
+        remaining = file.length
+        expected = 0
+        cursor = chunks.find(
+          {files_id: file._id},
+          sort: {n: 1},
+          read_preference: read_preference,
+          read_concern: read_concern,
+          session: session,
+          deadline: deadline,
+        )
+        cursor.each do |doc|
+          chunk = Chunk(typeof(file._id)).from_bson(doc)
+          raise Mongo::Error.new("Chunk not found") unless chunk.n == expected
+          integrity_check!(file, chunk, remaining)
+          yield chunk
+          remaining -= chunk.data.size
+          expected += 1
+        end
+        raise Mongo::Error.new("Chunk not found") unless expected == chunk_count(file)
       end
 
       # Run stream I/O in a fiber. The caller joins through JoinStream#close.

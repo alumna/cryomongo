@@ -2,6 +2,12 @@ require "spec"
 require "json"
 require "../src/cryomongo"
 
+# Parallel execution for CI. The default context stays at 1 worker until resized.
+# CRYSTAL_WORKERS is not applied by Crystal 1.21 unless the program resizes.
+if (workers = ENV["CRYSTAL_WORKERS"]?.try(&.to_i?)) && workers > 1
+  Fiber::ExecutionContext.default.resize(workers)
+end
+
 # Use the environment variable or a URI that matches TOPOLOGY.
 ENV["MONGODB_URI"] ||= begin
   case ENV["TOPOLOGY"]?

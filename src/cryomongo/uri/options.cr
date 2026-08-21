@@ -1,5 +1,6 @@
 require "http"
 require "uri"
+require "../compression"
 
 # A set of options used to configure the driver.
 #
@@ -168,6 +169,11 @@ struct Mongo::Options
         {% end %}
       {% end %}
     {% end %}
+
+    if (level = @zlib_compression_level) && !(-1..9).includes?(level)
+      raise Mongo::Error.new("zlibCompressionLevel must be between -1 and 9")
+    end
+    Compression.parse_names(@compressors, warn: true)
   end
 
   def validate(raw_hash)
@@ -198,5 +204,10 @@ struct Mongo::Options
     if (timeout_raw = raw_hash["timeoutms"]?) && (n = timeout_raw.to_i64?) && n < 0
       raise Mongo::Error.new("timeoutMS must not be negative")
     end
+  end
+
+  # Handshake list. Unknown and unwired names are already dropped.
+  def compressor_list : Array(String)
+    Compression.parse_names(@compressors, warn: false)
   end
 end

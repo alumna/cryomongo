@@ -16,7 +16,7 @@ struct Mongo::Messages::Header
   def initialize(io : IO)
     buf = uninitialized UInt8[16]
     slice = buf.to_slice
-    io.read_fully(slice)
+    Messages.read_exact(io, slice)
     @message_length = IO::ByteFormat::LittleEndian.decode(Int32, slice[0, 4])
     @request_id = IO::ByteFormat::LittleEndian.decode(Int32, slice[4, 4])
     @response_to = IO::ByteFormat::LittleEndian.decode(Int32, slice[8, 4])

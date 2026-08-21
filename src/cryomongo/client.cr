@@ -1,4 +1,5 @@
 require "socket"
+require "sync/exclusive"
 require "./database"
 require "./messages/**"
 require "./commands/**"
@@ -42,9 +43,11 @@ class Mongo::Client
 
   @topology_lock = Sync::Mutex.new(:reentrant)
   @cluster_time_lock = Sync::Mutex.new
-  @connection_pool_lock = Sync::Mutex.new
-  @pool_locks = Hash(String, Sync::Mutex).new
-  @pools : Hash(String, Mongo::Connection::Pool(Mongo::Connection)) = Hash(String, Mongo::Connection::Pool(Mongo::Connection)).new
+  # One lock for the address -> pool map. Pool checkout uses its own mutex.
+  # Do not hold this lock during handshake or socket I/O.
+  @pools = Sync::Exclusive(Hash(String, Mongo::Connection::Pool(Mongo::Connection))).new(
+    Hash(String, Mongo::Connection::Pool(Mongo::Connection)).new
+  )
 
   @monitors : Array(SDAM::Monitor) = Array(SDAM::Monitor).new
   @srv_poller : SDAM::SrvPoller? = nil
@@ -164,7 +167,11 @@ class Mongo::Client
       Log.warn { "Error while trying to close session pool. #{e}" }
     end
 
-    pools_to_close = @connection_pool_lock.synchronize { @pools.values.dup }
+    pools_to_close = @pools.lock { |h|
+      values = h.values.dup
+      h.clear
+      values
+    }
     pools_to_close.each do |pool|
       pool.close
     rescue e
@@ -377,38 +384,7 @@ class Mongo::Client
   ############
 
   protected def get_connection(server_description : SDAM::ServerDescription, wait : Time::Span? = nil) : Mongo::Connection
-    # Fast path: see if the pool already exists
-    pool = @connection_pool_lock.synchronize { @pools[server_description.address]? }
-
-    unless pool
-      # Get or create a lock specific to this server address
-      addr_lock = @connection_pool_lock.synchronize do
-        @pool_locks[server_description.address] ||= Sync::Mutex.new
-      end
-
-      # Synchronize on the specific address to prevent concurrent initializations for the same server
-      # while allowing other servers to initialize their pools in parallel.
-      pool = addr_lock.synchronize do
-        # Double-check inside the lock
-        @connection_pool_lock.synchronize { @pools[server_description.address]? } || begin
-          # Load-balanced pools must not pre-create sockets (each one can pin a
-          # different mongos behind the balancer).
-          initial_size = @options.load_balanced ? 0 : @options.min_pool_size
-          new_pool = Mongo::Connection::Pool(Mongo::Connection).new(
-            initial_pool_size: initial_size,
-            max_pool_size: @options.max_pool_size,
-            max_idle_pool_size: @options.max_pool_size,
-            checkout_timeout: @options.wait_queue_timeout.try(&.total_seconds) || 5.0,
-            max_idle_time: @options.max_idle_time
-          ) do
-            establish_connection(server_description)
-          end
-
-          @connection_pool_lock.synchronize { @pools[server_description.address] = new_pool }
-          new_pool
-        end
-      end
-    end
+    pool = pool_at(server_description.address) || create_pool(server_description)
 
     emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutStartedEvent.new(server_description.address))
     begin
@@ -425,6 +401,38 @@ class Mongo::Client
       emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
       raise error
     end
+  end
+
+  private def pool_at(address : String) : Mongo::Connection::Pool(Mongo::Connection)?
+    @pools.lock { |h| h[address]? }
+  end
+
+  # Insert an empty pool under the map lock (no I/O). Fill minPoolSize after unlock.
+  private def create_pool(server_description : SDAM::ServerDescription) : Mongo::Connection::Pool(Mongo::Connection)
+    address = server_description.address
+    created = false
+    pool = @pools.lock do |h|
+      if existing = h[address]?
+        existing
+      else
+        created = true
+        new_pool = Mongo::Connection::Pool(Mongo::Connection).new(
+          initial_pool_size: 0,
+          max_pool_size: @options.max_pool_size,
+          max_idle_pool_size: @options.max_pool_size,
+          checkout_timeout: @options.wait_queue_timeout.try(&.total_seconds) || 5.0,
+          max_idle_time: @options.max_idle_time
+        ) do
+          establish_connection(server_description)
+        end
+        h[address] = new_pool
+        new_pool
+      end
+    end
+    if created && !@options.load_balanced
+      pool.ensure_min(@options.min_pool_size)
+    end
+    pool
   end
 
   # Handshake plus auth. Created is emitted before hello. Ready is emitted after auth.
@@ -500,11 +508,10 @@ class Mongo::Client
 
   # :nodoc:
   def checked_out_count : Int32
-    @connection_pool_lock.synchronize do
-      n = 0
-      @pools.each_value { |pool| n += pool.checked_out_count }
-      n
-    end
+    pools = @pools.lock { |h| h.values.dup }
+    n = 0
+    pools.each { |pool| n += pool.checked_out_count }
+    n
   end
 
   # :nodoc:
@@ -518,7 +525,7 @@ class Mongo::Client
   end
 
   private def pool_for(connection : Mongo::Connection) : Mongo::Connection::Pool(Mongo::Connection)?
-    @connection_pool_lock.synchronize { @pools[connection.server_description.address]? }
+    pool_at(connection.server_description.address)
   end
 
   private def checkout_for_command(
@@ -606,9 +613,8 @@ class Mongo::Client
   end
 
   protected def close_connection_pool(server_description : SDAM::ServerDescription)
-    pool_to_close = @connection_pool_lock.synchronize do
-      @pool_locks.delete(server_description.address)
-      @pools.delete(server_description.address)
+    pool_to_close = @pools.lock do |h|
+      h.delete(server_description.address)
     end
     if pool_to_close
       emit_cmap_event(Monitoring::CMAP::PoolClearedEvent.new(server_description.address))
@@ -617,9 +623,21 @@ class Mongo::Client
     end
   end
 
+  # Network / shutdown error: bump generation, wake waiters, keep the pool.
+  # Do not delete the pool. A new pool plus handshake can race with Unknown.
+  protected def clear_pool(server_description : SDAM::ServerDescription) : Nil
+    pool = pool_at(server_description.address)
+    return unless pool
+    closed = pool.clear
+    emit_cmap_event(Monitoring::CMAP::PoolClearedEvent.new(server_description.address))
+    closed.each do |conn|
+      emit_cmap_event(Monitoring::CMAP::ConnectionClosedEvent.new(server_description.address, conn.connection_id, "stale"))
+    end
+  end
+
   # Load-balanced: increment generation for one serviceId. Other mongos sockets stay.
   protected def clear_connection_pool(server_description : SDAM::ServerDescription, service_id : BSON::ObjectId) : Nil
-    pool = @connection_pool_lock.synchronize { @pools[server_description.address]? }
+    pool = pool_at(server_description.address)
     return unless pool
     closed = pool.clear(service_id)
     emit_cmap_event(Monitoring::CMAP::PoolClearedEvent.new(server_description.address, service_id))

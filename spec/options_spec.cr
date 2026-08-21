@@ -105,6 +105,24 @@ describe Mongo::Options do
     options.max_adaptive_retries.should eq 1
   end
 
+  it "keeps zlib in compressor_list and drops unknown names" do
+    _, options, _, _ = Mongo::URI.parse("mongodb://localhost/?compressors=snoopy,zlib,snappy", Mongo::Options.new)
+    options.compressors.should eq "snoopy,zlib,snappy"
+    options.compressor_list.should eq ["zlib"]
+  end
+
+  it "rejects zlibCompressionLevel outside -1..9" do
+    expect_raises(Mongo::Error, /zlibCompressionLevel/) do
+      Mongo::URI.parse("mongodb://localhost/?zlibCompressionLevel=10", Mongo::Options.new)
+    end
+  end
+
+  it "parses zlibCompressionLevel" do
+    _, options, _, _ = Mongo::URI.parse("mongodb://localhost/?compressors=zlib&zlibCompressionLevel=1", Mongo::Options.new)
+    options.zlib_compression_level.should eq 1
+    options.compressor_list.should eq ["zlib"]
+  end
+
   it "parses options when the delimiting slash is omitted" do
     seeds, options, _, db = Mongo::URI.parse("mongodb://localhost:27017?serverSelectionTimeoutMS=2000", Mongo::Options.new)
     seeds.size.should eq 1

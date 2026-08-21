@@ -42,11 +42,16 @@ module Mongo::SDAM
     end
 
     def close_connection(server_description : ServerDescription)
+      drop_monitor_socket
+      @client.close_connection_pool(server_description)
+    end
+
+    # Close the monitor socket only. The application pool stays.
+    def drop_monitor_socket : Nil
       if (connection = @connection) && !connection.socket.closed?
         connection.socket.close
       end
       @connection = nil
-      @client.close_connection_pool(server_description)
     end
 
     def scan
@@ -124,7 +129,9 @@ module Mongo::SDAM
       description = ServerDescription.new(server_description.address)
       description.error = error.message
       description.last_update_time = server_description.last_update_time
-      close_connection(server_description)
+      drop_monitor_socket
+      # A known server: clear the application pool. Do not delete it.
+      @client.clear_pool(server_description) if known_state
       if known_state && error.is_a? Client::NetworkError
         check(description)
       else

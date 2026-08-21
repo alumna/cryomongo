@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "recorded_at": "2026-08-21T09:35:00Z",
+  "elapsed_s": 83.71,
+  "mode": "short",
+  "host": {
+    "os": "linux x86_64",
+    "cpu": "AMD Ryzen 7 5700G with Radeon Graphics",
+    "cpus": 16,
+    "ram_kib": 28627544,
+    "crystal": "1.21.0",
+    "release": false,
+    "git_commit": "4d8aa08",
+    "git_branch": "feat/roadmap-phase-3"
+  },
+  "mongodb": {
+    "version": "8.0.29",
+    "topology": "replica-set",
+    "uri": "mongodb://localhost:27017/?replicaSet=rs0",
+    "same_machine": true
+  },
+  "bounds": {
+    "min_iters": 8,
+    "task_seconds": 2.0,
+    "max_seconds": 8.0
+  },
+  "datasets": {
+    "source": "generated",
+    "gridfs_bytes": 1048576,
+    "mixed_n": 200,
+    "official_files": {
+      "tweet.json": false,
+      "small_doc.json": false,
+      "large_doc.json": false,
+      "gridfs_large.bin": false,
+      "flat_bson.json": false,
+      "deep_bson.json": false,
+      "full_bson.json": false
+    }
+  },
+  "tasks": [
+    { "name": "flat bson encode", "group": "bson", "median_ms": 166.12, "mb_s": 453.36, "n": 13, "bytes": 75310000 },
+    { "name": "flat bson decode", "group": "bson", "median_ms": 488.53, "mb_s": 154.16, "n": 8, "bytes": 75310000 },
+    { "name": "deep bson encode", "group": "bson", "median_ms": 24.7, "mb_s": 924.67, "n": 80, "bytes": 22840000 },
+    { "name": "deep bson decode", "group": "bson", "median_ms": 594.73, "mb_s": 38.4, "n": 8, "bytes": 22840000 },
+    { "name": "full bson encode", "group": "bson", "median_ms": 121.64, "mb_s": 471.41, "n": 17, "bytes": 57340000 },
+    { "name": "full bson decode", "group": "bson", "median_ms": 247.82, "mb_s": 231.38, "n": 9, "bytes": 57340000 },
+    { "name": "run command hello", "group": "single", "median_ms": 1049.88, "mb_s": 0.12, "n": 8, "bytes": 130000 },
+    { "name": "find one by id", "group": "single", "median_ms": 1395.7, "mb_s": 11.62, "n": 6, "bytes": 16220000 },
+    { "name": "small insertOne", "group": "single", "median_ms": 8107.22, "mb_s": 0.34, "n": 1, "bytes": 2750000 },
+    { "name": "large insertOne", "group": "single", "median_ms": 413.09, "mb_s": 66.11, "n": 8, "bytes": 27310890 },
+    { "name": "find many", "group": "multi", "median_ms": 13.19, "mb_s": 1229.39, "n": 100, "bytes": 16220000 },
+    { "name": "small insertMany", "group": "multi", "median_ms": 117.83, "mb_s": 23.34, "n": 17, "bytes": 2750000 },
+    { "name": "large insertMany", "group": "multi", "median_ms": 393.63, "mb_s": 69.38, "n": 8, "bytes": 27310890 },
+    { "name": "small collection bulkWrite", "group": "multi", "median_ms": 84.03, "mb_s": 32.73, "n": 24, "bytes": 2750000 },
+    { "name": "large collection bulkWrite", "group": "multi", "median_ms": 52.34, "mb_s": 521.83, "n": 39, "bytes": 27310890 },
+    { "name": "small collection bulkWrite mixed", "group": "multi", "median_ms": 590.03, "mb_s": 0.19, "n": 8, "bytes": 110000 },
+    { "name": "gridfs upload", "group": "multi", "median_ms": 4.22, "mb_s": 248.33, "n": 100, "bytes": 1048576 },
+    { "name": "gridfs download", "group": "multi", "median_ms": 0.92, "mb_s": 1138.22, "n": 100, "bytes": 1048576 },
+    { "name": "parallel small insertMany", "group": "extra", "median_ms": 21.25, "mb_s": 25.88, "n": 94, "bytes": 550000 }
+  ],
+  "composites": {
+    "BSONBench": 378.9,
+    "SingleBench": 26.02,
+    "MultiBench": 407.92,
+    "ReadBench": 793.08,
+    "WriteBench": 120.28,
+    "DriverBench": 456.68
+  },
+  "notes": [
+    "Reconstructed from stdout of the 2026-08-21 short run. The runner did not write JSON yet.",
+    "Default Crystal build (not --release). Later reference runs should use --release.",
+    "BSON decode in this run was BSON.new(bytes) only (copy + header). Later runs use to_h so decode matches the spec native document.",
+    "Generated in-memory documents. Official files were not in bench/data/.",
+    "GridFS file is 1048576 bytes (spec size is 52428800).",
+    "Mixed collection bulkWrite used 200 documents (spec size is 10000).",
+    "WriteBench here excludes parallel small insertMany. The stdout line 109.79 MB/s included that extra task."
+  ]
+}

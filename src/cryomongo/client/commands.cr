@@ -419,19 +419,24 @@ class Mongo::Client
       # Mark the socket dead so checkin uses reason "error", not "stale".
       connection.close
       Mongo::Log.error(exception: error) { "Network error" } unless server_description
-      # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#network-or-command-error-during-server-check
-      if @options.load_balanced
-        handle_load_balanced_error(server_description, connection, error)
-      else
-        server_description.try { |desc|
-          Mongo::Log.error(exception: error) { "I/O error with server address: #{desc.address}" }
-          description = SDAM::ServerDescription.new(desc.address)
-          description.error = error.message
-          description.last_update_time = desc.last_update_time
-          topology.update(desc, description)
-          close_connection_pool(desc)
-          @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
-        }
+      # After handshake, a socket timeout is a slow operation, not a dead server.
+      # closeConnection / reset still mark Unknown and clear the pool.
+      timeout_after_handshake = error.is_a?(IO::TimeoutError)
+      unless timeout_after_handshake
+        # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#network-or-command-error-during-server-check
+        if @options.load_balanced
+          handle_load_balanced_error(server_description, connection, error)
+        else
+          server_description.try { |desc|
+            Mongo::Log.error(exception: error) { "I/O error with server address: #{desc.address}" }
+            description = SDAM::ServerDescription.new(desc.address)
+            description.error = error.message
+            description.last_update_time = desc.last_update_time
+            topology.update(desc, description)
+            clear_pool(desc)
+            @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
+          }
+        end
       end
       session.try &.dirty = true
       error = Error::Network.new(error)
@@ -512,7 +517,7 @@ class Mongo::Client
     description.last_update_time = desc.last_update_time
     description.topology_version = error.topology_version
     topology.update(desc, description)
-    close_connection_pool(desc) if error.shutdown?
+    clear_pool(desc) if error.shutdown?
     @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
   end
 

@@ -43,11 +43,17 @@ module Mongo::Unified
       # waitForPrimaryChange / recordTopologyDescription. Keep those files pending.
       @force_observe_sensitive = file_path.includes?("redacted-commands")
 
-      # pool-cleared-error.json still races with rediscovery after closeConnection.
+      # interruptInUseConnections is not implemented. Logging UTF needs SDAM log
+      # messages. Other unified SDAM files run; missing ops become SKIP_TEST.
+      # Files below still fail for known holes (handshake backpressure labels,
+      # extra Unknown on concurrent shutdown, topology events before subscribe).
       if file_path.ends_with?("interruptInUse-pool-clear.json") ||
-         file_path.ends_with?("rediscover-quickly-after-step-down.json") ||
-         file_path.ends_with?("pool-cleared-error.json") ||
-         file_path.includes?("server-discovery-and-monitoring/unified/")
+         file_path.ends_with?("backpressure-network-error-fail-replicaset.json") ||
+         file_path.ends_with?("backpressure-network-timeout-fail-replicaset.json") ||
+         file_path.ends_with?("find-shutdown-error.json") ||
+         file_path.ends_with?("insert-shutdown-error.json") ||
+         file_path.ends_with?("replicaset-emit-topology-changed-before-close.json") ||
+         file_path.includes?("/logging-")
         @skip_reason = "hardcoded skip"
       end
     end
@@ -753,7 +759,8 @@ module Mongo::Unified
 
       outcome.each do |data|
         coll = internal_client[data.databaseName][data.collectionName]
-        actual_docs = coll.find.to_a
+        # Official UTF: sort {_id: 1} so outcome order is stable.
+        actual_docs = coll.find(sort: {_id: 1}).to_a
 
         unless Matcher.documents_match?(data.documents, actual_docs)
           raise Exception.new("TEST_FAILED: outcome mismatch for #{data.databaseName}.#{data.collectionName}: expected #{data.documents.inspect}, got #{actual_docs.map(&.to_canonical_extjson)}")

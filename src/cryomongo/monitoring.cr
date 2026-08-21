@@ -29,29 +29,33 @@ module Mongo::Monitoring
   # Provides an observable interface for the `Mongo::Client`.
   class Observable(T)
     @observable_lock = Sync::Mutex.new
-    @subscribers : Set(T -> Nil) = Set(T -> Nil).new
-    # Avoid taking the mutex on every command just to ask if anyone is listening.
+    # Copy-on-write. Subscribe replaces this array. Broadcast reads it without a lock.
+    @subscribers : Array(T -> Nil) = [] of T -> Nil
     @subscriber_count = Atomic(Int32).new(0)
 
     def broadcast(event : T)
-      # Copy under the lock, then call outside it. A subscriber that talks to
-      # the client must not deadlock on this mutex.
-      subscribers = @observable_lock.synchronize { @subscribers.dup }
-      subscribers.each &.call(event)
+      return if @subscriber_count.get == 0
+      # Do not dup. The array is never mutated after it is published.
+      list = @subscribers
+      list.each &.call(event)
     end
 
     def subscribe(&callback : T -> Nil) : T -> Nil
       @observable_lock.synchronize {
-        @subscribers.add(callback)
-        @subscriber_count.set(@subscribers.size)
+        next_list = @subscribers.dup
+        next_list << callback
+        @subscribers = next_list
+        @subscriber_count.set(next_list.size)
       }
       callback
     end
 
     def unsubscribe(callback : T -> Nil) : Nil
       @observable_lock.synchronize {
-        @subscribers.delete(callback)
-        @subscriber_count.set(@subscribers.size)
+        next_list = @subscribers.dup
+        next_list.delete(callback)
+        @subscribers = next_list
+        @subscriber_count.set(next_list.size)
       }
     end
 

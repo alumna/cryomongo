@@ -62,6 +62,25 @@ class Mongo::Connection::Pool(T)
     @initial_pool_size.times { build_resource }
   end
 
+  # Create idle sockets up to minPoolSize. Called after the pool is in the
+  # client map so handshake I/O does not hold the address-map lock.
+  def ensure_min(n : Int32) : Nil
+    return if n <= 0
+    limit = n
+    if @max_pool_size > 0 && limit > @max_pool_size
+      limit = @max_pool_size
+    end
+    held = [] of T
+    begin
+      loop do
+        break if sync { @closed || @total.size >= limit || !can_increase_pool? }
+        held << checkout
+      end
+    ensure
+      held.each { |resource| release(resource) }
+    end
+  end
+
   # close all resources in the pool
   def close : Nil
     sync do
@@ -110,10 +129,9 @@ class Mongo::Connection::Pool(T)
     sync { @in_use[resource.connection_id] = InUse::Transaction }
   end
 
-  # Increment generation. Idle sockets that are now stale are closed.
-  # Load-balanced: pass service_id so other mongos sockets stay.
-  # Returns the idle sockets that were closed.
   # Increment generation. Idle sockets stay until checkin/checkout (CMAP lazy close).
+  # Load-balanced: pass service_id so other mongos sockets stay.
+  # Waiters on a full clear (no service_id) get PoolClearedError. The pool stays open.
   def clear(service_id : BSON::ObjectId? = nil) : Array(T)
     sync do
       if sid = service_id
@@ -121,6 +139,11 @@ class Mongo::Connection::Pool(T)
       else
         @generation += 1
       end
+      # Wake waiters. They see the new generation (or a closed channel) and
+      # raise PoolCleared instead of waiting for the dead socket.
+      old = @availability_channel
+      @availability_channel = Channel(Nil).new
+      old.close
     end
     [] of T
   end
@@ -128,10 +151,12 @@ class Mongo::Connection::Pool(T)
   def checkout(wait : Time::Span? = nil) : T
     res = sync do
       raise Mongo::Error::PoolCleared.new("Connection pool was cleared") if @closed
+      start_gen = @generation
 
       resource = nil
 
       until resource
+        raise Mongo::Error::PoolCleared.new("Connection pool was cleared") if @closed
         resource = if @idle.empty?
                      if can_increase_pool?
                        @inflight += 1
@@ -145,9 +170,16 @@ class Mongo::Connection::Pool(T)
                          @inflight -= 1
                        end
                      else
+                       # Full clear while waiting: CMAP waiters get PoolClearedError.
+                       if @generation != start_gen
+                         raise Mongo::Error::PoolCleared.new("Connection pool was cleared")
+                       end
                        timed_out = false
                        unsync { timed_out = !wait_for_available(wait) }
                        raise Mongo::Error::PoolCleared.new("Connection pool was cleared") if @closed
+                       if @generation != start_gen
+                         raise Mongo::Error::PoolCleared.new("Connection pool was cleared")
+                       end
                        raise wait_queue_error if timed_out
                        pick_available
                      end
@@ -220,6 +252,7 @@ class Mongo::Connection::Pool(T)
     sync do
       resource.close
       remove(resource)
+      signal_available
     end
   end
 
@@ -236,12 +269,14 @@ class Mongo::Connection::Pool(T)
 
       if resource.socket.closed?
         remove(resource)
+        signal_available
         return "error"
       end
 
       if stale_unlocked?(resource)
         resource.close
         remove(resource)
+        signal_available
         return "stale"
       end
 
@@ -383,6 +418,15 @@ class Mongo::Connection::Pool(T)
   private def discard(resource : T)
     resource.close
     remove(resource)
+    signal_available
+  end
+
+  # Wake one waiter without blocking. Used when a slot is freed (dead / stale).
+  private def signal_available : Nil
+    select
+    when @availability_channel.send nil
+    else
+    end
   end
 
   private def can_increase_pool?

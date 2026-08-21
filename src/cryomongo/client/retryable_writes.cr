@@ -94,9 +94,8 @@ class Mongo::Client
   end
 
   # Prefer a live copy of the pinned server. After closeConnection that
-  # address is Unknown; wait for a suitable server instead of using the stale
-  # pin (which would skip retries). The session stays pinned; pin() refreshes
-  # the description after connect.
+  # address is Unknown. Handshake on get_connection rediscovers it. Waiting
+  # only on the monitor can miss that (pool-cleared-error).
   private def live_retryable_write_server(
     preferred : SDAM::ServerDescription?,
     command,
@@ -109,9 +108,26 @@ class Mongo::Client
       if live && !live.type.unknown? && live.supports_retryable_writes?
         return live
       end
-      # TopologyType Single returns Unknown immediately. Handshake rediscovers.
-      if live && live.type.unknown? && topology.type.single?
+      if live && live.type.unknown?
         return live
+      end
+    end
+    # Waiters after PoolCleared have no pin. Handshake an Unknown member only
+    # when no writable server is already known.
+    writable = false
+    unknown = nil.as(SDAM::ServerDescription?)
+    topology.servers.each do |server|
+      if server.type.rs_primary? || server.type.mongos? || server.type.standalone? || server.type.load_balancer?
+        writable = true
+        break
+      end
+      if unknown.nil? && server.type.unknown?
+        unknown = server
+      end
+    end
+    if !writable
+      if found = unknown
+        return found
       end
     end
     server_selection(command, args, read_preference, deadline)

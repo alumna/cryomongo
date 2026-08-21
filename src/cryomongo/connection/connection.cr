@@ -1,6 +1,7 @@
 require "openssl"
 require "./credentials"
 require "./auth"
+require "../compression"
 
 # :nodoc:
 # Class so pin, pool, and checkout share one object (generation, serviceId, socket).
@@ -11,6 +12,7 @@ class Mongo::Connection
   getter credentials : Mongo::Credentials
   getter socket : IO
   getter connection_id : Int64
+  getter compressor_id : Compression::Id? = nil
   property service_id : BSON::ObjectId? = nil
   # Pool generation at handshake. A later clear with a higher value makes this socket stale.
   property generation : Int32 = 0
@@ -81,12 +83,15 @@ class Mongo::Connection
 
     @socket = socket
     @connection_id = @@next_connection_id.add(1)
+    @opcode_buf = IO::Memory.new(4096)
+    @compressed_buf = IO::Memory.new(4096)
   end
 
   def handshake(*, send_metadata = false, appname = nil, legacy = false, client_metadata : BSON? = nil, load_balanced : Bool = false)
     # First handshake uses legacy hello unless Server API or load-balanced is set.
     # Later heartbeats use hello when the server sent helloOk: true.
     use_legacy = legacy
+    metadata = nil
     if send_metadata
       metadata = client_metadata
       if metadata.nil? && appname
@@ -94,16 +99,14 @@ class Mongo::Connection
       elsif metadata.nil?
         metadata = Handshake.client_document(nil)
       end
-      body, _ = Commands::Hello.command(appname: appname, legacy: use_legacy, client: metadata, load_balanced: load_balanced)
-    else
-      cmd_name = use_legacy ? "isMaster" : "hello"
-      body = BSON.build do |builder|
-        builder[cmd_name] = 1
-        builder["$db"] = "admin"
-        builder["helloOk"] = true
-        builder["backpressure"] = "2"
-      end
     end
+    body, _ = Commands::Hello.command(
+      appname: appname,
+      legacy: use_legacy,
+      client: metadata,
+      load_balanced: load_balanced,
+      compression: @options.compressor_list
+    )
 
     add_sasl = @credentials.username && !@credentials.mechanism
     api = @options.server_api
@@ -146,6 +149,7 @@ class Mongo::Connection
     end
 
     @use_hello = !use_legacy || result.helloOk == true
+    @compressor_id = Compression.negotiate(@options.compressor_list, result.compression)
 
     if load_balanced
       sid = result.serviceId
@@ -235,7 +239,11 @@ class Mongo::Connection
 
     yield message
 
-    message.to_io(socket)
+    if (id = @compressor_id) && compress_command?(command)
+      write_compressed(message, id)
+    else
+      message.to_io(socket)
+    end
   end
 
   def send(op_msg : Messages::OpMsg, command = nil, log = true)
@@ -276,5 +284,43 @@ class Mongo::Connection
 
   def close
     @socket.close unless @socket.closed?
+  end
+
+  private def compress_command?(command) : Bool
+    return false unless command
+    name = if command.responds_to?(:name)
+             command.name
+           elsif command.is_a?(String)
+             command
+           else
+             return false
+           end
+    !Compression.forbidden?(name)
+  end
+
+  # Wrap OP_MSG in OP_COMPRESSED. The inner body has no MsgHeader.
+  private def write_compressed(message : Messages::Message, id : Compression::Id) : Nil
+    @opcode_buf.clear
+    message.contents.to_io(@opcode_buf)
+    uncompressed = @opcode_buf.to_slice
+    uncompressed_size = uncompressed.size
+
+    @compressed_buf.clear
+    level = @options.zlib_compression_level || -1
+    Compression.deflate(id, uncompressed, @compressed_buf, level)
+    compressed = @compressed_buf.to_slice
+
+    header = Messages::Header.new(
+      message_length: 25 + compressed.size,
+      request_id: message.header.request_id,
+      response_to: message.header.response_to,
+      op_code: Messages::OpCode::Compressed
+    )
+    header.to_io(socket)
+    socket.write_bytes(message.header.op_code.value, IO::ByteFormat::LittleEndian)
+    socket.write_bytes(uncompressed_size, IO::ByteFormat::LittleEndian)
+    socket.write_byte(id.value)
+    socket.write(compressed)
+    socket.flush
   end
 end
