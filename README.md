@@ -45,7 +45,7 @@ The driver is **0.x**. It is ready for core CRUD, sessions, and transactions on 
 - Unified `pool-cleared-error.json`. Socket timeouts after handshake do not mark the server Unknown.
 
 **Not done yet (MongoDB 8.0). See [ROADMAP.md](ROADMAP.md) Phase 3.1–3.14 and [FIXES.md](FIXES.md).**
-- Unified SDAM still skipped: concurrent shutdown extra Unknown, SDAM logging. `minPoolSize-error.json`, `hello-command-error.json`, `hello-network-error.json`, `serverMonitoringMode.json`, handshake backpressure files, and `interruptInUse-pool-clear.json` now run. `replicaset-emit-topology-changed-before-close.json` needs a 3-member replica set (local and GitHub Docker are one member).
+- Unified SDAM still skipped: SDAM logging. `minPoolSize-error.json`, `hello-command-error.json`, `hello-network-error.json`, `serverMonitoringMode.json`, handshake backpressure files, `interruptInUse-pool-clear.json`, `find-shutdown-error.json`, and `insert-shutdown-error.json` now run. `replicaset-emit-topology-changed-before-close.json` needs a 3-member replica set (local and GitHub Docker are one member).
 - UTF ops still `SKIP_TEST`: client `bulkWrite`, `let` on CRUD, legacy `count`, `mapReduce`, `waitForPrimaryChange` / `recordTopologyDescription` / `assertTopologyType`.
 - No users on CI, so `auth: true` UTF does not run (handshake-error files, unified SDAM auth-error files). Speculative auth and monitor auth are missing.
 - snappy / zstd. TLS key-file password and OCSP flags are parsed and unused. Official CMAP JSON is not copied. CLAM is 1 of 23 files. GridFS `deleteByName` / `renameByName` not copied.

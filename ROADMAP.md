@@ -70,7 +70,7 @@ Unified `pool-cleared-error.json` passes. zlib is Phase 3 (done). Everything sti
 
 This phase optimizes the driver to take full advantage of Crystal's new `-Dpreview_mt` / `Execution Contexts` and reduces network overhead.
 
-Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=zlib` after Phase **3.2** is **783** examples: standalone **2:02 / 209 pending**, replica set **6:08 / 94 pending**, sharded **8:05 / 101 pending**, load-balanced **5:25 / 136 pending**. Local after Phase **3.5** is still **783** examples: standalone **2:10 / 204 pending**, replica set **6:13 / 91 pending**, sharded **8:15 / 99 pending**, load-balanced **5:26 / 136 pending**. What is still skipped, and what is out of scope, is listed below and in `FIXES.md`.
+Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=zlib` after Phase **3.2** is **783** examples: standalone **2:02 / 209 pending**, replica set **6:08 / 94 pending**, sharded **8:05 / 101 pending**, load-balanced **5:25 / 136 pending**. Local after Phase **3.6** is still **783** examples: standalone **2:12 / 202 pending**, replica set **6:14 / 89 pending**, sharded **8:10 / 97 pending**, load-balanced **5:15 / 136 pending**. What is still skipped, and what is out of scope, is listed below and in `FIXES.md`.
 
 ### Concurrency
 - [x] **CI Parallel Testing:** GitHub runs `crystal spec -Dpreview_mt -Dexecution_context` and sets `CRYSTAL_WORKERS=2` so the default execution context is resized.
@@ -89,7 +89,7 @@ Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CR
 
 ## Remaining work (MongoDB 8.0, toward production grade)
 
-Phases 1–3 are done. Local Phase **3.5** `crystal spec` is green (**783** examples). Push a PR so GitHub Docker confirms the matrix. The driver is production-capable for core 8.0 (CRUD, sessions, transactions). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). The **3.x** sub-phases below close remaining 8.0 holes. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
+Phases 1–3 are done. Local Phase **3.6** `crystal spec` is green (**783** examples). Push a PR so GitHub Docker confirms the matrix. The driver is production-capable for core 8.0 (CRUD, sessions, transactions). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). The **3.x** sub-phases below close remaining 8.0 holes. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
 
 ### Out of scope until the user asks
 
@@ -149,8 +149,10 @@ Monitor timeout clears the pool with `interruptInUseConnections: true` and unblo
 
 ### Phase 3.6 — Concurrent shutdown stale-generation
 
-- [ ] Ignore stale-generation errors so UTF does not see two Unknown events.
-- [ ] Un-skip `find-shutdown-error.json` and `insert-shutdown-error.json`.
+- [x] Ignore stale-generation errors so UTF does not see two Unknown events.
+- [x] Un-skip `find-shutdown-error.json` and `insert-shutdown-error.json`.
+
+The files run on standalone, replica set, and sharded. Load-balanced skips them (`runOnRequirements`).
 
 ### Phase 3.7 — UTF topology helpers
 
