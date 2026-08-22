@@ -217,16 +217,6 @@ module Mongo::Unified
           Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "no killCursors after a dead load-balanced pin", duration_ms: Timing.elapsed_ms(test_started))
           next
         end
-        # This LXC mongod hello wait is ~1s (newer kernel / GLIBC rseq). Official
-        # timeout is connectTimeoutMS + heartbeatFrequencyMS (250+500=750).
-        # mongos is fine. GitHub Docker mongod is fine.
-        if test.description == "Driver extends timeout while streaming" &&
-           ENV["GITHUB_ACTIONS"]? != "true" &&
-           (@@topology == "replicaset" || @@topology == "single")
-          skipped += 1
-          Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "local mongod hello wait is ~1s", duration_ms: Timing.elapsed_ms(test_started))
-          next
-        end
         if only = ENV["UTF_TEST"]?
           unless test.description.includes?(only)
             skipped += 1

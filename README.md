@@ -11,7 +11,7 @@
 
 This is a fork of `elbywan/cryomongo`. The goal is to make the driver ready for **MongoDB 8.0** and **Crystal 1.21**. We plan to merge back to the original project when that work is done.
 
-The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). Semver is **0.x**. **Phase 1**, **Phase 2**, and **Phase 3** of [ROADMAP.md](ROADMAP.md) are done. Local `crystal spec -Dpreview_mt -Dexecution_context` after Phase **3.2** is **783** examples, 0 failures, 0 errors: standalone **2:00 / 209 pending**, replica set **6:06 / 94 pending**, sharded **8:12 / 101 pending**, load-balanced **5:45 / 136 pending**. Spec jobs resize the default execution context (`CRYSTAL_WORKERS=2`) and use zlib wire compression. Push a PR so GitHub Docker confirms the same matrix.
+The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). Semver is **0.x**. **Phase 1**, **Phase 2**, and **Phase 3** of [ROADMAP.md](ROADMAP.md) are done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` after Phase **3.2** is **783** examples: standalone **2:02 / 209 pending**, replica set **6:08 / 94 pending**, sharded **8:05 / 101 pending**, load-balanced **5:25 / 136 pending**. Spec jobs resize the default execution context (`CRYSTAL_WORKERS=2`) and use zlib wire compression.
 
 The driver is ready for **core CRUD, sessions, and transactions** on MongoDB 8.0. **1.0** waits on client-side encryption (Phase 4) and cloud auth (Phase 5: AWS / OIDC). Remaining 8.0 work is [ROADMAP.md](ROADMAP.md) Phase 3.1–3.14.
 

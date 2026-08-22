@@ -187,14 +187,14 @@ module Mongo::SDAM
 
       begin
         if conn.more_to_come?
-          apply_socket_timeout(conn, extra: @heartbeat_frequency)
+          apply_socket_timeout(conn, extra: awaitable_timeout_extra(previous))
           result, rtt = conn.hello(legacy: !conn.use_hello?, exhaust_read: true)
           return {result, rtt, false}
         end
         # Unknown from a state-change error may still carry topologyVersion.
         # Do not await on that value; handshake a new socket instead.
         if @streaming && !previous.type.unknown? && (tv = previous.topology_version)
-          apply_socket_timeout(conn, extra: @heartbeat_frequency)
+          apply_socket_timeout(conn, extra: awaitable_timeout_extra(previous))
           result, rtt = conn.hello(
             legacy: !conn.use_hello?,
             topology_version: tv,
@@ -274,6 +274,18 @@ module Mongo::SDAM
       @rtt.reset
       @retry_now = known && error.is_a?(Mongo::Client::NetworkError)
       description
+    end
+
+    private def awaitable_timeout_extra(previous : ServerDescription) : Time::Span
+      extra = @heartbeat_frequency
+      # mongod 8.0 waits ~1s when topologyVersion does not change, even if
+      # maxAwaitTimeMS is 200–750. connectTimeoutMS + heartbeatFrequencyMS
+      # (250+500=750) then marks Unknown and fails hello-timeout.json
+      # "Driver extends timeout while streaming". mongos ticks sooner.
+      if extra < 1.second && !previous.type.mongos?
+        extra = 1.second
+      end
+      extra
     end
 
     private def apply_socket_timeout(conn : Mongo::Connection, extra : Time::Span? = nil) : Nil

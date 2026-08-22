@@ -230,6 +230,7 @@ class Mongo::Connection
       receive_one
     ensure
       @socket = inner
+      apply_timeout(overall)
     end
   end
 
