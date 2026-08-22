@@ -18,6 +18,8 @@ class Mongo::SDAM::ServerDescription
   getter address : String
   # Information about the last error related to this server
   property error : String? = nil
+  # True when the last monitor error was IO::TimeoutError (interrupt in-use sockets).
+  property error_is_timeout : Bool = false
   # The duration of the hello call.
   property round_trip_time : Time::Span = 0.seconds
   # Last hello samples (at most 10). CSOT uses the min after two samples.

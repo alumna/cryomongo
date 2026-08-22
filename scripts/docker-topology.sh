@@ -17,8 +17,12 @@
 set -euo pipefail
 
 IMAGE="${MONGO_IMAGE:-mongo:8.0}"
-MONGOD_PARAMS="--setParameter enableTestCommands=1 --setParameter acceptApiVersion2=1 --setParameter transactionLifetimeLimitSeconds=20"
-MONGOS_PARAMS="--setParameter enableTestCommands=1 --setParameter acceptApiVersion2=1"
+# minWaitForStreamingHelloMillis=0: mongod 8.0 default is 1000ms, which ignores
+# maxAwaitTimeMS 200–750 and breaks hello-timeout / interruptInUse UTF.
+MONGOD_PARAMS="--setParameter enableTestCommands=1 --setParameter acceptApiVersion2=1 --setParameter transactionLifetimeLimitSeconds=20 --setParameter minWaitForStreamingHelloMillis=0"
+# mongos rejects mongod-only parameters such as transactionLifetimeLimitSeconds.
+# minWaitForStreamingHelloMillis is accepted on mongos 8.0.
+MONGOS_PARAMS="--setParameter enableTestCommands=1 --setParameter acceptApiVersion2=1 --setParameter minWaitForStreamingHelloMillis=0"
 
 dump_logs() {
   local name="$1"

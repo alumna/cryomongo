@@ -41,6 +41,7 @@ class Mongo::Client
   protected getter min_heartbeat_frequency : Time::Span = 500.milliseconds
 
   @monitoring_enabled : Bool
+  @closing = Atomic(Bool).new(false)
 
   @topology_lock = Sync::Mutex.new(:reentrant)
   @cluster_time_lock = Sync::Mutex.new
@@ -169,6 +170,7 @@ class Mongo::Client
 
   # Frees all the resources associated with a client.
   def close
+    @closing.set(true)
     @srv_poller.try(&.close)
 
     # End sessions while pools are still open. EndSessions needs a socket.
@@ -490,8 +492,26 @@ class Mongo::Client
         emit_cmap_event(Monitoring::CMAP::ConnectionCheckedOutEvent.new(server_description.address, conn.connection_id))
         return conn
       rescue error : Mongo::Error::PoolCleared
-        emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
-        raise error
+        # Closed is terminal. Paused: wait for the monitor to mark ready (first
+        # hello, or after a clear). Do not mark the server Unknown.
+        if pool.closed? || @closing.get
+          emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+          raise error
+        end
+        last_network = error
+        leftover_wait = deadline - Time.instant
+        if leftover_wait <= Time::Span.zero
+          emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+          raise error
+        end
+        # Single can select Unknown at once, so selection does not scan.
+        # Wake the monitor or minPoolSize-error waits out heartbeatFrequencyMS.
+        @monitors.find(&.server_description.address.== server_description.address).try(&.request_immediate_scan)
+        pause_wait = leftover_wait < 50.milliseconds ? leftover_wait : 50.milliseconds
+        select
+        when @topology_update.receive
+        when timeout pause_wait
+        end
       rescue error : Mongo::Error::Connection
         emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "timeout"))
         raise error
@@ -811,25 +831,29 @@ class Mongo::Client
 
   # Network / shutdown error: bump generation, wake waiters, keep the pool.
   # Do not delete the pool. A new pool plus handshake can race with Unknown.
-  protected def clear_pool(server_description : SDAM::ServerDescription) : Nil
+  # interrupt_in_use: close checked-out sockets after the event (monitor timeout).
+  protected def clear_pool(server_description : SDAM::ServerDescription, interrupt_in_use : Bool = false) : Nil
     pool = pool_at(server_description.address)
     return unless pool
-    closed = pool.clear
-    emit_cmap_event(Monitoring::CMAP::PoolClearedEvent.new(server_description.address))
-    closed.each do |conn|
-      emit_cmap_event(Monitoring::CMAP::ConnectionClosedEvent.new(server_description.address, conn.connection_id, "stale"))
+    emit, to_interrupt = pool.clear(interrupt_in_use: interrupt_in_use)
+    if emit
+      emit_cmap_event(Monitoring::CMAP::PoolClearedEvent.new(
+        server_description.address,
+        interrupt_in_use_connections: interrupt_in_use
+      ))
     end
+    to_interrupt.each(&.interrupt_in_use)
   end
 
   # Load-balanced: increment generation for one serviceId. Other mongos sockets stay.
   protected def clear_connection_pool(server_description : SDAM::ServerDescription, service_id : BSON::ObjectId) : Nil
     pool = pool_at(server_description.address)
     return unless pool
-    closed = pool.clear(service_id)
-    emit_cmap_event(Monitoring::CMAP::PoolClearedEvent.new(server_description.address, service_id))
-    closed.each do |conn|
-      emit_cmap_event(Monitoring::CMAP::ConnectionClosedEvent.new(server_description.address, conn.connection_id, "stale"))
+    emit, to_interrupt = pool.clear(service_id)
+    if emit
+      emit_cmap_event(Monitoring::CMAP::PoolClearedEvent.new(server_description.address, service_id))
     end
+    to_interrupt.each(&.interrupt_in_use)
   end
 
   protected def emit_cmap_event(event : Monitoring::CMAP::Event)

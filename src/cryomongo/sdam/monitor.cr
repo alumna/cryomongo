@@ -175,7 +175,7 @@ module Mongo::SDAM
       @topology.update(previous, new_description)
       # Clear with the topology update. Only when leaving a known state so UTF
       # sees one poolClearedEvent (a paused pool would emit again).
-      @client.clear_pool(previous) if new_description.error && known
+      @client.clear_pool(previous, interrupt_in_use: new_description.error_is_timeout) if new_description.error && known
     end
 
     private def do_check(previous : ServerDescription) : {Commands::Hello::Result, Time::Span, Bool}
@@ -300,6 +300,7 @@ module Mongo::SDAM
       known = !previous.type.unknown?
       description = ServerDescription.new(previous.address)
       description.error = error.message
+      description.error_is_timeout = error.is_a?(IO::TimeoutError)
       description.last_update_time = Time.utc
       drop_monitor_socket
       @rtt.reset
@@ -309,14 +310,20 @@ module Mongo::SDAM
 
     private def awaitable_timeout_extra(previous : ServerDescription) : Time::Span
       extra = @heartbeat_frequency
-      # mongod 8.0 waits ~1s when topologyVersion does not change, even if
-      # maxAwaitTimeMS is 200–750. connectTimeoutMS + heartbeatFrequencyMS
-      # (250+500=750) then marks Unknown and fails hello-timeout.json
-      # "Driver extends timeout while streaming". mongos ticks sooner.
-      if extra < 1.second && !previous.type.mongos?
-        extra = 1.second
-      end
-      extra
+      return extra if previous.type.mongos?
+      configured = @client.options.connect_timeout
+      return extra if configured && configured.total_milliseconds == 0
+      base = configured || 10.seconds
+      # mongod 8.0 default minWaitForStreamingHelloMillis is 1000, so an
+      # unchanged topologyVersion waits ~1s even when maxAwaitTimeMS is smaller.
+      # hello-timeout "extends timeout" is 750ms; floor that whole read to 1.1s
+      # so an unpatched mongod does not mark Unknown. interruptInUse is 1s spec
+      # sum and must stay at 1s so the monitor times out during the 2s find.
+      # Test topologies set minWaitForStreamingHelloMillis=0 so maxAwaitTimeMS
+      # is honored (500ms wait, 1s timeout).
+      spec_sum = base + extra
+      return extra unless spec_sum < 1.second
+      1.1.seconds - base
     end
 
     private def apply_socket_timeout(conn : Mongo::Connection, extra : Time::Span? = nil) : Nil

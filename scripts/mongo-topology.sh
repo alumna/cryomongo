@@ -19,9 +19,12 @@ export GLIBC_TUNABLES="${GLIBC_TUNABLES:-glibc.pthread.rseq=1}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DATA="${ROOT}/data"
-MONGOD_PARAMS=(--setParameter enableTestCommands=1 --setParameter acceptApiVersion2=1 --setParameter transactionLifetimeLimitSeconds=20)
-# mongos rejects mongod-only parameters such as transactionLifetimeLimitSeconds
-MONGOS_PARAMS=(--setParameter enableTestCommands=1 --setParameter acceptApiVersion2=1)
+# minWaitForStreamingHelloMillis=0: mongod 8.0 default is 1000ms, which ignores
+# maxAwaitTimeMS 200–750 and breaks hello-timeout / interruptInUse UTF.
+MONGOD_PARAMS=(--setParameter enableTestCommands=1 --setParameter acceptApiVersion2=1 --setParameter transactionLifetimeLimitSeconds=20 --setParameter minWaitForStreamingHelloMillis=0)
+# mongos rejects mongod-only parameters such as transactionLifetimeLimitSeconds.
+# minWaitForStreamingHelloMillis is accepted on mongos 8.0 (runtime and startup).
+MONGOS_PARAMS=(--setParameter enableTestCommands=1 --setParameter acceptApiVersion2=1 --setParameter minWaitForStreamingHelloMillis=0)
 
 status() {
   if mongosh --quiet --eval 'db.hello().ok' >/dev/null 2>&1; then

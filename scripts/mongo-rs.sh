@@ -28,10 +28,11 @@ status() {
       print("setName=" + (h.setName || "(none)"));
       print("isWritablePrimary=" + h.isWritablePrimary);
       print("maxWireVersion=" + h.maxWireVersion);
-      const p = db.adminCommand({getParameter: 1, enableTestCommands: 1, acceptApiVersion2: 1, transactionLifetimeLimitSeconds: 1});
+      const p = db.adminCommand({getParameter: 1, enableTestCommands: 1, acceptApiVersion2: 1, transactionLifetimeLimitSeconds: 1, minWaitForStreamingHelloMillis: 1});
       print("enableTestCommands=" + p.enableTestCommands);
       print("acceptApiVersion2=" + p.acceptApiVersion2);
       print("transactionLifetimeLimitSeconds=" + p.transactionLifetimeLimitSeconds);
+      print("minWaitForStreamingHelloMillis=" + p.minWaitForStreamingHelloMillis);
     '
   else
     echo "mongod is not reachable on 127.0.0.1:27017"
@@ -67,6 +68,13 @@ if "transactionLifetimeLimitSeconds" not in text:
         text = text.replace("  acceptApiVersion2: 1", "  acceptApiVersion2: 1\n  transactionLifetimeLimitSeconds: 20")
     else:
         text += "\nsetParameter:\n  transactionLifetimeLimitSeconds: 20\n"
+# mongod 8.0 default 1000ms wait ignores maxAwaitTimeMS 200–750 (hello-timeout /
+# interruptInUse UTF). 0 honors the driver's maxAwaitTimeMS.
+if "minWaitForStreamingHelloMillis" not in text:
+    if "setParameter:" in text:
+        text = text.replace("  transactionLifetimeLimitSeconds: 20", "  transactionLifetimeLimitSeconds: 20\n  minWaitForStreamingHelloMillis: 0")
+    else:
+        text += "\nsetParameter:\n  minWaitForStreamingHelloMillis: 0\n"
 p.write_text(text)
 print(p.read_text())
 PY
@@ -93,6 +101,7 @@ initiate() {
   for _ in $(seq 1 30); do
     if mongosh --quiet --eval 'db.hello().isWritablePrimary' 2>/dev/null | grep -q true; then
       echo "primary is ready"
+      mongosh --quiet --eval 'db.adminCommand({setParameter: 1, minWaitForStreamingHelloMillis: 0})' >/dev/null
       return 0
     fi
     sleep 1
@@ -111,7 +120,8 @@ start_local() {
     --dbpath "$DATA" --pidfilepath "$PIDFILE" --logpath "$LOGFILE" --fork \
     --setParameter enableTestCommands=1 \
     --setParameter acceptApiVersion2=1 \
-    --setParameter transactionLifetimeLimitSeconds=20
+    --setParameter transactionLifetimeLimitSeconds=20 \
+    --setParameter minWaitForStreamingHelloMillis=0
   initiate
 }
 

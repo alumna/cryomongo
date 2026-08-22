@@ -70,7 +70,7 @@ Unified `pool-cleared-error.json` passes. zlib is Phase 3 (done). Everything sti
 
 This phase optimizes the driver to take full advantage of Crystal's new `-Dpreview_mt` / `Execution Contexts` and reduces network overhead.
 
-Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=zlib` after Phase **3.2** is **783** examples: standalone **2:02 / 209 pending**, replica set **6:08 / 94 pending**, sharded **8:05 / 101 pending**, load-balanced **5:25 / 136 pending**. Local after Phase **3.4** is still **783** examples: standalone **2:04 / 204 pending**, replica set **6:05 / 92 pending**, sharded **8:06 / 100 pending**, load-balanced **5:41 / 136 pending**. What is still skipped, and what is out of scope, is listed below and in `FIXES.md`.
+Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=zlib` after Phase **3.2** is **783** examples: standalone **2:02 / 209 pending**, replica set **6:08 / 94 pending**, sharded **8:05 / 101 pending**, load-balanced **5:25 / 136 pending**. Local after Phase **3.5** is still **783** examples: standalone **2:10 / 204 pending**, replica set **6:13 / 91 pending**, sharded **8:15 / 99 pending**, load-balanced **5:26 / 136 pending**. What is still skipped, and what is out of scope, is listed below and in `FIXES.md`.
 
 ### Concurrency
 - [x] **CI Parallel Testing:** GitHub runs `crystal spec -Dpreview_mt -Dexecution_context` and sets `CRYSTAL_WORKERS=2` so the default execution context is resized.
@@ -89,7 +89,7 @@ Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CR
 
 ## Remaining work (MongoDB 8.0, toward production grade)
 
-Phases 1–3 are done. Local Phase **3.4** `crystal spec` is green (**783** examples). Push a PR so GitHub Docker confirms the matrix. The driver is production-capable for core 8.0 (CRUD, sessions, transactions). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). The **3.x** sub-phases below close remaining 8.0 holes. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
+Phases 1–3 are done. Local Phase **3.5** `crystal spec` is green (**783** examples). Push a PR so GitHub Docker confirms the matrix. The driver is production-capable for core 8.0 (CRUD, sessions, transactions). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). The **3.x** sub-phases below close remaining 8.0 holes. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
 
 ### Out of scope until the user asks
 
@@ -110,7 +110,7 @@ Foundation for later CMAP / SDAM files. Create the pool when a monitor check fin
 - [x] Un-skip `minPoolSize-error.json` (standalone).
 - [x] Honest README: drop the lone BETA. Keep 0.x. Core CRUD / sessions / transactions on MongoDB 8.0.
 
-`pool-clear-min-pool-size-error.json` non-auth test runs (3.4). The auth test stays skipped until 3.10. Checkout while the pool is paused still allows a new handshake; full paused-checkout (CMAP JSON) is 3.5 / 3.11.
+`pool-clear-min-pool-size-error.json` non-auth test runs (3.4). The auth test stays skipped until 3.10. After the first `poolReady`, checkout while paused raises `PoolClearedError` (3.5). Before that, checkout may still handshake an Unknown seed. Official CMAP JSON copy is 3.11.
 
 GitHub Docker `replicaset` is **one** member, same as local `rs0`. The old note that GitHub is 3 members was wrong. `replicaset-emit-topology-changed-before-close.json` stays skipped until 3.13.
 
@@ -119,7 +119,7 @@ GitHub Docker `replicaset` is **one** member, same as local `rs0`. The old note 
 - [x] Handle monitor hello command and network `failCommand`.
 - [x] Un-skip `hello-command-error.json` and `hello-network-error.json`.
 
-Awaitable hello (MongoDB 4.4+) and an RTT fiber are on so those UTF files can consume `failCommand` times on monitor sockets, not application handshakes. `serverMonitoringMode=poll` is honored so `minPoolSize-error.json` stays on polling. Awaitable hello timeout is `connectTimeoutMS` plus `heartbeatFrequencyMS` (SDAM spec). On mongod the extra is at least 1s (MongoDB 8.0 hello wait is ~1s when `topologyVersion` does not change). mongos keeps the spec sum. Single topology can select Unknown at once, so leftover `failCommand` `closeConnection` on hello can still hit the application handshake; checkout retries that network error on Unknown until the wait budget ends (not a write retry). A labeled handshake error on a known server fails checkout at once (3.4). Heartbeat events are Phase 3.3 (done).
+Awaitable hello (MongoDB 4.4+) and an RTT fiber are on so those UTF files can consume `failCommand` times on monitor sockets, not application handshakes. `serverMonitoringMode=poll` is honored so `minPoolSize-error.json` stays on polling. Awaitable hello timeout is `connectTimeoutMS` plus `heartbeatFrequencyMS` (SDAM spec). On mongod the extra is at least 1s when the spec sum is under 1s (MongoDB 8.0 default hello wait is ~1s when `topologyVersion` does not change; test topologies set `minWaitForStreamingHelloMillis=0`). mongos keeps the spec sum. Single topology can select Unknown at once, so leftover `failCommand` `closeConnection` on hello can still hit the application handshake; checkout retries that network error on Unknown until the wait budget ends (not a write retry). A labeled handshake error on a known server fails checkout at once (3.4). Heartbeat events are Phase 3.3 (done).
 
 GitHub after 3.2 (**783** examples): standalone **2:02 / 209 pending**, replica set **6:08 / 94 pending**, sharded **8:05 / 101 pending**, load-balanced **5:25 / 136 pending**. Streaming hello makes the suite slower than Phase 3 polling. Standalone and replica set failed hello-timeout streaming wait until the 1s mongod extra.
 
@@ -141,9 +141,11 @@ Handshake network / timeout while filling the pool: `SystemOverloadedError` + `R
 
 ### Phase 3.5 — `interruptInUseConnections`
 
-- [ ] Close in-use sockets when the pool is cleared with that flag.
-- [ ] Un-skip `interruptInUse-pool-clear.json`.
-- [ ] Checkout while paused: non-timeout network error that does not mark the server Unknown (needed for official CMAP JSON).
+- [x] Close in-use sockets when the pool is cleared with that flag.
+- [x] Un-skip `interruptInUse-pool-clear.json`.
+- [x] Checkout while paused: non-timeout network error that does not mark the server Unknown (needed for official CMAP JSON).
+
+Monitor timeout clears the pool with `interruptInUseConnections: true` and unblocks in-use sockets (`LibC.shutdown`, not `Socket#close` from another thread). After the first `poolReady`, paused checkout raises `PoolClearedError`. Test topologies set `minWaitForStreamingHelloMillis=0`. The file runs on replica set and sharded.
 
 ### Phase 3.6 — Concurrent shutdown stale-generation
 

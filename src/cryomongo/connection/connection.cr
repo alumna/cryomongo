@@ -26,6 +26,8 @@ class Mongo::Connection
   # TCP/UNIX socket under @socket (which may be TLS). Timeouts are set on this fd.
   @raw_socket : ::Socket
   @interrupted = Atomic(Bool).new(false)
+  # Pool clear with interruptInUseConnections closed this socket while it was in use.
+  @cleared_by_interrupt = Atomic(Bool).new(false)
   # Awaitable hello with exhaustAllowed: the server sends more replies on this socket.
   @more_to_come = false
 
@@ -258,6 +260,35 @@ class Mongo::Connection
   # shutdown the fd from another fiber (fd reuse can hit an application socket).
   def interrupt : Nil
     @interrupted.set(true)
+  end
+
+  def interrupted_by_clear? : Bool
+    @cleared_by_interrupt.get
+  end
+
+  # Unblock an in-use command after a monitor timeout. LibC.shutdown wakes a
+  # recv on another thread. Socket#close waits for FdLock refs and would stall
+  # the monitor until the command fiber finished (the find would succeed).
+  def interrupt_in_use : Nil
+    @cleared_by_interrupt.set(true)
+    @interrupted.set(true)
+    raw = @raw_socket
+    return if raw.closed?
+    # Wake a recv on another execution-context thread. shutdown alone can sit
+    # until socketTimeoutMS / a long blocking read; a 1ms read timeout forces
+    # Crystal's evented wait to return.
+    raw.read_timeout = 1.millisecond
+    raw.write_timeout = 1.millisecond
+    socket = @socket
+    unless socket.same?(raw)
+      if socket.responds_to?(:read_timeout=)
+        socket.read_timeout = 1.millisecond
+      end
+      if socket.responds_to?(:write_timeout=)
+        socket.write_timeout = 1.millisecond
+      end
+    end
+    LibC.shutdown(raw.fd, LibC::SHUT_RDWR)
   end
 
   def self.average_round_trip_time(round_trip_time : Time::Span, old_rtt : Time::Span?)
