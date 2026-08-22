@@ -462,10 +462,12 @@ class Mongo::Client
 
   # Handshake I/O can still see leftover failCommand closeConnection (same appName
   # as the monitor and RTT sockets). That is connection setup, not the write.
-  # Single topology selects Unknown at once, so retry until the wait budget ends.
-  # minPoolSize fill uses the factory directly and does not retry here (Phase 3.4).
-  # Pass the original wait into the pool so waitQueueTimeoutMS still applies
-  # (nil means the pool uses its own checkout timeout, not serverSelectionTimeoutMS).
+  # Single topology selects Unknown at once, so unlabeled leftover network errors
+  # retry until the wait budget ends. A labeled handshake error on a known server
+  # is backpressure and fails checkout at once. minPoolSize fill uses the factory
+  # directly and does not retry here. Pass the original wait into the pool so
+  # waitQueueTimeoutMS still applies (nil means the pool uses its own checkout
+  # timeout, not serverSelectionTimeoutMS).
   private def checkout_from_pool(
     pool : Mongo::Connection::Pool(Mongo::Connection),
     server_description : SDAM::ServerDescription,
@@ -494,16 +496,33 @@ class Mongo::Client
         emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "timeout"))
         raise error
       rescue error : Mongo::Error::Network
+        fail_known_handshake_overload(error, server_description)
         last_network = error
         Fiber.yield
       rescue error : NetworkError
-        last_network = Mongo::Error::Network.new(error)
+        wrapped = labeled_handshake_network_error(error)
+        unless wrapped.is_a?(Mongo::Error::Network)
+          emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+          raise wrapped
+        end
+        fail_known_handshake_overload(wrapped, server_description)
+        last_network = wrapped
         Fiber.yield
       rescue error
         emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
         raise error
       end
     end
+  end
+
+  # Handshake network on a known server is backpressure: fail checkout.
+  # Unknown still retries leftover failCommand closeConnection (Phase 3.2).
+  private def fail_known_handshake_overload(error : Mongo::Error::Network, server_description : SDAM::ServerDescription) : Nil
+    return unless error.retryable_overload?
+    live = topology.servers.find { |s| s.address == server_description.address } || server_description
+    return if live.type.unknown?
+    emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+    raise error
   end
 
   private def pool_at(address : String) : Mongo::Connection::Pool(Mongo::Connection)?
@@ -557,8 +576,9 @@ class Mongo::Client
   end
 
   # Shutdown / recovering hello during minPoolSize fill: mark Unknown and clear.
-  # Handshake network errors are Phase 3.4 (must not change the description).
+  # Handshake network / timeout (SystemOverloadedError) must not change the description.
   private def handle_populate_error(address : String, error : Exception) : Nil
+    return if error.is_a?(Mongo::Error) && error.has_error_label?("SystemOverloadedError")
     desc = topology.servers.find { |s| s.address == address }
     return unless desc
     if error.is_a?(Mongo::Error::Command) && error.state_change?
@@ -567,29 +587,32 @@ class Mongo::Client
   end
 
   # Handshake plus auth. Created is emitted before hello. Ready is emitted after auth.
-  # Hello errors do not clear the pool. Auth errors in load-balanced mode clear that serviceId.
+  # Hello network / timeout errors get backpressure labels and do not clear the pool.
+  # Auth errors in load-balanced mode clear that serviceId. Auth does not get those labels.
   private def establish_connection(server_description : SDAM::ServerDescription) : Mongo::Connection
-    connection = Mongo::Connection.new(server_description, @credentials, @options, is_monitor: false)
-    address = server_description.address
-    emit_cmap_event(Monitoring::CMAP::ConnectionCreatedEvent.new(address, connection.connection_id))
+    connection = nil.as(Mongo::Connection?)
     begin
+      opened = Mongo::Connection.new(server_description, @credentials, @options, is_monitor: false)
+      connection = opened
+      address = server_description.address
+      emit_cmap_event(Monitoring::CMAP::ConnectionCreatedEvent.new(address, opened.connection_id))
       legacy = @options.server_api.nil? && !@options.load_balanced
-      result, round_trip_time = connection.handshake(
+      result, round_trip_time = opened.handshake(
         send_metadata: true,
         appname: @options.appname,
         legacy: legacy,
         client_metadata: handshake_client_document,
         load_balanced: @options.load_balanced == true
       )
-      # Connection is a struct: ivar writes inside handshake do not stick. Copy the fields.
-      connection.service_id = result.serviceId
-      connection.handshake_complete = true
+      # Connection is a class: copy hello fields that handshake set on this instance.
+      opened.service_id = result.serviceId
+      opened.handshake_complete = true
       begin
-        connection.authenticate
+        opened.authenticate
       rescue error
-        fail_setup_connection(server_description, connection, error, handshake_complete: true)
+        fail_setup_connection(server_description, opened, error, handshake_complete: true)
       end
-      emit_cmap_event(Monitoring::CMAP::ConnectionReadyEvent.new(address, connection.connection_id))
+      emit_cmap_event(Monitoring::CMAP::ConnectionReadyEvent.new(address, opened.connection_id))
       old_rtt = server_description.type.unknown? ? nil : server_description.round_trip_time
       new_rtt = Connection.average_round_trip_time(round_trip_time, old_rtt)
       new_description = SDAM::ServerDescription.new(address, result, new_rtt)
@@ -597,10 +620,13 @@ class Mongo::Client
       new_description.copy_rtt_window(server_description) unless server_description.type.unknown?
       topology.update(server_description, new_description)
       server_description.update(new_description)
-      connection
+      opened
     rescue error
-      raise error if connection.handshake_complete
-      fail_setup_connection(server_description, connection, error, handshake_complete: false)
+      if conn = connection
+        raise error if conn.handshake_complete
+        fail_setup_connection(server_description, conn, error, handshake_complete: false)
+      end
+      raise labeled_handshake_network_error(error)
     end
   end
 
@@ -613,10 +639,36 @@ class Mongo::Client
     end
     emit_cmap_event(Monitoring::CMAP::ConnectionClosedEvent.new(server_description.address, connection.connection_id, "error"))
     connection.close
+    unless handshake_complete
+      raise labeled_handshake_network_error(error)
+    end
     if error.is_a?(IO::Error) || error.is_a?(Socket::Error)
       raise Mongo::Error::Network.new(error)
     end
     raise error
+  end
+
+  # CMAP backpressure-enabled: network / timeout during TCP or hello, not DNS
+  # lookup and not auth after hello. SDAM then leaves the server description.
+  private def labeled_handshake_network_error(error : Exception) : Exception
+    wrapped = if error.is_a?(Mongo::Error)
+                error
+              elsif error.is_a?(IO::Error) || error.is_a?(Socket::Error)
+                Mongo::Error::Network.new(error)
+              else
+                error
+              end
+    add_handshake_backpressure_labels(wrapped)
+    wrapped
+  end
+
+  private def add_handshake_backpressure_labels(error : Exception) : Nil
+    return unless error.is_a?(Mongo::Error)
+    cause = error.cause || error
+    return if cause.is_a?(Socket::Addrinfo::Error)
+    return unless cause.is_a?(IO::Error) || cause.is_a?(Socket::Error) || error.is_a?(Mongo::Error::Network)
+    error.add_error_label("SystemOverloadedError")
+    error.add_error_label("RetryableError")
   end
 
   private def release_connection(connection : Mongo::Connection)
