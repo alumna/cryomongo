@@ -419,28 +419,36 @@ class Mongo::Client
       # Mark the socket dead so checkin uses reason "error", not "stale".
       connection.close
       Mongo::Log.error(exception: error) { "Network error" } unless server_description
-      # After handshake, a socket timeout is a slow operation, not a dead server.
-      # closeConnection / reset still mark Unknown and clear the pool.
-      timeout_after_handshake = error.is_a?(IO::TimeoutError)
-      unless timeout_after_handshake
-        # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#network-or-command-error-during-server-check
-        if @options.load_balanced
-          handle_load_balanced_error(server_description, connection, error)
-        else
-          server_description.try { |desc|
-            Mongo::Log.error(exception: error) { "I/O error with server address: #{desc.address}" }
-            description = SDAM::ServerDescription.new(desc.address)
-            description.error = error.message
-            description.last_update_time = desc.last_update_time
-            topology.update(desc, description)
-            clear_pool(desc)
-            @monitors.find(&.server_description.address.== desc.address).try &.cancel_check
-          }
+      if connection.interrupted_by_clear?
+        address = server_description.try(&.address) || connection.server_description.address
+        # CMAP: interrupt SHOULD be PoolClearedError. Using Network keeps
+        # retryReads:false from retrying in execute_once_or_overload_retry
+        # (that path retries PoolCleared). Retryable reads/writes still retry.
+        error = Error::Network.new("Connection to #{address} interrupted due to server monitor timeout")
+      else
+        # After handshake, a socket timeout is a slow operation, not a dead server.
+        # closeConnection / reset still mark Unknown and clear the pool.
+        timeout_after_handshake = error.is_a?(IO::TimeoutError)
+        unless timeout_after_handshake
+          # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#network-or-command-error-during-server-check
+          if @options.load_balanced
+            handle_load_balanced_error(server_description, connection, error)
+          else
+            server_description.try { |desc|
+              Mongo::Log.error(exception: error) { "I/O error with server address: #{desc.address}" }
+              description = SDAM::ServerDescription.new(desc.address)
+              description.error = error.message
+              description.last_update_time = desc.last_update_time
+              topology.update(desc, description)
+              clear_pool(desc)
+              @monitors.find(&.server_description.address.== desc.address).try &.cancel_check
+            }
+          end
         end
+        error = Error::Network.new(error)
       end
       session.try &.dirty = true
-      error = Error::Network.new(error)
-      if (d = deadline) && !d.infinite?
+      if (d = deadline) && !d.infinite? && !error.is_a?(Error::PoolCleared)
         cause = error.cause
         if d.expired? || cause.is_a?(IO::TimeoutError)
           error = Error::Timeout.new("socket timeout: #{error.message}", cause: error)

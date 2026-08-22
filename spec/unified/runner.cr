@@ -36,7 +36,6 @@ module Mongo::Unified
 
     # Known holes. Do not un-skip until the file passes.
     SKIP_FILES = {
-      "interruptInUse-pool-clear.json",
       "find-shutdown-error.json",
       "insert-shutdown-error.json",
       # Local rs0 is one member, so this file waits forever for a 4th topology event.
@@ -48,16 +47,14 @@ module Mongo::Unified
       json_data = File.read(file_path)
       @test_file = TestFile.from_json(json_data)
 
-      # interruptInUseConnections is not implemented. Unified SDAM still lacks
-      # waitForPrimaryChange / recordTopologyDescription. Keep those files pending.
       @force_observe_sensitive = file_path.includes?("redacted-commands")
 
-      # interruptInUseConnections is not implemented. Logging UTF needs SDAM log
-      # messages. Other unified SDAM files run; missing ops become SKIP_TEST.
-      # Files below still fail for known holes (extra Unknown on concurrent
-      # shutdown). minPoolSize pool-ready is 3.1. Monitor hello command /
-      # network errors is 3.2. Heartbeat events are 3.3. Handshake backpressure
-      # labels are 3.4. pool-clear-min-pool-size-error auth test stays pending.
+      # Logging UTF needs SDAM log messages. Other unified SDAM files run;
+      # missing ops become SKIP_TEST. Files below still fail for known holes
+      # (extra Unknown on concurrent shutdown). minPoolSize pool-ready is 3.1.
+      # Monitor hello command / network errors is 3.2. Heartbeat events are 3.3.
+      # Handshake backpressure labels are 3.4. interruptInUseConnections is 3.5.
+      # pool-clear-min-pool-size-error auth test stays pending.
       basename = File.basename(file_path)
       if basename.in?(SKIP_FILES) || file_path.includes?("/logging-")
         @skip_reason = "hardcoded skip"
@@ -90,22 +87,17 @@ module Mongo::Unified
     end
 
     private def disable_fail_points
-      # failCommand is per mongos process. Turn it off on every client and every
-      # known server so a later test does not inherit a fail point.
-      clients = [] of Mongo::Client
-      if c = @internal_client
-        clients << c
-      end
-      @registry.clients.each_value { |c| clients << c }
-
-      clients.each do |client|
-        send_fail_point_off(client, nil)
-        begin
-          client.topology.servers.each do |server|
-            send_fail_point_off(client, server)
-          end
-        rescue
+      # failCommand is per mongos. Use the internal client only. A test client
+      # pool may be paused (interruptInUse); checkout there would wait out
+      # serverSelectionTimeoutMS.
+      ic = internal_client
+      send_fail_point_off(ic, nil)
+      begin
+        ic.topology.servers.each do |server|
+          next if server.type.unknown? || server.type.rs_ghost?
+          send_fail_point_off(ic, server)
         end
+      rescue
       end
       @fail_point_active = false
     end
@@ -114,6 +106,7 @@ module Mongo::Unified
       ic = internal_client
       seen = Set(String).new
       ic.topology.servers.each do |server|
+        next if server.type.unknown? || server.type.rs_ghost?
         next unless seen.add?(server.address)
         begin
           ic.command(Mongo::Commands::KillAllSessions, users: [] of String, server_description: server)
@@ -1004,6 +997,12 @@ module Mongo::Unified
             raise Exception.new("TEST_FAILED: cmap event #{index} expected poolClearedEvent, got #{actual_event.class}")
           end
           check_has_service_id!(body, actual_event, index)
+          if body["interruptInUseConnections"]?
+            want = body["interruptInUseConnections"].as_bool
+            unless actual_event.interrupt_in_use_connections == want
+              raise Exception.new("TEST_FAILED: cmap event #{index} poolClearedEvent interruptInUseConnections expected #{want}, got #{actual_event.interrupt_in_use_connections}")
+            end
+          end
         elsif expected["connectionCheckedOutEvent"]?
           unless actual_event.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckedOutEvent)
             raise Exception.new("TEST_FAILED: cmap event #{index} expected connectionCheckedOutEvent, got #{actual_event.class}")

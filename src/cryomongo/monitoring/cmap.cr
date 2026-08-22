@@ -23,8 +23,10 @@ module Mongo::Monitoring::CMAP
   struct PoolClearedEvent < Event
     # Load-balanced: only connections with this serviceId were cleared.
     getter service_id : BSON::ObjectId?
+    # True when the clear closed in-use sockets (monitor hello timeout).
+    getter interrupt_in_use_connections : Bool
 
-    def initialize(address : String, @service_id : BSON::ObjectId? = nil)
+    def initialize(address : String, @service_id : BSON::ObjectId? = nil, @interrupt_in_use_connections : Bool = false)
       super(address)
     end
   end

@@ -9,9 +9,9 @@
 
 <hr/>
 
-This is a fork of `elbywan/cryomongo`. The goal is to make the driver ready for **MongoDB 8.0** and **Crystal 1.21**. We plan to merge back to the original project when that work is done.
+This is a fork of `elbywan/cryomongo`. The goal is to make the driver ready for **MongoDB 8.0** (max wire version **25**, OP_MSG-only) and **Crystal 1.21**.
 
-The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). Semver is **0.x**. **Phase 1**, **Phase 2**, and **Phase 3** of [ROADMAP.md](ROADMAP.md) are done. Local `crystal spec -Dpreview_mt -Dexecution_context` after Phase **3.4** is **783** examples: standalone **2:04 / 204 pending**, replica set **6:05 / 92 pending**, sharded **8:06 / 100 pending**, load-balanced **5:41 / 136 pending**. Spec jobs resize the default execution context (`CRYSTAL_WORKERS=2`) and use zlib wire compression.
+It is **0.x** pre-release. **Phase 1, Phase 2 and Phase 3** of [ROADMAP.md](ROADMAP.md) are done. Core CRUD, sessions and transactions work on MongoDB 8.0. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC).
 
 The driver is ready for **core CRUD, sessions, and transactions** on MongoDB 8.0. **1.0** waits on client-side encryption (Phase 4) and cloud auth (Phase 5: AWS / OIDC). Remaining 8.0 work is [ROADMAP.md](ROADMAP.md) Phase 3.1–3.14.
 
@@ -45,7 +45,7 @@ The driver is **0.x**. It is ready for core CRUD, sessions, and transactions on 
 - Unified `pool-cleared-error.json`. Socket timeouts after handshake do not mark the server Unknown.
 
 **Not done yet (MongoDB 8.0). See [ROADMAP.md](ROADMAP.md) Phase 3.1–3.14 and [FIXES.md](FIXES.md).**
-- Unified SDAM still skipped: `interruptInUseConnections`, concurrent shutdown extra Unknown, SDAM logging. `minPoolSize-error.json`, `hello-command-error.json`, `hello-network-error.json`, `serverMonitoringMode.json`, and handshake backpressure files now run. `replicaset-emit-topology-changed-before-close.json` needs a 3-member replica set (local and GitHub Docker are one member).
+- Unified SDAM still skipped: concurrent shutdown extra Unknown, SDAM logging. `minPoolSize-error.json`, `hello-command-error.json`, `hello-network-error.json`, `serverMonitoringMode.json`, handshake backpressure files, and `interruptInUse-pool-clear.json` now run. `replicaset-emit-topology-changed-before-close.json` needs a 3-member replica set (local and GitHub Docker are one member).
 - UTF ops still `SKIP_TEST`: client `bulkWrite`, `let` on CRUD, legacy `count`, `mapReduce`, `waitForPrimaryChange` / `recordTopologyDescription` / `assertTopologyType`.
 - No users on CI, so `auth: true` UTF does not run (handshake-error files, unified SDAM auth-error files). Speculative auth and monitor auth are missing.
 - snappy / zstd. TLS key-file password and OCSP flags are parsed and unused. Official CMAP JSON is not copied. CLAM is 1 of 23 files. GridFS `deleteByName` / `renameByName` not copied.
@@ -757,6 +757,8 @@ See [BENCHMARK.md](BENCHMARK.md). BSON tasks: `crystal run bench/driver_bench.cr
 3. Commit your changes (`git commit -am 'Add some feature'`)
 4. Push to the branch (`git push origin my-new-feature`)
 5. Create a new Pull Request
+
+Spec CI runs `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=zlib`.
 
 ## Contributors
 

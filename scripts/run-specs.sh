@@ -64,6 +64,9 @@ live() {
     echo "  $ROOT/scripts/mongo-rs.sh start-local" >&2
     exit 1
   fi
+  # mongod 8.0 default minWaitForStreamingHelloMillis=1000 ignores small
+  # maxAwaitTimeMS. Runtime set so an old mongod.conf still runs hello UTF.
+  mongosh --quiet --eval 'db.adminCommand({setParameter: 1, minWaitForStreamingHelloMillis: 0})' >/dev/null || true
   local timing="${UTF_TIMING_LOG:-$ROOT/tmp/utf-timing.log}"
   mkdir -p "$(dirname "$timing")"
   : > "$timing"
