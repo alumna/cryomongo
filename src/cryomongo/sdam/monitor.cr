@@ -188,23 +188,29 @@ module Mongo::SDAM
       begin
         if conn.more_to_come?
           apply_socket_timeout(conn, extra: awaitable_timeout_extra(previous))
-          result, rtt = conn.hello(legacy: !conn.use_hello?, exhaust_read: true)
+          result, rtt = heartbeat(awaited: true) do
+            conn.hello(legacy: !conn.use_hello?, exhaust_read: true)
+          end
           return {result, rtt, false}
         end
         # Unknown from a state-change error may still carry topologyVersion.
         # Do not await on that value; handshake a new socket instead.
         if @streaming && !previous.type.unknown? && (tv = previous.topology_version)
           apply_socket_timeout(conn, extra: awaitable_timeout_extra(previous))
-          result, rtt = conn.hello(
-            legacy: !conn.use_hello?,
-            topology_version: tv,
-            max_await_time_ms: @heartbeat_frequency.total_milliseconds.to_i64
-          )
+          result, rtt = heartbeat(awaited: true) do
+            conn.hello(
+              legacy: !conn.use_hello?,
+              topology_version: tv,
+              max_await_time_ms: @heartbeat_frequency.total_milliseconds.to_i64
+            )
+          end
           return {result, rtt, false}
         end
 
         apply_socket_timeout(conn)
-        result, rtt = conn.hello(legacy: !conn.use_hello?)
+        result, rtt = heartbeat(awaited: false) do
+          conn.hello(legacy: !conn.use_hello?)
+        end
         {result, rtt, false}
       rescue error
         # Close from this fiber after receive failed. interrupt() only sets a flag.
@@ -220,20 +226,45 @@ module Mongo::SDAM
       conn.close rescue nil
     end
 
+    # Handshake is the first check. Started fires before the socket is opened.
     private def setup_connection : {Commands::Hello::Result, Time::Span}
-      conn = Mongo::Connection.new(@server_description, @credentials, @client.options, is_monitor: true)
-      @socket_lock.synchronize { @connection = conn }
+      address = @server_description.address
+      @client.emit_heartbeat_started(address, false)
+      started_at = Time.instant
+      conn : Mongo::Connection? = nil
       begin
+        opened = Mongo::Connection.new(@server_description, @credentials, @client.options, is_monitor: true)
+        conn = opened
+        @socket_lock.synchronize { @connection = opened }
         legacy = @client.options.server_api.nil? && !@client.options.load_balanced
-        conn.handshake(
+        result, rtt = opened.handshake(
           send_metadata: true,
           appname: @client.options.appname,
           legacy: legacy,
           client_metadata: @client.handshake_client_document,
           load_balanced: @client.options.load_balanced == true
         )
+        # awaited false: duration is the hello RTT, not TCP connect time.
+        @client.emit_heartbeat_succeeded(address, rtt, result.to_bson, false)
+        {result, rtt}
       rescue error
-        close_monitor_conn(conn)
+        close_monitor_conn(conn) if conn
+        @client.emit_heartbeat_failed(address, started_at.elapsed, error, false)
+        raise error
+      end
+    end
+
+    # Existing monitor socket: started immediately before send or exhaust read.
+    private def heartbeat(awaited : Bool, &) : {Commands::Hello::Result, Time::Span}
+      address = @server_description.address
+      @client.emit_heartbeat_started(address, awaited)
+      started_at = Time.instant
+      begin
+        result, rtt = yield
+        @client.emit_heartbeat_succeeded(address, rtt, result.to_bson, awaited)
+        {result, rtt}
+      rescue error
+        @client.emit_heartbeat_failed(address, started_at.elapsed, error, awaited)
         raise error
       end
     end

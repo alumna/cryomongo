@@ -72,6 +72,15 @@ module Mongo::Unified::Matcher
     true
   end
 
+  # UTF heartbeat events: awaited is optional. Empty `{}` matches any.
+  def heartbeat_awaited?(actual : Bool, expected : JSON::Any) : Bool
+    if raw = expected["awaited"]?
+      actual == raw.as_bool
+    else
+      true
+    end
+  end
+
   private def special?(h : Hash(String, JSON::Any)) : Bool
     h.size == 1 && h.keys.first.starts_with?("$$")
   end

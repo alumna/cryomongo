@@ -45,7 +45,6 @@ module Mongo::Unified
       "find-shutdown-error.json",
       "insert-shutdown-error.json",
       "pool-clear-min-pool-size-error.json",
-      "serverMonitoringMode.json",
       # Local rs0 is one member, so this file waits forever for a 4th topology event.
       "replicaset-emit-topology-changed-before-close.json",
     }
@@ -62,8 +61,8 @@ module Mongo::Unified
       # interruptInUseConnections is not implemented. Logging UTF needs SDAM log
       # messages. Other unified SDAM files run; missing ops become SKIP_TEST.
       # Files below still fail for known holes (handshake backpressure labels,
-      # extra Unknown on concurrent shutdown, heartbeat events). minPoolSize
-      # pool-ready is Phase 3.1. Monitor hello command / network errors is 3.2.
+      # extra Unknown on concurrent shutdown). minPoolSize pool-ready is 3.1.
+      # Monitor hello command / network errors is 3.2. Heartbeat events are 3.3.
       basename = File.basename(file_path)
       if basename.in?(SKIP_FILES) || file_path.includes?("/logging-")
         @skip_reason = "hardcoded skip"
@@ -549,18 +548,18 @@ module Mongo::Unified
               @registry.command_events[client_id] << event
             end
 
-            if observed.includes?("serverDescriptionChangedEvent") ||
-               observed.includes?("serverOpeningEvent") ||
-               observed.includes?("topologyDescriptionChangedEvent") ||
-               observed.includes?("topologyOpeningEvent") ||
-               observed.includes?("topologyClosedEvent")
+            if observed.any? { |name| name.starts_with?("server") || name.starts_with?("topology") }
               client.subscribe_sdam do |event|
                 event_type = case event
                              when Mongo::Monitoring::SDAM::ServerDescriptionChangedEvent   then "serverDescriptionChangedEvent"
                              when Mongo::Monitoring::SDAM::ServerOpeningEvent              then "serverOpeningEvent"
+                             when Mongo::Monitoring::SDAM::ServerClosedEvent               then "serverClosedEvent"
                              when Mongo::Monitoring::SDAM::TopologyDescriptionChangedEvent then "topologyDescriptionChangedEvent"
                              when Mongo::Monitoring::SDAM::TopologyOpeningEvent            then "topologyOpeningEvent"
                              when Mongo::Monitoring::SDAM::TopologyClosedEvent             then "topologyClosedEvent"
+                             when Mongo::Monitoring::SDAM::ServerHeartbeatStartedEvent     then "serverHeartbeatStartedEvent"
+                             when Mongo::Monitoring::SDAM::ServerHeartbeatSucceededEvent   then "serverHeartbeatSucceededEvent"
+                             when Mongo::Monitoring::SDAM::ServerHeartbeatFailedEvent      then "serverHeartbeatFailedEvent"
                              else
                                next
                              end
@@ -802,6 +801,7 @@ module Mongo::Unified
           verify_cmap_events(client_id, expected_events, hash["ignoreExtraEvents"]?.try(&.as_bool) || false)
           next
         elsif event_type == "sdam"
+          verify_sdam_events(client_id, expected_events, hash["ignoreExtraEvents"]?.try(&.as_bool) || false)
           next
         end
         actual_events = (@registry.command_events[client_id]? || [] of Mongo::Monitoring::Commands::Event).dup
@@ -894,6 +894,80 @@ module Mongo::Unified
       unless has == want
         raise Exception.new("TEST_FAILED: event #{index} hasServiceId expected #{want}, got #{has}")
       end
+    end
+
+    private def verify_sdam_events(client_id : String, expected_events : Array(JSON::Any), ignore_extra : Bool)
+      actual = (@registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).dup
+      if actual.size < expected_events.size
+        names = actual.map(&.class.name)
+        raise Exception.new("TEST_FAILED: expected at least #{expected_events.size} sdam events for #{client_id}, got #{actual.size}: #{names}")
+      end
+      unless ignore_extra || actual.size == expected_events.size
+        names = actual.map(&.class.name)
+        raise Exception.new("TEST_FAILED: expected #{expected_events.size} sdam events for #{client_id}, got #{actual.size}: #{names}")
+      end
+      expected_events.each_with_index do |expected, index|
+        actual_event = actual[index]
+        unless sdam_event_matches?(actual_event, expected)
+          raise Exception.new("TEST_FAILED: sdam event #{index} expected #{expected.as_h.keys.first}, got #{actual_event.class}")
+        end
+      end
+    end
+
+    private def sdam_event_matches?(actual : Mongo::Monitoring::SDAM::Event, expected : JSON::Any) : Bool
+      if body = expected["serverHeartbeatStartedEvent"]?
+        return actual.is_a?(Mongo::Monitoring::SDAM::ServerHeartbeatStartedEvent) && Matcher.heartbeat_awaited?(actual.awaited, body)
+      end
+      if body = expected["serverHeartbeatSucceededEvent"]?
+        return actual.is_a?(Mongo::Monitoring::SDAM::ServerHeartbeatSucceededEvent) && Matcher.heartbeat_awaited?(actual.awaited, body)
+      end
+      if body = expected["serverHeartbeatFailedEvent"]?
+        return actual.is_a?(Mongo::Monitoring::SDAM::ServerHeartbeatFailedEvent) && Matcher.heartbeat_awaited?(actual.awaited, body)
+      end
+      if expected["topologyOpeningEvent"]?
+        return actual.is_a?(Mongo::Monitoring::SDAM::TopologyOpeningEvent)
+      end
+      if expected["topologyClosedEvent"]?
+        return actual.is_a?(Mongo::Monitoring::SDAM::TopologyClosedEvent)
+      end
+      if body = expected["topologyDescriptionChangedEvent"]?
+        return false unless actual.is_a?(Mongo::Monitoring::SDAM::TopologyDescriptionChangedEvent)
+        if prev = body["previousDescription"]?
+          return false unless topology_description_match?(actual.previous_description, prev)
+        end
+        if nxt = body["newDescription"]?
+          return false unless topology_description_match?(actual.new_description, nxt)
+        end
+        return true
+      end
+      if expected["serverOpeningEvent"]?
+        return actual.is_a?(Mongo::Monitoring::SDAM::ServerOpeningEvent)
+      end
+      if expected["serverClosedEvent"]?
+        return actual.is_a?(Mongo::Monitoring::SDAM::ServerClosedEvent)
+      end
+      if body = expected["serverDescriptionChangedEvent"]?
+        return false unless actual.is_a?(Mongo::Monitoring::SDAM::ServerDescriptionChangedEvent)
+        if new_desc = body["newDescription"]?
+          if type = new_desc["type"]?.try(&.as_s?)
+            return false unless actual.new_description.type.to_s == type
+          end
+        end
+        if prev_desc = body["previousDescription"]?
+          if type = prev_desc["type"]?.try(&.as_s?)
+            return false unless actual.previous_description.type.to_s == type
+          end
+        end
+        return true
+      end
+      false
+    end
+
+    private def topology_description_match?(actual : Mongo::SDAM::TopologyDescription, expected : JSON::Any) : Bool
+      if type = expected["type"]?.try(&.as_s?)
+        return actual.type.to_s == type
+      end
+      true
     end
 
     private def verify_cmap_events(client_id : String, expected_events : Array(JSON::Any), ignore_extra : Bool)

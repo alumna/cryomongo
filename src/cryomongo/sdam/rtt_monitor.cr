@@ -3,6 +3,7 @@ require "wait_group"
 # Dedicated hello connection used only while streaming. Errors here do not mark
 # the server Unknown (the monitor thread owns topology). Same appname so
 # failCommand on hello can hit this socket as well as the monitor socket.
+# Do not emit ServerHeartbeat* events (SDAM spec: RTT commands are silent).
 # :nodoc:
 class Mongo::SDAM::RttMonitor
   @lock = Sync::Mutex.new
