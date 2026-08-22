@@ -430,19 +430,12 @@ class Mongo::Client
         # closeConnection / reset still mark Unknown and clear the pool.
         timeout_after_handshake = error.is_a?(IO::TimeoutError)
         unless timeout_after_handshake
-          # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#network-or-command-error-during-server-check
+          # After handshake, a non-timeout network error marks Unknown and
+          # clears the pool. A stale-generation error is ignored.
           if @options.load_balanced
             handle_load_balanced_error(server_description, connection, error)
           else
-            server_description.try { |desc|
-              Mongo::Log.error(exception: error) { "I/O error with server address: #{desc.address}" }
-              description = SDAM::ServerDescription.new(desc.address)
-              description.error = error.message
-              description.last_update_time = desc.last_update_time
-              topology.update(desc, description)
-              clear_pool(desc)
-              @monitors.find(&.server_description.address.== desc.address).try &.cancel_check
-            }
+            handle_application_error(server_description, connection, error, network: true, shutdown: true)
           end
         end
         error = Error::Network.new(error)
@@ -467,7 +460,7 @@ class Mongo::Client
         if @options.load_balanced
           handle_load_balanced_error(server_description, connection, error) if error.shutdown?
         else
-          apply_state_change_error(server_description, error)
+          apply_state_change_error(server_description, error, connection)
         end
       end
     end
@@ -510,25 +503,50 @@ class Mongo::Client
   end
 
   # Mark the server Unknown after a not-master / recovering error, unless the
-  # error's topologyVersion is older than the description we already have.
-  private def apply_state_change_error(server_description : SDAM::ServerDescription?, error : Mongo::Error::Command) : Nil
+  # error is stale (older pool generation or topologyVersion).
+  private def apply_state_change_error(server_description : SDAM::ServerDescription?, error : Mongo::Error::Command, connection : Mongo::Connection? = nil) : Nil
+    handle_application_error(server_description, connection, error, network: false, shutdown: error.shutdown?)
+  end
+
+  # SDAM application error: ignore stale generation / topologyVersion so two
+  # concurrent shutdowns emit one Unknown and one poolClearedEvent. Pool clear
+  # stays under the topology lock (SDAM spec).
+  private def handle_application_error(
+    server_description : SDAM::ServerDescription?,
+    connection : Mongo::Connection?,
+    error : Exception,
+    *,
+    network : Bool,
+    shutdown : Bool,
+  ) : Nil
     desc = server_description
     return unless desc
 
-    if topology.is_stale_error_topology_version?(desc.topology_version, error.topology_version)
-      return
+    if network
+      Mongo::Log.error(exception: error) { "I/O error with server address: #{desc.address}" }
     end
 
     description = SDAM::ServerDescription.new(desc.address)
-    description.min_wire_version = desc.min_wire_version
-    description.max_wire_version = desc.max_wire_version
+    unless network
+      description.min_wire_version = desc.min_wire_version
+      description.max_wire_version = desc.max_wire_version
+    end
     description.error = error.message
     description.last_update_time = desc.last_update_time
-    if tv = error.topology_version
+    if (cmd_err = error.as?(Mongo::Error::Command)) && (tv = cmd_err.topology_version)
       description.topology_version = BSON.new(tv.data)
     end
-    topology.update(desc, description)
-    clear_pool(desc) if error.shutdown?
+
+    pool = if conn = connection
+             pool_for(conn) || pool_at(desc.address)
+           else
+             pool_at(desc.address)
+           end
+
+    applied = topology.apply_application_error(desc, description, connection, pool) do
+      clear_pool(desc) if network || shutdown
+    end
+    return unless applied
     @monitors.find(&.server_description.address.== desc.address).try &.cancel_check
   end
 

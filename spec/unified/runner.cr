@@ -36,8 +36,6 @@ module Mongo::Unified
 
     # Known holes. Do not un-skip until the file passes.
     SKIP_FILES = {
-      "find-shutdown-error.json",
-      "insert-shutdown-error.json",
       # Local rs0 is one member, so this file waits forever for a 4th topology event.
       "replicaset-emit-topology-changed-before-close.json",
     }
@@ -50,10 +48,10 @@ module Mongo::Unified
       @force_observe_sensitive = file_path.includes?("redacted-commands")
 
       # Logging UTF needs SDAM log messages. Other unified SDAM files run;
-      # missing ops become SKIP_TEST. Files below still fail for known holes
-      # (extra Unknown on concurrent shutdown). minPoolSize pool-ready is 3.1.
-      # Monitor hello command / network errors is 3.2. Heartbeat events are 3.3.
+      # missing ops become SKIP_TEST. minPoolSize pool-ready is 3.1. Monitor
+      # hello command / network errors is 3.2. Heartbeat events are 3.3.
       # Handshake backpressure labels are 3.4. interruptInUseConnections is 3.5.
+      # Concurrent shutdown stale-generation ignore is 3.6.
       # pool-clear-min-pool-size-error auth test stays pending.
       basename = File.basename(file_path)
       if basename.in?(SKIP_FILES) || file_path.includes?("/logging-")

@@ -104,9 +104,15 @@ class Mongo::SDAM::TopologyDescription
                       new_description
                     end
 
-    if old_description != effective_new
+    # Compare to the current server. A concurrent error still holds the
+    # description from when the command started; emitting against that
+    # snapshot would send a second Unknown after the first error already
+    # replaced the server.
+    current = @servers.find { |desc| desc.address == old_description.address }
+    previous = current || old_description
+    if previous != effective_new
       @client.emit_sdam_event(Monitoring::SDAM::ServerDescriptionChangedEvent.new(
-        @client.object_id, effective_new.address, old_description, effective_new
+        @client.object_id, effective_new.address, previous, effective_new
       ))
     end
 
@@ -163,141 +169,186 @@ class Mongo::SDAM::TopologyDescription
     ready_desc = nil.as(ServerDescription?)
 
     @lock.synchronize do
-      # Snapshot the entire state *before* any mutations for accurate SDAM events
-      previous_type = @type
-      previous_set_name = @set_name
-      previous_max_set_version = @max_set_version
-      previous_max_election_id = @max_election_id
-      previous_servers = @servers.map(&.clone)
-      previous_stale = @stale
-      previous_compatible = @compatible
-      previous_compatibility_error = @compatibility_error
-      previous_logical_session_timeout_minutes = @logical_session_timeout_minutes
-
-      current_server = @servers.find { |s| s.address == old_description.address }
-      if current_server
-        unless is_newer_or_equal_topology_version?(current_server.topology_version, new_description.topology_version)
-          return
-        end
-      end
-
-      # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#updating-the-topologydescription
-      if @type.single? && @set_name.try { |name| new_description.set_name != name }
-        replace_description(old_description, ServerDescription.new(old_description.address))
-      else
-        replace_description(old_description, new_description)
-
-        unless new_description.type.unknown? || @type.load_balanced?
-          if new_description.min_wire_version > Client::MAX_WIRE_VERSION
-            @compatible = false
-            @compatibility_error = "Server at #{new_description.address} requires wire version #{new_description.min_wire_version}, but this version of cryomongo only supports up to #{Client::MAX_WIRE_VERSION}."
-          elsif new_description.max_wire_version < Client::MIN_WIRE_VERSION
-            @compatible = false
-            @compatibility_error = "Server at #{new_description.address} requires wire version #{new_description.max_wire_version}, but this version of cryomongo requires at least #{Client::MIN_WIRE_VERSION}."
-          else
-            @compatible = true
-          end
-        end
-
-        case new_description.type
-        when .unknown?
-          check_if_has_primary if @type.replica_set_with_primary?
-        when .standalone?
-          case @type
-          when .unknown?
-            update_unknown_with_standalone(new_description)
-          when .sharded?, .replica_set_no_primary?
-            remove(new_description)
-          when .replica_set_with_primary?
-            remove(new_description)
-            check_if_has_primary
-          else
-            # ignore
-          end
-        when .mongos?
-          case @type
-          when .unknown?
-            @type = :sharded
-          when .replica_set_no_primary?
-            remove(new_description)
-          when .replica_set_with_primary?
-            remove(new_description)
-            check_if_has_primary
-          else
-            # ignore
-          end
-        when .rs_primary?
-          case @type
-          when .unknown?
-            update_rs_from_primary(new_description)
-          when .sharded?
-            remove(new_description)
-          when .replica_set_no_primary?
-            @type = :replica_set_with_primary
-            update_rs_from_primary(new_description)
-          when .replica_set_with_primary?
-            update_rs_from_primary(new_description)
-          else
-            # ignore
-          end
-        when .rs_secondary?, .rs_arbiter?, .rs_other?
-          case @type
-          when .unknown?
-            @type = :replica_set_no_primary
-            update_rs_without_primary(new_description)
-          when .sharded?
-            remove(new_description)
-          when .replica_set_no_primary?
-            update_rs_without_primary(new_description)
-          when .replica_set_with_primary?
-            update_rs_with_primary_from_member(new_description)
-          else
-            # ignore
-          end
-        when .rs_ghost?
-          case @type
-          when .sharded?
-            remove(new_description)
-          when .replica_set_with_primary?
-            check_if_has_primary
-          else
-            # ignore
-          end
-        else
-          # ignore
-        end
-      end
-
-      if previous_type != @type || previous_servers != @servers
-        previous_topology = TopologyDescription.new(@client)
-        previous_topology.type = previous_type
-        previous_topology.set_name = previous_set_name
-        previous_topology.max_set_version = previous_max_set_version
-        previous_topology.max_election_id = previous_max_election_id
-        previous_topology.servers = previous_servers
-        previous_topology.stale = previous_stale
-        previous_topology.compatible = previous_compatible
-        previous_topology.compatibility_error = previous_compatibility_error
-        previous_topology.logical_session_timeout_minutes = previous_logical_session_timeout_minutes
-
-        @client.emit_sdam_event(Monitoring::SDAM::TopologyDescriptionChangedEvent.new(
-          @client.object_id, previous_topology, self.clone
-        ))
-      end
-
-      topology_changed = true
-
-      if srv = @servers.find { |s| s.address == new_description.address }
-        unless srv.type.unknown? || srv.type.rs_ghost?
-          if srv.data_bearing? || @type.single? || @type.load_balanced?
-            ready_desc = srv
-          end
-        end
-      end
+      applied, ready_desc = apply_description(old_description, new_description)
+      topology_changed = applied
     end
   ensure
     @client.ready_pool(ready_desc) if ready_desc
     @client.on_topology_update if topology_changed
+  end
+
+  # Application error: ignore a stale pool generation and a stale
+  # topologyVersion, then replace the description. Yields before unlock so the
+  # caller can clear the pool in the same critical section (SDAM spec).
+  def apply_application_error(
+    old_description : ServerDescription,
+    new_description : ServerDescription,
+    connection : Mongo::Connection?,
+    pool : Mongo::Connection::Pool(Mongo::Connection)?,
+    &
+  ) : Bool
+    topology_changed = false
+    ready_desc = nil.as(ServerDescription?)
+    applied = false
+    begin
+      @lock.synchronize do
+        generation_stale = false
+        if (conn = connection) && pool
+          generation_stale = pool.stale?(conn)
+        end
+        unless generation_stale
+          current = @servers.find { |s| s.address == old_description.address }
+          if current
+            unless is_stale_error_topology_version?(current.topology_version, new_description.topology_version)
+              did_apply, ready_desc = apply_description(old_description, new_description)
+              if did_apply
+                yield
+                applied = true
+                topology_changed = true
+              end
+            end
+          end
+        end
+      end
+    ensure
+      @client.ready_pool(ready_desc) if ready_desc
+      @client.on_topology_update if topology_changed
+    end
+    applied
+  end
+
+  # Caller holds @lock. Returns {applied, ready_desc}.
+  private def apply_description(old_description : ServerDescription, new_description : ServerDescription) : {Bool, ServerDescription?}
+    previous_type = @type
+    previous_set_name = @set_name
+    previous_max_set_version = @max_set_version
+    previous_max_election_id = @max_election_id
+    previous_servers = @servers.map(&.clone)
+    previous_stale = @stale
+    previous_compatible = @compatible
+    previous_compatibility_error = @compatibility_error
+    previous_logical_session_timeout_minutes = @logical_session_timeout_minutes
+
+    current_server = @servers.find { |s| s.address == old_description.address }
+    if current_server
+      unless is_newer_or_equal_topology_version?(current_server.topology_version, new_description.topology_version)
+        return {false, nil}
+      end
+    end
+
+    # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#updating-the-topologydescription
+    if @type.single? && @set_name.try { |name| new_description.set_name != name }
+      replace_description(old_description, ServerDescription.new(old_description.address))
+    else
+      replace_description(old_description, new_description)
+
+      unless new_description.type.unknown? || @type.load_balanced?
+        if new_description.min_wire_version > Client::MAX_WIRE_VERSION
+          @compatible = false
+          @compatibility_error = "Server at #{new_description.address} requires wire version #{new_description.min_wire_version}, but this version of cryomongo only supports up to #{Client::MAX_WIRE_VERSION}."
+        elsif new_description.max_wire_version < Client::MIN_WIRE_VERSION
+          @compatible = false
+          @compatibility_error = "Server at #{new_description.address} requires wire version #{new_description.max_wire_version}, but this version of cryomongo requires at least #{Client::MIN_WIRE_VERSION}."
+        else
+          @compatible = true
+        end
+      end
+
+      case new_description.type
+      when .unknown?
+        check_if_has_primary if @type.replica_set_with_primary?
+      when .standalone?
+        case @type
+        when .unknown?
+          update_unknown_with_standalone(new_description)
+        when .sharded?, .replica_set_no_primary?
+          remove(new_description)
+        when .replica_set_with_primary?
+          remove(new_description)
+          check_if_has_primary
+        else
+          # ignore
+        end
+      when .mongos?
+        case @type
+        when .unknown?
+          @type = :sharded
+        when .replica_set_no_primary?
+          remove(new_description)
+        when .replica_set_with_primary?
+          remove(new_description)
+          check_if_has_primary
+        else
+          # ignore
+        end
+      when .rs_primary?
+        case @type
+        when .unknown?
+          update_rs_from_primary(new_description)
+        when .sharded?
+          remove(new_description)
+        when .replica_set_no_primary?
+          @type = :replica_set_with_primary
+          update_rs_from_primary(new_description)
+        when .replica_set_with_primary?
+          update_rs_from_primary(new_description)
+        else
+          # ignore
+        end
+      when .rs_secondary?, .rs_arbiter?, .rs_other?
+        case @type
+        when .unknown?
+          @type = :replica_set_no_primary
+          update_rs_without_primary(new_description)
+        when .sharded?
+          remove(new_description)
+        when .replica_set_no_primary?
+          update_rs_without_primary(new_description)
+        when .replica_set_with_primary?
+          update_rs_with_primary_from_member(new_description)
+        else
+          # ignore
+        end
+      when .rs_ghost?
+        case @type
+        when .sharded?
+          remove(new_description)
+        when .replica_set_with_primary?
+          check_if_has_primary
+        else
+          # ignore
+        end
+      else
+        # ignore
+      end
+    end
+
+    if previous_type != @type || previous_servers != @servers
+      previous_topology = TopologyDescription.new(@client)
+      previous_topology.type = previous_type
+      previous_topology.set_name = previous_set_name
+      previous_topology.max_set_version = previous_max_set_version
+      previous_topology.max_election_id = previous_max_election_id
+      previous_topology.servers = previous_servers
+      previous_topology.stale = previous_stale
+      previous_topology.compatible = previous_compatible
+      previous_topology.compatibility_error = previous_compatibility_error
+      previous_topology.logical_session_timeout_minutes = previous_logical_session_timeout_minutes
+
+      @client.emit_sdam_event(Monitoring::SDAM::TopologyDescriptionChangedEvent.new(
+        @client.object_id, previous_topology, self.clone
+      ))
+    end
+
+    ready_desc = nil.as(ServerDescription?)
+    if srv = @servers.find { |s| s.address == new_description.address }
+      unless srv.type.unknown? || srv.type.rs_ghost?
+        if srv.data_bearing? || @type.single? || @type.load_balanced?
+          ready_desc = srv
+        end
+      end
+    end
+    {true, ready_desc}
   end
 
   def has_primary?
