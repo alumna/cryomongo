@@ -14,6 +14,9 @@
 
 set -euo pipefail
 
+# Ubuntu 26.04 + newer kernels: mongod 8.0 needs this or it aborts in TCMalloc/rseq.
+export GLIBC_TUNABLES="${GLIBC_TUNABLES:-glibc.pthread.rseq=1}"
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DATA="${ROOT}/data"
 MONGOD_PARAMS=(--setParameter enableTestCommands=1 --setParameter acceptApiVersion2=1 --setParameter transactionLifetimeLimitSeconds=20)
@@ -45,6 +48,15 @@ stop_all() {
     rm -f "${DATA}/mongod.pid"
   fi
   sudo systemctl stop mongod 2>/dev/null || true
+  # Give --fork children time to exit before a hard kill and sock unlink.
+  sleep 1
+  pkill -9 -f "mongos --configdb" || true
+  pkill -9 -f "mongod --configsvr" || true
+  pkill -9 -f "mongod --shardsvr" || true
+  # mongos --fork as root leaves /tmp/mongodb-*.sock. systemd mongod (mongodb
+  # user) then fails with "Failed to unlink socket file" (exit 14).
+  rm -f /tmp/mongodb-27016.sock /tmp/mongodb-27017.sock /tmp/mongodb-27018.sock \
+    /tmp/mongodb-27019.sock /tmp/mongodb-27050.sock /tmp/mongodb-27051.sock
 }
 
 wait_port() {
@@ -61,6 +73,8 @@ wait_port() {
 
 start_standalone() {
   stop_all
+  # Sharded mongos can hold 27017 until the kernel releases the port.
+  sleep 1
   mkdir -p "$DATA/standalone"
   mongod --port 27017 --bind_ip 127.0.0.1 --dbpath "$DATA/standalone" \
     --pidfilepath "$DATA/mongod.pid" --logpath "$DATA/standalone.log" --fork \
@@ -76,6 +90,34 @@ start_replicaset() {
   "$ROOT/scripts/mongo-rs.sh" configure-systemd
 }
 
+wait_primary() {
+  local port="$1"
+  for _ in $(seq 1 30); do
+    if mongosh --port "$port" --quiet --eval 'db.hello().isWritablePrimary' 2>/dev/null | grep -q true; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "timed out waiting for primary on port $port" >&2
+  return 1
+}
+
+# Leftover dbpath is already a replica set. Ignore that error so a second start works.
+initiate_rs() {
+  local port="$1"
+  local doc="$2"
+  mongosh --port "$port" --quiet --eval "
+    try {
+      rs.initiate(${doc});
+    } catch (e) {
+      const m = e.message || String(e);
+      if (m.indexOf('already initialized') === -1) {
+        throw e;
+      }
+    }
+  "
+}
+
 start_sharded() {
   stop_all
   mkdir -p "$DATA/cfg" "$DATA/shard"
@@ -85,16 +127,10 @@ start_sharded() {
     --dbpath "$DATA/shard" --logpath "$DATA/shard.log" --fork "${MONGOD_PARAMS[@]}"
   wait_port 27019
   wait_port 27018
-  mongosh --port 27019 --quiet --eval 'rs.initiate({_id:"cfg",configsvr:true,members:[{_id:0,host:"127.0.0.1:27019"}]})'
-  mongosh --port 27018 --quiet --eval 'rs.initiate({_id:"shard0",members:[{_id:0,host:"127.0.0.1:27018"}]})'
-  for _ in $(seq 1 30); do
-    mongosh --port 27019 --quiet --eval 'db.hello().isWritablePrimary' 2>/dev/null | grep -q true && break
-    sleep 1
-  done
-  for _ in $(seq 1 30); do
-    mongosh --port 27018 --quiet --eval 'db.hello().isWritablePrimary' 2>/dev/null | grep -q true && break
-    sleep 1
-  done
+  initiate_rs 27019 '{_id:"cfg",configsvr:true,members:[{_id:0,host:"127.0.0.1:27019"}]}'
+  initiate_rs 27018 '{_id:"shard0",members:[{_id:0,host:"127.0.0.1:27018"}]}'
+  wait_primary 27019
+  wait_primary 27018
   mongos --configdb cfg/127.0.0.1:27019 --port 27017 --bind_ip 127.0.0.1 --fork \
     --logpath "$DATA/mongos.log" "${MONGOS_PARAMS[@]}" --setParameter loadBalancerPort=27050
   if ! wait_port 27017; then
@@ -102,7 +138,16 @@ start_sharded() {
     tail -n 50 "$DATA/mongos.log" >&2 || true
     return 1
   fi
-  mongosh --quiet --eval 'sh.addShard("shard0/127.0.0.1:27018")'
+  mongosh --quiet --eval '
+    try {
+      sh.addShard("shard0/127.0.0.1:27018");
+    } catch (e) {
+      const m = e.message || String(e);
+      if (m.indexOf("already exists") === -1 && m.indexOf("duplicate") === -1) {
+        throw e;
+      }
+    }
+  '
   mongos --configdb cfg/127.0.0.1:27019 --port 27016 --bind_ip 127.0.0.1 --fork \
     --logpath "$DATA/mongos2.log" "${MONGOS_PARAMS[@]}" --setParameter loadBalancerPort=27051
   if ! wait_port 27016; then

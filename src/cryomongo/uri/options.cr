@@ -1,6 +1,7 @@
 require "http"
 require "uri"
 require "../compression"
+require "../handshake"
 
 # A set of options used to configure the driver.
 #
@@ -98,6 +99,9 @@ struct Mongo::Options
   getter timeout : Time::Span? = nil
   # Original mongodb+srv hostname. Set by the URI parser, not a URI option.
   property srv_hostname : String? = nil
+  # SDAM monitoring protocol: auto (default), poll, or stream.
+  # auto is stream except on FaaS (same rules as handshake client.env).
+  getter server_monitoring_mode : String = "auto"
 
   # The requested Server API version and strictness options.
   property server_api : ServerApi? = nil
@@ -174,6 +178,10 @@ struct Mongo::Options
       raise Mongo::Error.new("zlibCompressionLevel must be between -1 and 9")
     end
     Compression.parse_names(@compressors, warn: true)
+    @server_monitoring_mode = @server_monitoring_mode.downcase
+    unless @server_monitoring_mode == "auto" || @server_monitoring_mode == "poll" || @server_monitoring_mode == "stream"
+      raise Mongo::Error.new("serverMonitoringMode must be auto, poll, or stream")
+    end
   end
 
   def validate(raw_hash)
@@ -209,5 +217,17 @@ struct Mongo::Options
   # Handshake list. Unknown and unwired names are already dropped.
   def compressor_list : Array(String)
     Compression.parse_names(@compressors, warn: false)
+  end
+
+  # Streaming hello (MongoDB 4.4+) unless poll or auto-on-FaaS.
+  def streaming_enabled? : Bool
+    case @server_monitoring_mode.downcase
+    when "poll"
+      false
+    when "stream"
+      true
+    else
+      !Handshake.faas?
+    end
   end
 end

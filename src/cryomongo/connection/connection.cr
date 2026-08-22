@@ -21,10 +21,19 @@ class Mongo::Connection
   @sasl_supported_mechs : Array(String)? = nil
   # After the first handshake, later hellos follow helloOk from the server.
   getter? use_hello : Bool = false
+  # Monitor sockets must not negotiate SASL mechanisms (SDAM spec).
+  @monitor : Bool
+  # TCP/UNIX socket under @socket (which may be TLS). Timeouts are set on this fd.
+  @raw_socket : ::Socket
+  @interrupted = Atomic(Bool).new(false)
+  # Awaitable hello with exhaustAllowed: the server sends more replies on this socket.
+  @more_to_come = false
 
   def initialize(@server_description : SDAM::ServerDescription, @credentials : Mongo::Credentials, @options : Mongo::Options, is_monitor : Bool = false)
+    @monitor = is_monitor
+    tls_hostname = nil.as(String?)
     if @server_description.address.ends_with? ".sock"
-      socket = UNIXSocket.new(@server_description.address)
+      raw = UNIXSocket.new(@server_description.address)
     else
       # Safely extract host and port, supporting IPv6 bracket notation
       address = @server_description.address
@@ -39,10 +48,13 @@ class Mongo::Connection
 
       # TCPSocket.new and OpenSSL expect IPv6 addresses WITHOUT the brackets
       clean_host = host.starts_with?('[') && host.ends_with?(']') ? host.byte_slice(1, host.bytesize - 2) : host
+      tls_hostname = clean_host
 
-      socket = TCPSocket.new(clean_host, port, dns_timeout: @options.connect_timeout, connect_timeout: @options.connect_timeout)
-      socket.tcp_nodelay = true
+      tcp = TCPSocket.new(clean_host, port, dns_timeout: @options.connect_timeout, connect_timeout: @options.connect_timeout)
+      tcp.tcp_nodelay = true
+      raw = tcp
     end
+    @raw_socket = raw
 
     timeout = is_monitor ? @options.connect_timeout : @options.socket_timeout
 
@@ -50,9 +62,10 @@ class Mongo::Connection
       timeout = nil
     end
 
-    socket.read_timeout = timeout
-    socket.write_timeout = timeout
+    raw.read_timeout = timeout
+    raw.write_timeout = timeout
 
+    socket = raw.as(IO)
     if @options.ssl || @options.tls
       context = OpenSSL::SSL::Context::Client.new
       if tls_ca_file = @options.tls_ca_file
@@ -75,10 +88,10 @@ class Mongo::Connection
       # Skip hostname check when the URI asked for that, or when TLS is fully insecure.
       # Passing nil hostname tells OpenSSL not to match the certificate name.
       verify_hostname = !(@options.tls_insecure || @options.tls_allow_invalid_hostnames)
-      tls_hostname = verify_hostname ? clean_host : nil
+      ssl_hostname = verify_hostname ? tls_hostname : nil
       # When hostname is set, OpenSSL uses x509_verify_param_set1_ip_asc for IPs
       # instead of treating a bracketed IP as a DNS name.
-      socket = OpenSSL::SSL::Socket::Client.new(socket, context, sync_close: true, hostname: tls_hostname)
+      socket = OpenSSL::SSL::Socket::Client.new(raw, context, sync_close: true, hostname: ssl_hostname)
     end
 
     @socket = socket
@@ -88,6 +101,28 @@ class Mongo::Connection
   end
 
   def handshake(*, send_metadata = false, appname = nil, legacy = false, client_metadata : BSON? = nil, load_balanced : Bool = false)
+    run_hello(
+      send_metadata: send_metadata,
+      appname: appname,
+      legacy: legacy,
+      client_metadata: client_metadata,
+      load_balanced: load_balanced,
+      first: true
+    )
+  end
+
+  # Later monitor / RTT hello. No client metadata. Optional awaitable fields for streaming.
+  def hello(*, legacy = false, topology_version : BSON? = nil, max_await_time_ms : Int64? = nil, exhaust_read : Bool = false)
+    run_hello(
+      legacy: legacy,
+      topology_version: topology_version,
+      max_await_time_ms: max_await_time_ms,
+      first: false,
+      exhaust_read: exhaust_read
+    )
+  end
+
+  private def run_hello(*, send_metadata = false, appname = nil, legacy = false, client_metadata : BSON? = nil, load_balanced : Bool = false, topology_version : BSON? = nil, max_await_time_ms : Int64? = nil, first : Bool = false, exhaust_read : Bool = false)
     # First handshake uses legacy hello unless Server API or load-balanced is set.
     # Later heartbeats use hello when the server sent helloOk: true.
     use_legacy = legacy
@@ -100,43 +135,57 @@ class Mongo::Connection
         metadata = Handshake.client_document(nil)
       end
     end
-    body, _ = Commands::Hello.command(
-      appname: appname,
-      legacy: use_legacy,
-      client: metadata,
-      load_balanced: load_balanced,
-      compression: @options.compressor_list
-    )
+    started = Time.instant
+    unless exhaust_read
+      body, _ = Commands::Hello.command(
+        appname: appname,
+        legacy: use_legacy,
+        client: metadata,
+        load_balanced: load_balanced,
+        compression: @options.compressor_list,
+        topology_version: topology_version,
+        max_await_time_ms: max_await_time_ms
+      )
 
-    add_sasl = @credentials.username && !@credentials.mechanism
-    api = @options.server_api
-    if add_sasl || api
-      body.append do |builder|
-        if add_sasl
-          source = @credentials.source || ""
-          source = "admin" if source.empty?
-          builder["saslSupportedMechs"] = "#{source}.#{@credentials.username}"
-        end
-        if api
-          builder["apiVersion"] = api.version
-          builder["apiStrict"] = api.strict.as(Bool) unless api.strict.nil?
-          builder["apiDeprecationErrors"] = api.deprecation_errors.as(Bool) unless api.deprecation_errors.nil?
+      # Monitor sockets must not send saslSupportedMechs.
+      add_sasl = first && !@monitor && @credentials.username && !@credentials.mechanism
+      api = @options.server_api
+      if add_sasl || api
+        body.append do |builder|
+          if add_sasl
+            source = @credentials.source || ""
+            source = "admin" if source.empty?
+            builder["saslSupportedMechs"] = "#{source}.#{@credentials.username}"
+          end
+          if api
+            builder["apiVersion"] = api.version
+            builder["apiStrict"] = api.strict.as(Bool) unless api.strict.nil?
+            builder["apiDeprecationErrors"] = api.deprecation_errors.as(Bool) unless api.deprecation_errors.nil?
+          end
         end
       end
-    end
 
-    request = Messages::OpMsg.new(body)
-
-    response = uninitialized Mongo::Messages::OpMsg
-    round_trip_time = Time.measure {
+      # Streaming hello (SDAM): exhaustAllowed so the server may send moreToCome.
+      flags = if topology_version && max_await_time_ms
+                Messages::OpMsg::Flags::ExhaustAllowed
+              else
+                Messages::OpMsg::Flags::None
+              end
+      request = Messages::OpMsg.new(body, flag_bits: flags)
       send(request, Commands::Hello, log: false)
-      response = receive(log: false)
-    }
+    end
+    response = if max_await_time_ms || exhaust_read
+                 receive_awaitable(started)
+               else
+                 @more_to_come = false
+                 receive(log: false)
+               end
+    round_trip_time = started.elapsed
 
     if error = response.error?
       # Fallback to legacy isMaster if 'hello' command is not found (Mongo < 4.4)
       # The Versioned API spec mandates NOT using legacy commands if an API is requested.
-      if !use_legacy && error.is_a?(Mongo::Error::Command) && error.code == 59 && @options.server_api.nil?
+      if first && !use_legacy && error.is_a?(Mongo::Error::Command) && error.code == 59 && @options.server_api.nil?
         return handshake(send_metadata: send_metadata, appname: appname, legacy: true, client_metadata: client_metadata, load_balanced: load_balanced)
       end
       raise error
@@ -162,14 +211,52 @@ class Mongo::Connection
     {result, round_trip_time}
   end
 
+  def more_to_come? : Bool
+    @more_to_come
+  end
+
+  # Awaitable hello: wrap the socket so wait-for-data is sliced. A timeout
+  # must not unwind Message.new mid-frame (that would drop bytes already read).
+  # cancelCheck sets a flag instead of shutdown() on this fd (fd reuse can hit
+  # an application socket). Return the first OP_MSG even when moreToCome is set
+  # (streaming exhaust). receive() would wait for the next exhaust reply and
+  # miss connectTimeoutMS + heartbeatFrequencyMS.
+  private def receive_awaitable(started : Time::Instant)
+    overall = @raw_socket.read_timeout
+    deadline = overall ? started + overall : nil
+    inner = @socket
+    @socket = AwaitReadIO.new(inner, @raw_socket, deadline, self)
+    begin
+      receive_one
+    ensure
+      @socket = inner
+    end
+  end
+
+  private def receive_one
+    message = Mongo::Messages::Message.new(socket)
+    op_msg = message.contents.as(Messages::OpMsg)
+    @more_to_come = op_msg.flag_bits.more_to_come?
+    op_msg
+  end
+
   def apply_timeout(span : Time::Span?) : Nil
+    @raw_socket.read_timeout = span
+    @raw_socket.write_timeout = span
     socket = @socket
+    return if socket.same?(@raw_socket)
     if socket.responds_to?(:read_timeout=)
       socket.read_timeout = span
     end
     if socket.responds_to?(:write_timeout=)
       socket.write_timeout = span
     end
+  end
+
+  # Awaitable hello reads in short slices and checks this flag. Do not close or
+  # shutdown the fd from another fiber (fd reuse can hit an application socket).
+  def interrupt : Nil
+    @interrupted.set(true)
   end
 
   def self.average_round_trip_time(round_trip_time : Time::Span, old_rtt : Time::Span?)
@@ -283,7 +370,9 @@ class Mongo::Connection
   end
 
   def close
-    @socket.close unless @socket.closed?
+    inner = @socket
+    inner.close unless inner.closed?
+  rescue
   end
 
   private def compress_command?(command) : Bool
@@ -322,5 +411,65 @@ class Mongo::Connection
     socket.write_byte(id.value)
     socket.write(compressed)
     socket.flush
+  end
+
+  def interrupted? : Bool
+    @interrupted.get
+  end
+end
+
+# :nodoc:
+# Wait for data in 100ms slices. IO::TimeoutError stays inside read(), so
+# Message.new does not unwind after a partial header or body.
+class Mongo::Connection::AwaitReadIO < IO
+  def initialize(@inner : IO, @raw : ::Socket, @deadline : Time::Instant?, @connection : Mongo::Connection)
+  end
+
+  def read(slice : Bytes) : Int32
+    slice_cap = 100.milliseconds
+    loop do
+      if @connection.interrupted? || @inner.closed?
+        raise IO::Error.new("Closed stream")
+      end
+      if deadline = @deadline
+        left = deadline - Time.instant
+        raise IO::TimeoutError.new("Read timed out") if left <= Time::Span.zero
+        wait = left < slice_cap ? left : slice_cap
+      else
+        wait = slice_cap
+      end
+      @raw.read_timeout = wait
+      @raw.write_timeout = wait
+      inner = @inner
+      unless inner.same?(@raw)
+        if inner.responds_to?(:read_timeout=)
+          inner.read_timeout = wait
+        end
+        if inner.responds_to?(:write_timeout=)
+          inner.write_timeout = wait
+        end
+      end
+      begin
+        return @inner.read(slice)
+      rescue IO::TimeoutError
+        next
+      end
+    end
+  end
+
+  def write(slice : Bytes) : Nil
+    @inner.write(slice)
+  end
+
+  def flush
+    @inner.flush
+  end
+
+  def close
+    @inner.close
+  end
+
+  def closed? : Bool
+    @inner.closed?
   end
 end

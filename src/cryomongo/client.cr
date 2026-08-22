@@ -1,4 +1,5 @@
 require "socket"
+require "wait_group"
 require "sync/exclusive"
 require "./database"
 require "./messages/**"
@@ -189,10 +190,27 @@ class Mongo::Client
       Log.warn { "Error while trying to close connection pool. #{e}" }
     end
 
-    @monitors.dup.each do |monitor|
-      monitor.close
-    rescue e
-      Log.warn { "Error while trying to close monitor fiber. #{e}" }
+    monitors = @monitors.dup
+    if monitors.size <= 1
+      monitors.each do |monitor|
+        monitor.close
+      rescue e
+        Log.warn { "Error while trying to close monitor fiber. #{e}" }
+      end
+    else
+      # Awaitable hello can block until interrupt. Close all monitors together.
+      wg = WaitGroup.new
+      monitors.each do |monitor|
+        wg.add(1)
+        spawn do
+          monitor.close
+        rescue e
+          Log.warn { "Error while trying to close monitor fiber. #{e}" }
+        ensure
+          wg.done
+        end
+      end
+      wg.wait
     end
 
     emit_sdam_event(Monitoring::SDAM::TopologyClosedEvent.new(self.object_id))
@@ -416,19 +434,52 @@ class Mongo::Client
     pool = pool_at(server_description.address) || create_pool(server_description)
 
     emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutStartedEvent.new(server_description.address))
-    begin
-      conn = pool.checkout(wait)
-      emit_cmap_event(Monitoring::CMAP::ConnectionCheckedOutEvent.new(server_description.address, conn.connection_id))
-      conn
-    rescue error : Mongo::Error::PoolCleared
-      emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
-      raise error
-    rescue error : Mongo::Error::Connection
-      emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "timeout"))
-      raise error
-    rescue error
-      emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
-      raise error
+    checkout_from_pool(pool, server_description, wait)
+  end
+
+  # Handshake I/O can still see leftover failCommand closeConnection (same appName
+  # as the monitor and RTT sockets). That is connection setup, not the write.
+  # Single topology selects Unknown at once, so retry until the wait budget ends.
+  # minPoolSize fill uses the factory directly and does not retry here (Phase 3.4).
+  # Pass the original wait into the pool so waitQueueTimeoutMS still applies
+  # (nil means the pool uses its own checkout timeout, not serverSelectionTimeoutMS).
+  private def checkout_from_pool(
+    pool : Mongo::Connection::Pool(Mongo::Connection),
+    server_description : SDAM::ServerDescription,
+    wait : Time::Span?,
+  ) : Mongo::Connection
+    deadline = if wait
+                 Time.instant + wait
+               else
+                 Time.instant + @options.server_selection_timeout
+               end
+    last_network : Mongo::Error::Network? = nil
+    loop do
+      leftover = deadline - Time.instant
+      if leftover <= Time::Span.zero
+        emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+        raise last_network || Mongo::Error::Connection.new("Timed out while checking out a connection")
+      end
+      begin
+        conn = pool.checkout(wait)
+        emit_cmap_event(Monitoring::CMAP::ConnectionCheckedOutEvent.new(server_description.address, conn.connection_id))
+        return conn
+      rescue error : Mongo::Error::PoolCleared
+        emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+        raise error
+      rescue error : Mongo::Error::Connection
+        emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "timeout"))
+        raise error
+      rescue error : Mongo::Error::Network
+        last_network = error
+        Fiber.yield
+      rescue error : NetworkError
+        last_network = Mongo::Error::Network.new(error)
+        Fiber.yield
+      rescue error
+        emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+        raise error
+      end
     end
   end
 
@@ -539,6 +590,9 @@ class Mongo::Client
     end
     emit_cmap_event(Monitoring::CMAP::ConnectionClosedEvent.new(server_description.address, connection.connection_id, "error"))
     connection.close
+    if error.is_a?(IO::Error) || error.is_a?(Socket::Error)
+      raise Mongo::Error::Network.new(error)
+    end
     raise error
   end
 

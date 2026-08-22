@@ -70,7 +70,7 @@ Unified `pool-cleared-error.json` passes. zlib is Phase 3 (done). Everything sti
 
 This phase optimizes the driver to take full advantage of Crystal's new `-Dpreview_mt` / `Execution Contexts` and reduces network overhead.
 
-Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=zlib` is green on every topology (**780** examples, 0 failures, 0 errors): standalone **29.73s / 212 pending**, replica set **2:38 / 96 pending**, sharded **6:06 / 103 pending**, load-balanced **2:56 / 136 pending**. What is still skipped, and what is out of scope, is listed below and in `FIXES.md`.
+Phase 3 is done. Local `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=zlib` after Phase **3.2** is **783** examples, 0 failures, 0 errors: standalone **2:00 / 209 pending**, replica set **6:06 / 94 pending**, sharded **8:12 / 101 pending**, load-balanced **5:45 / 136 pending**. Push a PR so GitHub Docker confirms. What is still skipped, and what is out of scope, is listed below and in `FIXES.md`.
 
 ### Concurrency
 - [x] **CI Parallel Testing:** GitHub runs `crystal spec -Dpreview_mt -Dexecution_context` and sets `CRYSTAL_WORKERS=2` so the default execution context is resized.
@@ -89,7 +89,7 @@ Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CR
 
 ## Remaining work (MongoDB 8.0, toward production grade)
 
-Phases 1–3 are done. GitHub is green. The driver is production-capable for core 8.0 (CRUD, sessions, transactions). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). The **3.x** sub-phases below close remaining 8.0 holes. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
+Phases 1–3 are done. Local Phase **3.2** `crystal spec` is green (**783** examples). Push a PR so GitHub Docker confirms the matrix. The driver is production-capable for core 8.0 (CRUD, sessions, transactions). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). The **3.x** sub-phases below close remaining 8.0 holes. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
 
 ### Out of scope until the user asks
 
@@ -101,7 +101,7 @@ Do not treat these as the next work.
 - **Atlas Search.** Keep `SKIP_TEST` for search-index ops. Do not copy search-index JSON.
 - Official JSON `skipReason` that is a server or spec bug (`lb-connection-establishment.json` on 8.0; CSOT `runCursorCommand` “failure” tests with `blockTimeMS` < `timeoutMS`; DRIVERS-2032 handshake skips).
 
-### Phase 3.1 — CMAP pool at discovery (this conversation)
+### Phase 3.1 — CMAP pool at discovery
 
 Foundation for later CMAP / SDAM files. Create the pool when a monitor check finds a data-bearing server (or on load-balanced init). Emit `poolCreatedEvent` / `poolReadyEvent`. Fill `minPoolSize` in a background fiber after ready. A shutdown command error (code 91) during that fill marks the server Unknown and clears the pool.
 
@@ -114,14 +114,19 @@ Foundation for later CMAP / SDAM files. Create the pool when a monitor check fin
 
 GitHub Docker `replicaset` is **one** member, same as local `rs0`. The old note that GitHub is 3 members was wrong. `replicaset-emit-topology-changed-before-close.json` stays skipped until 3.13.
 
-### Phase 3.2 — Monitor hello errors
+### Phase 3.2 — Monitor hello errors (this conversation)
 
-- [ ] Handle monitor hello command and network `failCommand`.
-- [ ] Un-skip `hello-command-error.json` and `hello-network-error.json`.
+- [x] Handle monitor hello command and network `failCommand`.
+- [x] Un-skip `hello-command-error.json` and `hello-network-error.json`.
+
+Awaitable hello (MongoDB 4.4+) and an RTT fiber are on so those UTF files can consume `failCommand` times on monitor sockets, not application handshakes. `serverMonitoringMode=poll` is honored so `minPoolSize-error.json` stays on polling. Awaitable hello timeout is `connectTimeoutMS` plus `heartbeatFrequencyMS` (SDAM spec). This LXC mongod hello wait is ~1s, so `hello-timeout.json` "Driver extends timeout while streaming" is skipped locally on standalone / replica set; GitHub Docker and mongos run it. Single topology can select Unknown at once, so leftover `failCommand` `closeConnection` on hello can still hit the application handshake; checkout retries that network error until the wait budget ends (not a write retry). Heartbeat events stay Phase 3.3.
+
+Local full `crystal spec` after 3.2 (**783** examples, 0 failures, 0 errors): standalone **2:00 / 209 pending**, replica set **6:06 / 94 pending**, sharded **8:12 / 101 pending**, load-balanced **5:45 / 136 pending**. Streaming hello makes the suite slower than Phase 3 polling.
 
 ### Phase 3.3 — Heartbeat events and `serverMonitoringMode`
 
-- [ ] URI `serverMonitoringMode` (`auto` / `poll` / `stream`).
+URI `serverMonitoringMode` is already parsed (needed for 3.2 poll vs stream). Still to do:
+
 - [ ] `ServerHeartbeatStartedEvent` / `Succeeded` / `Failed`.
 - [ ] Un-skip `serverMonitoringMode.json`.
 

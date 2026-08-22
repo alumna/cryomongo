@@ -11,7 +11,7 @@
 
 This is a fork of `elbywan/cryomongo`. The goal is to make the driver ready for **MongoDB 8.0** and **Crystal 1.21**. We plan to merge back to the original project when that work is done.
 
-The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). Semver is **0.x**. **Phase 1**, **Phase 2**, and **Phase 3** of [ROADMAP.md](ROADMAP.md) are done. GitHub Actions `crystal spec` is green on standalone, replica set, sharded, and load-balanced (**780** examples, 0 failures): standalone **29.73s**, replica set **2:38**, sharded **6:06**, load-balanced **2:56**. Spec jobs resize the default execution context (`CRYSTAL_WORKERS=2`) and use zlib wire compression.
+The driver speaks OP_MSG only. The max wire version is **25** (MongoDB 8.0). Semver is **0.x**. **Phase 1**, **Phase 2**, and **Phase 3** of [ROADMAP.md](ROADMAP.md) are done. Local `crystal spec -Dpreview_mt -Dexecution_context` after Phase **3.2** is **783** examples, 0 failures, 0 errors: standalone **2:00 / 209 pending**, replica set **6:06 / 94 pending**, sharded **8:12 / 101 pending**, load-balanced **5:45 / 136 pending**. Spec jobs resize the default execution context (`CRYSTAL_WORKERS=2`) and use zlib wire compression. Push a PR so GitHub Docker confirms the same matrix.
 
 The driver is ready for **core CRUD, sessions, and transactions** on MongoDB 8.0. **1.0** waits on client-side encryption (Phase 4) and cloud auth (Phase 5: AWS / OIDC). Remaining 8.0 work is [ROADMAP.md](ROADMAP.md) Phase 3.1–3.14.
 
@@ -45,7 +45,7 @@ The driver is **0.x**. It is ready for core CRUD, sessions, and transactions on 
 - Unified `pool-cleared-error.json`. Socket timeouts after handshake do not mark the server Unknown.
 
 **Not done yet (MongoDB 8.0). See [ROADMAP.md](ROADMAP.md) Phase 3.1–3.14 and [FIXES.md](FIXES.md).**
-- Unified SDAM still skipped: `interruptInUseConnections`, handshake backpressure labels, monitor hello errors, heartbeat events / `serverMonitoringMode`, concurrent shutdown extra Unknown, SDAM logging. `minPoolSize-error.json` now runs. `replicaset-emit-topology-changed-before-close.json` needs a 3-member replica set (local and GitHub Docker are one member).
+- Unified SDAM still skipped: `interruptInUseConnections`, handshake backpressure labels, heartbeat events / `serverMonitoringMode` UTF, concurrent shutdown extra Unknown, SDAM logging. `minPoolSize-error.json`, `hello-command-error.json`, and `hello-network-error.json` now run. `replicaset-emit-topology-changed-before-close.json` needs a 3-member replica set (local and GitHub Docker are one member).
 - UTF ops still `SKIP_TEST`: client `bulkWrite`, `let` on CRUD, legacy `count`, `mapReduce`, `waitForPrimaryChange` / `recordTopologyDescription` / `assertTopologyType`.
 - No users on CI, so `auth: true` UTF does not run (handshake-error files, unified SDAM auth-error files). Speculative auth and monitor auth are missing.
 - snappy / zstd. TLS key-file password and OCSP flags are parsed and unused. Official CMAP JSON is not copied. CLAM is 1 of 23 files. GridFS `deleteByName` / `renameByName` not copied.
