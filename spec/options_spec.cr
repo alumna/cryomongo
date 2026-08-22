@@ -72,6 +72,26 @@ describe Mongo::Options do
     end
   end
 
+  it "defaults serverMonitoringMode to auto" do
+    Mongo::Options.new.server_monitoring_mode.should eq "auto"
+    Mongo::Options.new.streaming_enabled?.should eq !Mongo::Handshake.faas?
+  end
+
+  it "parses serverMonitoringMode poll and stream" do
+    _, poll, _, _ = Mongo::URI.parse("mongodb://localhost/?serverMonitoringMode=poll", Mongo::Options.new)
+    poll.server_monitoring_mode.should eq "poll"
+    poll.streaming_enabled?.should be_false
+    _, stream, _, _ = Mongo::URI.parse("mongodb://localhost/?serverMonitoringMode=STREAM", Mongo::Options.new)
+    stream.server_monitoring_mode.should eq "stream"
+    stream.streaming_enabled?.should be_true
+  end
+
+  it "rejects an unknown serverMonitoringMode" do
+    expect_raises(Mongo::Error, /serverMonitoringMode/) do
+      Mongo::URI.parse("mongodb://localhost/?serverMonitoringMode=fast", Mongo::Options.new)
+    end
+  end
+
   it "parses srvMaxHosts and srvServiceName on mongodb+srv URIs after DNS" do
     # Validation of the names themselves does not need DNS. A non-srv URI is rejected.
     expect_raises(Mongo::Error, /srvMaxHosts/) do

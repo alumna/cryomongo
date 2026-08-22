@@ -1,19 +1,24 @@
 require "socket"
 require "wait_group"
+require "./rtt_monitor"
 
 # :nodoc:
 module Mongo::SDAM
   class Monitor
-    getter resume_scan = Channel(Nil).new
+    getter resume_scan = Channel(Nil).new(1)
     getter server_description : ServerDescription
 
     @heartbeat_frequency : Time::Span = 10.seconds
     @topology : TopologyDescription
     @connection : Mongo::Connection? = nil
-    @closed : Bool = false
-    @scan_started : Bool = false
+    @closed = Atomic(Bool).new(false)
+    @scan_started = Atomic(Bool).new(false)
     @scan_requested = Atomic(Bool).new(false)
+    @retry_now = false
+    @socket_lock = Sync::Mutex.new
     @done = WaitGroup.new
+    @rtt : RttMonitor
+    @streaming : Bool
 
     def initialize(
       @client : Mongo::Client,
@@ -22,59 +27,56 @@ module Mongo::SDAM
       @heartbeat_frequency : Time::Span = 10.seconds,
     )
       @topology = @client.topology
-    end
-
-    def get_connection(server_description : ServerDescription) : Mongo::Connection
-      conn = @connection
-      if !conn || conn.socket.closed?
-        conn = Mongo::Connection.new(@server_description, @credentials, @client.options, is_monitor: true)
-        legacy = @client.options.server_api.nil? && !@client.options.load_balanced
-        conn.handshake(
-          send_metadata: true,
-          appname: @client.options.appname,
-          legacy: legacy,
-          client_metadata: @client.handshake_client_document,
-          load_balanced: @client.options.load_balanced == true
-        )
-        @connection = conn
-      end
-      conn
+      @streaming = @client.options.streaming_enabled?
+      @rtt = RttMonitor.new(@client, @server_description.address, @credentials, @heartbeat_frequency)
     end
 
     def close_connection(server_description : ServerDescription)
       drop_monitor_socket
-      @client.close_connection_pool(server_description)
     end
 
     # Close the monitor socket only. The application pool stays.
     def drop_monitor_socket : Nil
-      if (connection = @connection) && !connection.socket.closed?
-        connection.socket.close
+      conn = @socket_lock.synchronize do
+        c = @connection
+        @connection = nil
+        c
       end
-      @connection = nil
+      conn.try(&.interrupt)
     end
 
     def scan
-      return if @scan_started
-      @scan_started = true
+      return unless @scan_started.compare_and_set(false, true)
       @done.add(1)
       begin
         loop do
-          break if @closed
-          # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#multi-threaded-or-asynchronous-monitoring
+          break if @closed.get
+          # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.md#multi-threaded-or-asynchronous-monitoring
           # Cooldown is elapsed time. Do not use wall clock.
           before_cooldown = Time.instant + @client.min_heartbeat_frequency
-          server_to_check = @topology.servers.find(&.address.== @server_description.address)
+          previous = current_description
+          break if previous.nil? || @closed.get
 
-          break if server_to_check.nil? || @closed
-
-          unless (new_description = check(server_to_check)).nil?
-            @topology.update(server_to_check, new_description) unless @closed
+          new_description = check(previous)
+          break if @closed.get
+          # Application cancelCheck already replaced this server with Unknown.
+          # Do not emit a second Unknown or clear the pool again.
+          current = current_description
+          if current && current.type.unknown? && new_description.type.unknown? && !current.same?(previous)
+            @retry_now = true
+            @scan_requested.set(false)
+            next
           end
+          apply_check_result(previous, new_description)
 
-          # Close can happen during check(). The immediate-scan signal is then
-          # dropped (unbuffered channel + else). Do not wait a full heartbeat.
-          break if @closed
+          break if @closed.get
+
+          # Streaming: do not sleep after ok:1 when topologyVersion is present.
+          # Network error from a known server: next check at once (new socket).
+          if @retry_now || keep_streaming?(new_description)
+            @scan_requested.set(false)
+            next
+          end
 
           if @scan_requested.swap(false)
             wait_cooldown(before_cooldown)
@@ -84,18 +86,30 @@ module Mongo::SDAM
           select
           when resume_scan.receive
             @scan_requested.set(false)
-            break if @closed
+            break if @closed.get
             # Cooldown only applies to a live monitor that was asked to scan again.
             wait_cooldown(before_cooldown)
           when timeout @heartbeat_frequency
           end
+        rescue Channel::ClosedError
+          break
         rescue e
           Mongo::Log.error { "Monitoring error: #{e}" }
           Mongo::Log.debug { e.backtrace.join("\n") }
-          # Monitoring error
+          drop_monitor_socket
         end
       ensure
-        close_connection(@server_description)
+        @rtt.close
+        # Close the monitor socket from this fiber. Do not close the application
+        # pool: scan can stop when hello.me replaces localhost with 127.0.0.1,
+        # and an in-use insert still sits on the old pool.
+        conn = @socket_lock.synchronize do
+          c = @connection
+          @connection = nil
+          c
+        end
+        conn.try(&.interrupt)
+        conn.try { |c| c.close rescue nil }
         @client.stop_monitoring(@server_description)
         @done.done
       end
@@ -109,50 +123,180 @@ module Mongo::SDAM
         # Scan is in check() or already waking. The flag makes the next loop
         # run another check instead of sleeping a full heartbeat.
       end
+    rescue Channel::ClosedError
     end
 
-    def check(server_description : ServerDescription)
-      server_description.last_update_time = Time.utc
-      connection = get_connection(server_description)
-      result, round_trip_time = connection.handshake(legacy: !connection.use_hello?)
-      old_rtt = server_description.type.unknown? ? nil : server_description.round_trip_time
-      new_rtt = Connection.average_round_trip_time(round_trip_time, old_rtt)
-      new_description = ServerDescription.new(server_description.address, result, new_rtt)
-      new_description.copy_rtt_window(server_description) unless server_description.type.unknown?
-      new_description.record_rtt_sample(round_trip_time)
-      new_description
+    # Application marked this server Unknown. Interrupt awaitable hello and scan now.
+    def cancel_check : Nil
+      drop_monitor_socket
+      request_immediate_scan
+    end
+
+    def check(previous : ServerDescription) : ServerDescription
+      @retry_now = false
+      result, round_trip_time, from_handshake = do_check(previous)
+      description_from_hello(previous, result, round_trip_time, from_handshake)
     rescue error : Exception
       Mongo::Log.error { "Monitoring handshake error: #{error}" }
       Mongo::Log.debug { error.backtrace.join("\n") }
-      # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#network-or-command-error-during-server-check
-      known_state = !server_description.type.unknown?
-      description = ServerDescription.new(server_description.address)
-      description.error = error.message
-      description.last_update_time = server_description.last_update_time
-      drop_monitor_socket
-      # A known server: clear the application pool. Do not delete it.
-      @client.clear_pool(server_description) if known_state
-      if known_state && error.is_a? Client::NetworkError
-        check(description)
-      else
-        description
-      end
+      # see: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.md#network-or-command-error-during-server-check
+      unknown_after_error(previous, error)
     end
 
     def close
-      @closed = true
+      @closed.set(true)
+      drop_monitor_socket
       request_immediate_scan
+      @resume_scan.close rescue nil
       @done.wait
     end
 
     # Sleep until the minHeartbeatFrequency cooldown, but wake if close() runs.
     private def wait_cooldown(until_time : Time::Instant)
       leftover = until_time - Time.instant
-      return if leftover <= Time::Span.zero || @closed
+      return if leftover <= Time::Span.zero || @closed.get
       select
       when resume_scan.receive
       when timeout leftover
       end
+    rescue Channel::ClosedError
+    end
+
+    private def current_description : ServerDescription?
+      @topology.servers.find(&.address.== @server_description.address)
+    end
+
+    private def keep_streaming?(description : ServerDescription) : Bool
+      @streaming && !description.type.unknown? && !description.topology_version.nil?
+    end
+
+    private def apply_check_result(previous : ServerDescription, new_description : ServerDescription) : Nil
+      known = !previous.type.unknown?
+      @topology.update(previous, new_description)
+      # Clear with the topology update. Only when leaving a known state so UTF
+      # sees one poolClearedEvent (a paused pool would emit again).
+      @client.clear_pool(previous) if new_description.error && known
+    end
+
+    private def do_check(previous : ServerDescription) : {Commands::Hello::Result, Time::Span, Bool}
+      conn = @socket_lock.synchronize { @connection }
+      if conn.nil? || conn.socket.closed?
+        result, rtt = setup_connection
+        return {result, rtt, true}
+      end
+
+      begin
+        if conn.more_to_come?
+          apply_socket_timeout(conn, extra: awaitable_timeout_extra(previous))
+          result, rtt = conn.hello(legacy: !conn.use_hello?, exhaust_read: true)
+          return {result, rtt, false}
+        end
+        # Unknown from a state-change error may still carry topologyVersion.
+        # Do not await on that value; handshake a new socket instead.
+        if @streaming && !previous.type.unknown? && (tv = previous.topology_version)
+          apply_socket_timeout(conn, extra: awaitable_timeout_extra(previous))
+          result, rtt = conn.hello(
+            legacy: !conn.use_hello?,
+            topology_version: tv,
+            max_await_time_ms: @heartbeat_frequency.total_milliseconds.to_i64
+          )
+          return {result, rtt, false}
+        end
+
+        apply_socket_timeout(conn)
+        result, rtt = conn.hello(legacy: !conn.use_hello?)
+        {result, rtt, false}
+      rescue error
+        # Close from this fiber after receive failed. interrupt() only sets a flag.
+        close_monitor_conn(conn)
+        raise error
+      end
+    end
+
+    private def close_monitor_conn(conn : Mongo::Connection) : Nil
+      @socket_lock.synchronize do
+        @connection = nil if @connection.same?(conn)
+      end
+      conn.close rescue nil
+    end
+
+    private def setup_connection : {Commands::Hello::Result, Time::Span}
+      conn = Mongo::Connection.new(@server_description, @credentials, @client.options, is_monitor: true)
+      @socket_lock.synchronize { @connection = conn }
+      begin
+        legacy = @client.options.server_api.nil? && !@client.options.load_balanced
+        conn.handshake(
+          send_metadata: true,
+          appname: @client.options.appname,
+          legacy: legacy,
+          client_metadata: @client.handshake_client_document,
+          load_balanced: @client.options.load_balanced == true
+        )
+      rescue error
+        close_monitor_conn(conn)
+        raise error
+      end
+    end
+
+    private def description_from_hello(previous : ServerDescription, result : Commands::Hello::Result, round_trip_time : Time::Span, from_handshake : Bool) : ServerDescription
+      address = previous.address
+      if @streaming
+        # Handshake RTT belongs on the dedicated RTT window. Do this before
+        # copy so CSOT min RTT sees the sample on this description.
+        @rtt.add_sample(round_trip_time) if from_handshake
+        if @rtt.started?
+          new_description = ServerDescription.new(address, result, @rtt.average)
+          @rtt.copy_window_into(new_description)
+        else
+          new_description = ServerDescription.new(address, result, round_trip_time)
+          new_description.record_rtt_sample(round_trip_time)
+        end
+        if new_description.topology_version && !new_description.type.unknown?
+          @rtt.start
+        end
+        return new_description
+      end
+
+      old_rtt = previous.type.unknown? ? nil : previous.round_trip_time
+      new_rtt = Mongo::Connection.average_round_trip_time(round_trip_time, old_rtt)
+      new_description = ServerDescription.new(address, result, new_rtt)
+      new_description.copy_rtt_window(previous) unless previous.type.unknown?
+      new_description.record_rtt_sample(round_trip_time)
+      new_description
+    end
+
+    private def unknown_after_error(previous : ServerDescription, error : Exception) : ServerDescription
+      known = !previous.type.unknown?
+      description = ServerDescription.new(previous.address)
+      description.error = error.message
+      description.last_update_time = Time.utc
+      drop_monitor_socket
+      @rtt.reset
+      @retry_now = known && error.is_a?(Mongo::Client::NetworkError)
+      description
+    end
+
+    private def awaitable_timeout_extra(previous : ServerDescription) : Time::Span
+      extra = @heartbeat_frequency
+      # mongod 8.0 waits ~1s when topologyVersion does not change, even if
+      # maxAwaitTimeMS is 200–750. connectTimeoutMS + heartbeatFrequencyMS
+      # (250+500=750) then marks Unknown and fails hello-timeout.json
+      # "Driver extends timeout while streaming". mongos ticks sooner.
+      if extra < 1.second && !previous.type.mongos?
+        extra = 1.second
+      end
+      extra
+    end
+
+    private def apply_socket_timeout(conn : Mongo::Connection, extra : Time::Span? = nil) : Nil
+      # URI default connectTimeoutMS is 10s. 0 means no timeout, including awaitable hello.
+      configured = @client.options.connect_timeout
+      if configured && configured.total_milliseconds == 0
+        conn.apply_timeout(nil)
+        return
+      end
+      base = configured || 10.seconds
+      conn.apply_timeout(extra ? base + extra : base)
     end
   end
 end

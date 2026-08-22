@@ -44,8 +44,6 @@ module Mongo::Unified
       "backpressure-server-description-unchanged-on-min-pool-size-population-error.json",
       "find-shutdown-error.json",
       "insert-shutdown-error.json",
-      "hello-command-error.json",
-      "hello-network-error.json",
       "pool-clear-min-pool-size-error.json",
       "serverMonitoringMode.json",
       # Local rs0 is one member, so this file waits forever for a 4th topology event.
@@ -64,8 +62,8 @@ module Mongo::Unified
       # interruptInUseConnections is not implemented. Logging UTF needs SDAM log
       # messages. Other unified SDAM files run; missing ops become SKIP_TEST.
       # Files below still fail for known holes (handshake backpressure labels,
-      # extra Unknown on concurrent shutdown, monitor hello error handling,
-      # heartbeat events). minPoolSize pool-ready is Phase 3.1.
+      # extra Unknown on concurrent shutdown, heartbeat events). minPoolSize
+      # pool-ready is Phase 3.1. Monitor hello command / network errors is 3.2.
       basename = File.basename(file_path)
       if basename.in?(SKIP_FILES) || file_path.includes?("/logging-")
         @skip_reason = "hardcoded skip"

@@ -31,6 +31,11 @@ module Mongo::Handshake
     def_equals @name, @version, @platform
   end
 
+  # True on AWS Lambda / Azure Functions / GCP / Vercel. auto monitoring uses poll then.
+  def faas? : Bool
+    !faas_name.nil?
+  end
+
   def os_name : String?
     return @@cached_os_name if @@os_name_checked
     @@os_name_checked = true

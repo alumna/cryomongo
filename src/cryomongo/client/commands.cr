@@ -434,7 +434,7 @@ class Mongo::Client
             description.last_update_time = desc.last_update_time
             topology.update(desc, description)
             clear_pool(desc)
-            @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
+            @monitors.find(&.server_description.address.== desc.address).try &.cancel_check
           }
         end
       end
@@ -516,10 +516,12 @@ class Mongo::Client
     description.max_wire_version = desc.max_wire_version
     description.error = error.message
     description.last_update_time = desc.last_update_time
-    description.topology_version = error.topology_version
+    if tv = error.topology_version
+      description.topology_version = BSON.new(tv.data)
+    end
     topology.update(desc, description)
     clear_pool(desc) if error.shutdown?
-    @monitors.find(&.server_description.address.== desc.address).try &.request_immediate_scan
+    @monitors.find(&.server_description.address.== desc.address).try &.cancel_check
   end
 
   private def resolve_deadline(deadline : Mongo::Deadline?, session : Session::ClientSession?) : Mongo::Deadline?
@@ -540,7 +542,8 @@ class Mongo::Client
     return body if deadline.infinite?
     return body if command != Commands::GetMore && !deadline.send_max_time?
 
-    min_rtt = server_description.min_round_trip_time
+    live = topology.servers.find { |s| s.address == server_description.address }
+    min_rtt = (live || server_description).min_round_trip_time
     max_time_ms = deadline.max_time_ms(min_rtt)
     unless max_time_ms
       raise Error::Timeout.new("remaining timeoutMS is less than server min RTT")

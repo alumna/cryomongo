@@ -88,7 +88,10 @@ class Mongo::SDAM::ServerDescription
       @last_write_date = last_write.last_write_date
       @op_time = last_write.op_time
     end
-    @topology_version = hello_result.topology_version
+    # Own the bytes. Hello body is a view into the OP_MSG receive buffer.
+    if tv = hello_result.topology_version
+      @topology_version = BSON.new(tv.data)
+    end
 
     if hello_result.msg == "isdbgrid"
       @type = :mongos
@@ -155,6 +158,11 @@ class Mongo::SDAM::ServerDescription
   # Copy the hello RTT window from an older description of the same server.
   def copy_rtt_window(other : ServerDescription) : Nil
     @rtt_window = other.rtt_window.dup
+  end
+
+  # Replace the CSOT min-RTT window (RTT monitor samples while streaming).
+  def replace_rtt_window(samples : Array(Time::Span)) : Nil
+    @rtt_window = samples.dup
   end
 
   def record_rtt_sample(sample : Time::Span) : Nil
