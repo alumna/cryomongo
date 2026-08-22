@@ -70,7 +70,7 @@ Unified `pool-cleared-error.json` passes. zlib is Phase 3 (done). Everything sti
 
 This phase optimizes the driver to take full advantage of Crystal's new `-Dpreview_mt` / `Execution Contexts` and reduces network overhead.
 
-Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=zlib` after Phase **3.2** is **783** examples: standalone **2:02 / 209 pending**, replica set **6:08 / 94 pending**, sharded **8:05 / 101 pending**, load-balanced **5:25 / 136 pending**. What is still skipped, and what is out of scope, is listed below and in `FIXES.md`.
+Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=zlib` after Phase **3.2** is **783** examples: standalone **2:02 / 209 pending**, replica set **6:08 / 94 pending**, sharded **8:05 / 101 pending**, load-balanced **5:25 / 136 pending**. Local after Phase **3.3** is still **783** examples: standalone **2:03 / 208 pending**, replica set **6:06 / 94 pending**, sharded **8:16 / 100 pending**, load-balanced **5:41 / 136 pending**. What is still skipped, and what is out of scope, is listed below and in `FIXES.md`.
 
 ### Concurrency
 - [x] **CI Parallel Testing:** GitHub runs `crystal spec -Dpreview_mt -Dexecution_context` and sets `CRYSTAL_WORKERS=2` so the default execution context is resized.
@@ -89,7 +89,7 @@ Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CR
 
 ## Remaining work (MongoDB 8.0, toward production grade)
 
-Phases 1–3 are done. Local Phase **3.2** `crystal spec` is green (**783** examples). Push a PR so GitHub Docker confirms the matrix. The driver is production-capable for core 8.0 (CRUD, sessions, transactions). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). The **3.x** sub-phases below close remaining 8.0 holes. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
+Phases 1–3 are done. Local Phase **3.3** `crystal spec` is green (**783** examples). Push a PR so GitHub Docker confirms the matrix. The driver is production-capable for core 8.0 (CRUD, sessions, transactions). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). The **3.x** sub-phases below close remaining 8.0 holes. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
 
 ### Out of scope until the user asks
 
@@ -119,16 +119,16 @@ GitHub Docker `replicaset` is **one** member, same as local `rs0`. The old note 
 - [x] Handle monitor hello command and network `failCommand`.
 - [x] Un-skip `hello-command-error.json` and `hello-network-error.json`.
 
-Awaitable hello (MongoDB 4.4+) and an RTT fiber are on so those UTF files can consume `failCommand` times on monitor sockets, not application handshakes. `serverMonitoringMode=poll` is honored so `minPoolSize-error.json` stays on polling. Awaitable hello timeout is `connectTimeoutMS` plus `heartbeatFrequencyMS` (SDAM spec). On mongod the extra is at least 1s (MongoDB 8.0 hello wait is ~1s when `topologyVersion` does not change). mongos keeps the spec sum. Single topology can select Unknown at once, so leftover `failCommand` `closeConnection` on hello can still hit the application handshake; checkout retries that network error until the wait budget ends (not a write retry). Heartbeat events stay Phase 3.3.
+Awaitable hello (MongoDB 4.4+) and an RTT fiber are on so those UTF files can consume `failCommand` times on monitor sockets, not application handshakes. `serverMonitoringMode=poll` is honored so `minPoolSize-error.json` stays on polling. Awaitable hello timeout is `connectTimeoutMS` plus `heartbeatFrequencyMS` (SDAM spec). On mongod the extra is at least 1s (MongoDB 8.0 hello wait is ~1s when `topologyVersion` does not change). mongos keeps the spec sum. Single topology can select Unknown at once, so leftover `failCommand` `closeConnection` on hello can still hit the application handshake; checkout retries that network error until the wait budget ends (not a write retry). Heartbeat events are Phase 3.3 (done).
 
 GitHub after 3.2 (**783** examples): standalone **2:02 / 209 pending**, replica set **6:08 / 94 pending**, sharded **8:05 / 101 pending**, load-balanced **5:25 / 136 pending**. Streaming hello makes the suite slower than Phase 3 polling. Standalone and replica set failed hello-timeout streaming wait until the 1s mongod extra.
 
 ### Phase 3.3 — Heartbeat events and `serverMonitoringMode`
 
-URI `serverMonitoringMode` is already parsed (needed for 3.2 poll vs stream). Still to do:
+URI `serverMonitoringMode` is already parsed (needed for 3.2 poll vs stream).
 
-- [ ] `ServerHeartbeatStartedEvent` / `Succeeded` / `Failed`.
-- [ ] Un-skip `serverMonitoringMode.json`.
+- [x] `ServerHeartbeatStartedEvent` / `Succeeded` / `Failed`.
+- [x] Un-skip `serverMonitoringMode.json`.
 
 ### Phase 3.4 — Handshake backpressure
 

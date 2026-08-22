@@ -213,6 +213,10 @@ class Mongo::Client
       wg.wait
     end
 
+    # Spec: topology is Unknown before TopologyClosedEvent (last SDAM event).
+    if (topo = @topology) && (previous = topo.close_to_unknown)
+      emit_sdam_event(Monitoring::SDAM::TopologyDescriptionChangedEvent.new(self.object_id, previous, topo.clone))
+    end
     emit_sdam_event(Monitoring::SDAM::TopologyClosedEvent.new(self.object_id))
   end
 
@@ -264,6 +268,25 @@ class Mongo::Client
     else
       @sdam_observable.broadcast(event)
     end
+  end
+
+  # Monitor hello events. Skip the event object (and hello reply BSON) when nobody is listening.
+  # :nodoc:
+  def emit_heartbeat_started(address : String, awaited : Bool) : Nil
+    return unless @sdam_observable.has_subscribers?
+    emit_sdam_event(Monitoring::SDAM::ServerHeartbeatStartedEvent.new(object_id, address, awaited))
+  end
+
+  # :nodoc:
+  def emit_heartbeat_succeeded(address : String, duration : Time::Span, reply : BSON, awaited : Bool) : Nil
+    return unless @sdam_observable.has_subscribers?
+    emit_sdam_event(Monitoring::SDAM::ServerHeartbeatSucceededEvent.new(object_id, address, duration, reply, awaited))
+  end
+
+  # :nodoc:
+  def emit_heartbeat_failed(address : String, duration : Time::Span, failure : Exception, awaited : Bool) : Nil
+    return unless @sdam_observable.has_subscribers?
+    emit_sdam_event(Monitoring::SDAM::ServerHeartbeatFailedEvent.new(object_id, address, duration, failure, awaited))
   end
 
   # UTF: subscribe first, then flush constructor events and start monitors.

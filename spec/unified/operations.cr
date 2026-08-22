@@ -917,6 +917,21 @@ module Mongo::Unified::Operations
         e.is_a?(Mongo::Monitoring::SDAM::TopologyClosedEvent)
       }
     end
+    if expected = event["serverHeartbeatStartedEvent"]?
+      return (registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::SDAM::ServerHeartbeatStartedEvent) && Matcher.heartbeat_awaited?(e.awaited, expected)
+      }
+    end
+    if expected = event["serverHeartbeatSucceededEvent"]?
+      return (registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::SDAM::ServerHeartbeatSucceededEvent) && Matcher.heartbeat_awaited?(e.awaited, expected)
+      }
+    end
+    if expected = event["serverHeartbeatFailedEvent"]?
+      return (registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::SDAM::ServerHeartbeatFailedEvent) && Matcher.heartbeat_awaited?(e.awaited, expected)
+      }
+    end
     if expected = event["serverDescriptionChangedEvent"]?
       return (registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).count { |e|
         match_server_description_changed?(e, expected)

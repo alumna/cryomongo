@@ -548,6 +548,22 @@ class Mongo::SDAM::TopologyDescription
     removed
   end
 
+  # Client close: servers and topology type become Unknown. Returns the previous
+  # description for TopologyDescriptionChangedEvent, or nil when already Unknown.
+  def close_to_unknown : TopologyDescription?
+    @lock.synchronize do
+      return nil if @type.unknown? && @servers.all?(&.type.unknown?)
+      previous = snapshot_for_event
+      @type = TopologyType::Unknown
+      @set_name = nil
+      @max_set_version = nil
+      @max_election_id = nil
+      @logical_session_timeout_minutes = nil
+      @servers = @servers.map { |s| ServerDescription.new(s.address) }
+      previous
+    end
+  end
+
   private def snapshot_for_event : TopologyDescription
     previous = TopologyDescription.new(@client)
     previous.type = @type
