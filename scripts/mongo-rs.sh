@@ -1,23 +1,22 @@
 #!/usr/bin/env bash
-# Configure or start a one-node MongoDB 8.0 replica set matching CI:
+# Status / one-node systemd helper, or a 3-member local replica set:
 #   mongod --replSet rs0 --setParameter enableTestCommands=1
 #
 # Usage:
 #   scripts/mongo-rs.sh status
-#   sudo scripts/mongo-rs.sh configure-systemd   # edit /etc/mongod.conf
+#   sudo scripts/mongo-rs.sh configure-systemd   # one systemd member (legacy)
 #   scripts/mongo-rs.sh initiate
-#   scripts/mongo-rs.sh start-local              # project ./data, no systemd
+#   scripts/mongo-rs.sh start-local              # 3 members in project ./data
 #   scripts/mongo-rs.sh stop-local
 #
+# Prefer sudo scripts/mongo-topology.sh replicaset (3 members on 27017/27018/27019).
 # configure-systemd sets replSetName rs0, enableTestCommands, acceptApiVersion2,
 # and transactionLifetimeLimitSeconds=20 (keeps failCommand WC tests shorter).
+# A one-member set cannot pass rediscover-quickly-after-step-down (3.7).
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DATA="${ROOT}/data"
-PIDFILE="${DATA}/mongod.pid"
-LOGFILE="${DATA}/mongod.log"
 
 status() {
   if mongosh --quiet --eval 'db.hello().me' >/dev/null 2>&1; then
@@ -28,6 +27,7 @@ status() {
       print("setName=" + (h.setName || "(none)"));
       print("isWritablePrimary=" + h.isWritablePrimary);
       print("maxWireVersion=" + h.maxWireVersion);
+      print("hosts=" + ((h.hosts || []).join(",") || "(none)"));
       const p = db.adminCommand({getParameter: 1, enableTestCommands: 1, acceptApiVersion2: 1, transactionLifetimeLimitSeconds: 1, minWaitForStreamingHelloMillis: 1});
       print("enableTestCommands=" + p.enableTestCommands);
       print("acceptApiVersion2=" + p.acceptApiVersion2);
@@ -111,25 +111,11 @@ initiate() {
 }
 
 start_local() {
-  mkdir -p "$DATA"
-  if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-    echo "already running pid=$(cat "$PIDFILE")"
-    return 0
-  fi
-  mongod --replSet rs0 --port 27017 --bind_ip 127.0.0.1 \
-    --dbpath "$DATA" --pidfilepath "$PIDFILE" --logpath "$LOGFILE" --fork \
-    --setParameter enableTestCommands=1 \
-    --setParameter acceptApiVersion2=1 \
-    --setParameter transactionLifetimeLimitSeconds=20 \
-    --setParameter minWaitForStreamingHelloMillis=0
-  initiate
+  "$ROOT/scripts/mongo-topology.sh" replicaset
 }
 
 stop_local() {
-  if [[ -f "$PIDFILE" ]]; then
-    kill "$(cat "$PIDFILE")" || true
-    rm -f "$PIDFILE"
-  fi
+  "$ROOT/scripts/mongo-topology.sh" stop
 }
 
 cmd="${1:-status}"

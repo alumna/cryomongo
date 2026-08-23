@@ -16,7 +16,7 @@ ENV["MONGODB_URI"] ||= begin
   when "load-balanced"
     ENV["SINGLE_MONGOS_LB_URI"]? || "mongodb://127.0.0.1:8000/?loadBalanced=true"
   else
-    "mongodb://localhost:27017/?replicaSet=rs0"
+    "mongodb://127.0.0.1:27017/?replicaSet=rs0"
   end
 end
 

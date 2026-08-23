@@ -30,7 +30,7 @@ describe "Unified Test Runner" do
         fail "Expected a response, but got nil"
       end
     rescue e : Mongo::Error::ServerSelection
-      pending! "MongoDB is not reachable as a replica set (#{e.message}). Run: sudo scripts/mongo-rs.sh configure-systemd"
+      pending! "MongoDB is not reachable as a replica set (#{e.message}). Run: sudo scripts/mongo-topology.sh replicaset"
     ensure
       client.close
     end
@@ -50,7 +50,7 @@ describe "Unified Test Runner" do
     rescue e : Mongo::Unified::Skip
       pending! e.message || "skipped"
     rescue e : Mongo::Error::ServerSelection
-      pending! "MongoDB is not reachable as a replica set (#{e.message}). Run: sudo scripts/mongo-rs.sh configure-systemd"
+      pending! "MongoDB is not reachable as a replica set (#{e.message}). Run: sudo scripts/mongo-topology.sh replicaset"
     end
   end
 end

@@ -9,7 +9,7 @@
 #   scripts/mongo-topology.sh status
 #   scripts/mongo-topology.sh stop
 #
-# replicaset uses scripts/mongo-rs.sh (systemd or ./data).
+# replicaset starts 3 native members on 27017/27018/27019 (not systemd).
 # load-balanced starts sharded mongos with loadBalancerPort, then HAProxy.
 
 set -euo pipefail
@@ -51,11 +51,13 @@ stop_all() {
     rm -f "${DATA}/mongod.pid"
   fi
   sudo systemctl stop mongod 2>/dev/null || true
+  pkill -f "mongod --replSet rs0" || true
   # Give --fork children time to exit before a hard kill and sock unlink.
   sleep 1
   pkill -9 -f "mongos --configdb" || true
   pkill -9 -f "mongod --configsvr" || true
   pkill -9 -f "mongod --shardsvr" || true
+  pkill -9 -f "mongod --replSet rs0" || true
   # mongos --fork as root leaves /tmp/mongodb-*.sock. systemd mongod (mongodb
   # user) then fails with "Failed to unlink socket file" (exit 14).
   rm -f /tmp/mongodb-27016.sock /tmp/mongodb-27017.sock /tmp/mongodb-27018.sock \
@@ -86,11 +88,49 @@ start_standalone() {
   echo "standalone is ready on 27017"
 }
 
+start_rs_member() {
+  local port="$1" dir="$2" log="$3"
+  mkdir -p "$dir"
+  mongod --replSet rs0 --port "$port" --bind_ip 127.0.0.1 \
+    --dbpath "$dir" --logpath "$log" --fork "${MONGOD_PARAMS[@]}"
+}
+
+# Three data-bearing members so replSetStepDown can elect a new primary (3.7)
+# and topology-lifecycle can emit 4 topologyDescriptionChanged events (3.13).
+wait_rs_members() {
+  for _ in $(seq 1 40); do
+    if mongosh --port 27017 --quiet --eval '
+      const s = rs.status();
+      if (!s.ok) quit(1);
+      const n = (s.members || []).filter(m => m.stateStr === "PRIMARY" || m.stateStr === "SECONDARY").length;
+      quit(n >= 3 ? 0 : 1);
+    ' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "timed out waiting for 3 replica set members" >&2
+  return 1
+}
+
 start_replicaset() {
   stop_all
   # Standalone --fork can hold 27017 until the kernel releases the port.
   sleep 1
-  "$ROOT/scripts/mongo-rs.sh" configure-systemd
+  # Fresh dbpaths so a leftover one-member rs0 does not keep a 1-node config.
+  rm -rf "$DATA/rs0-0" "$DATA/rs0-1" "$DATA/rs0-2"
+  start_rs_member 27017 "$DATA/rs0-0" "$DATA/rs0-0.log"
+  start_rs_member 27018 "$DATA/rs0-1" "$DATA/rs0-1.log"
+  start_rs_member 27019 "$DATA/rs0-2" "$DATA/rs0-2.log"
+  wait_port 27017
+  wait_port 27018
+  wait_port 27019
+  initiate_rs 27017 '{_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"},{_id:1,host:"127.0.0.1:27018"},{_id:2,host:"127.0.0.1:27019"}]}'
+  wait_rs_members
+  for port in 27017 27018 27019; do
+    mongosh --port "$port" --quiet --eval 'db.adminCommand({setParameter: 1, minWaitForStreamingHelloMillis: 0})' >/dev/null || true
+  done
+  echo "replicaset is ready on 27017 (3 members: 27017, 27018, 27019)"
 }
 
 wait_primary() {

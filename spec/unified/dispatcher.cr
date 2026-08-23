@@ -10,9 +10,6 @@ module Mongo::Unified::Dispatcher
     "clientBulkWrite",
     "count",
     "mapReduce",
-    "waitForPrimaryChange",
-    "recordTopologyDescription",
-    "assertTopologyType",
     "createSearchIndex",
     "createSearchIndexes",
     "dropSearchIndex",
@@ -112,6 +109,9 @@ module Mongo::Unified::Dispatcher
                when "waitForEvent"                             then execute_wait_for_event(args, registry)
                when "assertEventCount"                         then execute_assert_event_count(args, registry)
                when "wait"                                     then execute_wait(args)
+               when "recordTopologyDescription"                then execute_record_topology_description(args, registry)
+               when "assertTopologyType"                       then execute_assert_topology_type(args, registry)
+               when "waitForPrimaryChange"                     then execute_wait_for_primary_change(args, registry)
                when "close"                                    then execute_close(args, target)
                when "assertNumberConnectionsCheckedOut"        then execute_assert_number_connections_checked_out(args, registry)
                when "appendMetadata"                           then execute_append_metadata(args, target)

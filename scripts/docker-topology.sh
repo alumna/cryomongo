@@ -8,7 +8,7 @@
 #   sudo scripts/docker-topology.sh load-balanced
 #   sudo scripts/docker-topology.sh stop
 #
-# Needs Docker. Host ports: 27017, and 27016 for a second mongos.
+# Needs Docker. Host ports: 27017 (and 27018/27019 for a 3-member replica set; 27016 for a second mongos).
 # load-balanced also maps mongos load-balancer ports 27050 and 27051.
 # After load-balanced: spec/support/run-load-balancer.sh start && source tmp/lb-uri.env
 #
@@ -65,6 +65,19 @@ wait_primary() {
   return 1
 }
 
+wait_rs_members() {
+  local name="$1"
+  for _ in $(seq 1 40); do
+    if docker exec "$name" mongosh --quiet --eval 'quit((rs.status().members || []).filter(m => m.stateStr === "PRIMARY" || m.stateStr === "SECONDARY").length >= 3 ? 0 : 1)' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "$name replica set members are not all up" >&2
+  dump_logs "$name"
+  return 1
+}
+
 stop_all() {
   docker rm -f mongos2 mongos shard cfg mongo 2>/dev/null || true
   docker network rm mongo-test 2>/dev/null || true
@@ -79,11 +92,22 @@ start_standalone() {
 
 start_replicaset() {
   stop_all
-  docker run --name mongo -d -p 27017:27017 --tmpfs /data/db "$IMAGE" --replSet rs0 $MONGOD_PARAMS
+  # Three mongods in one container. Hosts are 127.0.0.1 so the GitHub runner
+  # can reach every member (hello.hosts) on published ports 27017-27019.
+  docker run -d --name mongo --user root --entrypoint bash \
+    -p 27017:27017 -p 27018:27018 -p 27019:27019 \
+    --tmpfs /data/rs0 --tmpfs /data/rs1 --tmpfs /data/rs2 \
+    "$IMAGE" \
+    -c "mongod --replSet rs0 --port 27017 --bind_ip_all --dbpath /data/rs0 --fork --logpath /tmp/rs0.log $MONGOD_PARAMS
+        mongod --replSet rs0 --port 27018 --bind_ip_all --dbpath /data/rs1 --fork --logpath /tmp/rs1.log $MONGOD_PARAMS
+        mongod --replSet rs0 --port 27019 --bind_ip_all --dbpath /data/rs2 --fork --logpath /tmp/rs2.log $MONGOD_PARAMS
+        exec tail -f /dev/null"
   wait_running mongo
-  docker exec mongo mongosh --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]})'
-  wait_primary mongo 27017
-  echo "replicaset is ready on 27017"
+  wait_running mongo 27018
+  wait_running mongo 27019
+  docker exec mongo mongosh --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"},{_id:1,host:"127.0.0.1:27018"},{_id:2,host:"127.0.0.1:27019"}]})'
+  wait_rs_members mongo
+  echo "replicaset is ready on 27017 (3 members: 27017, 27018, 27019)"
 }
 
 # $1 = empty or "lb". lb maps PROXY v2 ports and sets loadBalancerPort.

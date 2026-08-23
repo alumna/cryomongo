@@ -807,6 +807,50 @@ module Mongo::Unified::Operations
     sleep ms.milliseconds if ms > 0
   end
 
+  private def execute_record_topology_description(args, registry)
+    raise "Missing arguments" unless args
+    client_id = args["client"].as_s
+    id = args["id"].as_s
+    client = registry.clients[client_id]?
+    raise Exception.new("TEST_FAILED: client #{client_id} not found") unless client
+    registry.topology_descriptions[id] = client.topology.snapshot
+  end
+
+  private def execute_assert_topology_type(args, registry)
+    raise "Missing arguments" unless args
+    id = args["topologyDescription"].as_s
+    expected = args["topologyType"].as_s
+    description = registry.topology_descriptions[id]?
+    raise Exception.new("TEST_FAILED: topologyDescription #{id} not found") unless description
+    actual = description.type.to_s
+    unless actual == expected
+      raise Exception.new("TEST_FAILED: topology type expected #{expected}, got #{actual}")
+    end
+  end
+
+  private def execute_wait_for_primary_change(args, registry)
+    raise "Missing arguments" unless args
+    client_id = args["client"].as_s
+    prior_id = args["priorTopologyDescription"].as_s
+    timeout_ms = json_i64(args["timeoutMS"]?) || 10_000_i64
+    client = registry.clients[client_id]?
+    raise Exception.new("TEST_FAILED: client #{client_id} not found") unless client
+    prior = registry.topology_descriptions[prior_id]?
+    raise Exception.new("TEST_FAILED: topologyDescription #{prior_id} not found") unless prior
+    prior_primary = prior.primary_address
+    deadline = Time.instant + timeout_ms.milliseconds
+    loop do
+      current_primary = client.topology.primary_address
+      if current_primary && current_primary != prior_primary
+        return
+      end
+      if Time.instant >= deadline
+        raise Exception.new("TEST_FAILED: waitForPrimaryChange timed out (prior=#{prior_primary.inspect}, current=#{current_primary.inspect})")
+      end
+      sleep 50.milliseconds
+    end
+  end
+
   private def execute_close(args, target)
     case target
     when Mongo::Client
