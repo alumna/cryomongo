@@ -52,6 +52,10 @@ class Mongo::SDAM::ServerDescription
   property logical_session_timeout_minutes : Int32? = nil
   # The "topologyVersion" from the server's most recent ismaster response or State Change Error.
   property topology_version : BSON? = nil
+  # Hello size limits. Load-balancer descriptions keep these defaults (no monitor hello).
+  property max_bson_object_size : Int32 = 16 * 1024 * 1024
+  property max_message_size_bytes : Int32 = 48_000_000
+  property max_write_batch_size : Int32 = 100_000
 
   def initialize(@address : String)
   end
@@ -77,6 +81,9 @@ class Mongo::SDAM::ServerDescription
       set_name
       set_version
       primary
+      max_bson_object_size
+      max_message_size_bytes
+      max_write_batch_size
       hosts
       passives
       arbiters

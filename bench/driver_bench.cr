@@ -11,7 +11,7 @@
 # Each run writes bench/results/<utc>-<mode>-<topology>.json unless BENCH_SAVE=0.
 #
 # Score is MB/s from the median iteration (SI megabyte = 1,000,000 bytes).
-# Client bulkWrite is skipped (the driver has no client bulk API yet).
+# Client bulkWrite tasks need MongoDB 8.0 (wire version 25). They are skipped on older servers.
 # Official 500k LDJSON parallel files are skipped (too large to vendor).
 
 require "wait_group"
@@ -190,6 +190,40 @@ module DriverBench
         db["corpus"].bulk_write(mixed, ordered: true)
       end
 
+      # Spec WriteBench: client bulkWrite insert (one namespace) and mixed ops (10 namespaces).
+      if max_wire_version(client) >= 25
+        small_client_models = Array(Mongo::ClientBulk::WriteModel).new(small_n) {
+          Mongo::ClientBulk::InsertOne.new("perftest.corpus", BSON.new(small.data))
+        }
+        results << Timing.run("small client bulkWrite", small_bytes * small_n, drop_before) do
+          client.bulk_write(small_client_models, ordered: true)
+        end
+
+        large_client_models = Array(Mongo::ClientBulk::WriteModel).new(large_n) {
+          Mongo::ClientBulk::InsertOne.new("perftest.corpus", BSON.new(large.data))
+        }
+        results << Timing.run("large client bulkWrite", large_bytes * large_n, drop_before) do
+          client.bulk_write(large_client_models, ordered: true)
+        end
+
+        mixed_client = Array(Mongo::ClientBulk::WriteModel).new(mixed_n * 3)
+        mixed_n.times do |i|
+          ns = "perftest.corpus_#{(i % 10) + 1}"
+          mixed_client << Mongo::ClientBulk::InsertOne.new(ns, BSON.new(small.data))
+          mixed_client << Mongo::ClientBulk::ReplaceOne.new(ns, BSON.new, BSON.new(small.data))
+          mixed_client << Mongo::ClientBulk::DeleteOne.new(ns, BSON.new)
+        end
+        mixed_client_before = -> {
+          prepare_mixed_client_ns(client, db)
+          nil
+        }
+        results << Timing.run("small client bulkWrite mixed", small_bytes * mixed_n.to_i64 * 2, mixed_client_before) do
+          client.bulk_write(mixed_client, ordered: true)
+        end
+      else
+        puts "skipping client bulkWrite tasks (need MongoDB 8.0, wire version 25)"
+      end
+
       grid = Datasets.gridfs_bytes
       bucket = db.grid_fs
       grid_before = -> {
@@ -253,6 +287,24 @@ module DriverBench
   private def drop_corpus(db : Mongo::Database) : Nil
     db.command(Mongo::Commands::Drop, name: "corpus") rescue nil
     db.command(Mongo::Commands::Create, name: "corpus") rescue nil
+  end
+
+  # Spec mixed client bulkWrite uses corpus_1 .. corpus_10.
+  private def prepare_mixed_client_ns(client : Mongo::Client, db : Mongo::Database) : Nil
+    drop_db(client)
+    1.upto(10) do |i|
+      db.command(Mongo::Commands::Create, name: "corpus_#{i}") rescue nil
+    end
+  end
+
+  # Highest hello maxWireVersion among discovered servers.
+  private def max_wire_version(client : Mongo::Client) : Int32
+    max = 0
+    client.topology.servers.each do |server|
+      wire = server.max_wire_version
+      max = wire if wire > max
+    end
+    max
   end
 
   private def append_query(uri : String, options : String) : String

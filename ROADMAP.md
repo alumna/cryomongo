@@ -83,7 +83,7 @@ Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CR
 - [x] **Reduced or zero-allocation:** Server-selection pick without a window Array. GridFS batched `insertMany` and one find cursor for download (zero-length files do not query chunks). Connection compression staging reuses `IO::Memory`.
 
 ### Validation
-- [x] **Benchmarking:** `bench/driver_bench.cr` runs BSON DriverBench plus live single-doc / multi-doc / GridFS / fiber-parallel insert when `MONGODB_URI` is set. `BENCH_FULL=1` uses the spec time bounds. Each run writes JSON under `bench/results/`. See [BENCHMARK.md](BENCHMARK.md).
+- [x] **Benchmarking:** `bench/driver_bench.cr` runs BSON DriverBench plus live single-doc / multi-doc / collection and client `bulkWrite` / GridFS / fiber-parallel insert when `MONGODB_URI` is set. `BENCH_FULL=1` uses the spec time bounds. Each run writes JSON under `bench/results/`. Latest full `--release` snapshot: `bench/results/2026-08-23T203227Z-full-replica-set.json`. See [BENCHMARK.md](BENCHMARK.md).
 
 ---
 
@@ -170,8 +170,8 @@ The file needs a replica set with a secondary (`replSetStepDown`). Native and Do
 
 ### Phase 3.9 — Client `bulkWrite`
 
-- [ ] Client-level `bulkWrite` (MongoDB 8.0).
-- [ ] Un-skip `crud/client-bulkWrite-*.json`, `retryable-writes/client-bulkWrite-*.json`, `transactions/client-bulkWrite.json`, `causal-consistency-clientBulkWrite.json`.
+- [x] Client-level `bulkWrite` (MongoDB 8.0).
+- [x] Un-skip `crud/client-bulkWrite-*.json`, `retryable-writes/client-bulkWrite-*.json`, `transactions/client-bulkWrite.json`, `causal-consistency-clientBulkWrite.json`.
 
 ### Phase 3.10 — Auth on CI, speculative auth, monitor auth
 

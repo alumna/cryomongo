@@ -1,0 +1,235 @@
+{
+  "schema": 1,
+  "recorded_at": "2026-08-23T20:09:27Z",
+  "elapsed_s": 101.94,
+  "mode": "short",
+  "host": {
+    "os": "linux x86_64",
+    "cpu": "AMD Ryzen 7 5700G with Radeon Graphics",
+    "cpus": 16,
+    "ram_kib": 28627540,
+    "crystal": "1.21.0",
+    "release": true,
+    "git_commit": "465303b",
+    "git_branch": "feat/phase-3.9"
+  },
+  "mongodb": {
+    "version": "8.0.29",
+    "topology": "standalone",
+    "uri": "mongodb://localhost:27017",
+    "same_machine": true
+  },
+  "bounds": {
+    "min_iters": 8,
+    "task_seconds": 2.0,
+    "max_seconds": 8.0
+  },
+  "datasets": {
+    "source": "generated",
+    "gridfs_bytes": 1048576,
+    "mixed_n": 200,
+    "official_files": {
+      "tweet.json": false,
+      "small_doc.json": false,
+      "large_doc.json": false,
+      "gridfs_large.bin": false,
+      "flat_bson.json": false,
+      "deep_bson.json": false,
+      "full_bson.json": false
+    }
+  },
+  "tasks": [
+    {
+      "name": "flat bson encode",
+      "group": "bson",
+      "median_ms": 59.33,
+      "mb_s": 1269.42,
+      "n": 33,
+      "bytes": 75310000
+    },
+    {
+      "name": "flat bson decode",
+      "group": "bson",
+      "median_ms": 110.31,
+      "mb_s": 682.72,
+      "n": 18,
+      "bytes": 75310000
+    },
+    {
+      "name": "deep bson encode",
+      "group": "bson",
+      "median_ms": 31.94,
+      "mb_s": 715.12,
+      "n": 61,
+      "bytes": 22840000
+    },
+    {
+      "name": "deep bson decode",
+      "group": "bson",
+      "median_ms": 321.29,
+      "mb_s": 71.09,
+      "n": 8,
+      "bytes": 22840000
+    },
+    {
+      "name": "full bson encode",
+      "group": "bson",
+      "median_ms": 43.39,
+      "mb_s": 1321.47,
+      "n": 46,
+      "bytes": 57340000
+    },
+    {
+      "name": "full bson decode",
+      "group": "bson",
+      "median_ms": 104.17,
+      "mb_s": 550.46,
+      "n": 20,
+      "bytes": 57340000
+    },
+    {
+      "name": "run command hello",
+      "group": "single",
+      "median_ms": 663.54,
+      "mb_s": 0.2,
+      "n": 8,
+      "bytes": 130000
+    },
+    {
+      "name": "find one by id",
+      "group": "single",
+      "median_ms": 2496.51,
+      "mb_s": 6.5,
+      "n": 4,
+      "bytes": 16220000
+    },
+    {
+      "name": "small insertOne",
+      "group": "single",
+      "median_ms": 8799.56,
+      "mb_s": 0.31,
+      "n": 1,
+      "bytes": 2750000
+    },
+    {
+      "name": "large insertOne",
+      "group": "single",
+      "median_ms": 115.99,
+      "mb_s": 235.46,
+      "n": 18,
+      "bytes": 27310890
+    },
+    {
+      "name": "find many",
+      "group": "multi",
+      "median_ms": 35.01,
+      "mb_s": 463.31,
+      "n": 56,
+      "bytes": 16220000
+    },
+    {
+      "name": "small insertMany",
+      "group": "multi",
+      "median_ms": 92.93,
+      "mb_s": 29.59,
+      "n": 22,
+      "bytes": 2750000
+    },
+    {
+      "name": "large insertMany",
+      "group": "multi",
+      "median_ms": 100.76,
+      "mb_s": 271.05,
+      "n": 20,
+      "bytes": 27310890
+    },
+    {
+      "name": "small collection bulkWrite",
+      "group": "multi",
+      "median_ms": 94.22,
+      "mb_s": 29.19,
+      "n": 21,
+      "bytes": 2750000
+    },
+    {
+      "name": "large collection bulkWrite",
+      "group": "multi",
+      "median_ms": 97.72,
+      "mb_s": 279.48,
+      "n": 21,
+      "bytes": 27310890
+    },
+    {
+      "name": "small collection bulkWrite mixed",
+      "group": "multi",
+      "median_ms": 623.86,
+      "mb_s": 0.18,
+      "n": 8,
+      "bytes": 110000
+    },
+    {
+      "name": "small client bulkWrite",
+      "group": "multi",
+      "median_ms": 101.31,
+      "mb_s": 27.14,
+      "n": 20,
+      "bytes": 2750000
+    },
+    {
+      "name": "large client bulkWrite",
+      "group": "multi",
+      "median_ms": 93.59,
+      "mb_s": 291.81,
+      "n": 21,
+      "bytes": 27310890
+    },
+    {
+      "name": "small client bulkWrite mixed",
+      "group": "multi",
+      "median_ms": 63.75,
+      "mb_s": 1.73,
+      "n": 32,
+      "bytes": 110000
+    },
+    {
+      "name": "gridfs upload",
+      "group": "multi",
+      "median_ms": 6.93,
+      "mb_s": 151.37,
+      "n": 100,
+      "bytes": 1048576
+    },
+    {
+      "name": "gridfs download",
+      "group": "multi",
+      "median_ms": 2.16,
+      "mb_s": 486.15,
+      "n": 100,
+      "bytes": 1048576
+    },
+    {
+      "name": "parallel small insertMany",
+      "group": "extra",
+      "median_ms": 14.17,
+      "mb_s": 38.81,
+      "n": 100,
+      "bytes": 550000
+    }
+  ],
+  "composites": {
+    "BSONBench": 768.38,
+    "SingleBench": 80.75,
+    "MultiBench": 184.64,
+    "ReadBench": 318.65,
+    "WriteBench": 119.76,
+    "DriverBench": 219.2
+  },
+  "notes": [
+    "Generated in-memory documents. Official files were not in bench/data/.",
+    "GridFS file is 1048576 bytes (spec size is 52428800).",
+    "Mixed collection and client bulkWrite used 200 documents (spec size is 10000).",
+    "BSON decode walks fields with to_h (native Hash). Encode keeps the byte size so --release cannot drop the loop.",
+    "Parallel small insertMany is a local extra task. It is not in WriteBench or DriverBench.",
+    "Client bulkWrite insert and mixed tasks are in MultiBench, WriteBench, and DriverBench."
+  ]
+}

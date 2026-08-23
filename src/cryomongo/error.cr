@@ -117,6 +117,8 @@ module Mongo
     getter topology_version : BSON?
     # Server-supplied backoff for SystemOverloadedError, in milliseconds.
     getter base_backoff_ms : Int64? = nil
+    # Raw server reply. Used by UTF `errorResponse` (client bulkWrite).
+    getter reply : BSON? = nil
 
     # See: https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#not-master-and-node-is-recovering
     RECOVERING_CODES    = {11600, 11602, 13436, 189, 91}
@@ -132,7 +134,7 @@ module Mongo
     # CursorNotFound (43) is always resumable for change streams.
     RESUMABLE_CODES = {43, 63, 150, 234, 13388, 133} + RETRYABLE_CODES
 
-    def initialize(code, @code_name, message, @details, *, @error_labels = Set(String).new, @topology_version : BSON? = nil, @base_backoff_ms : Int64? = nil)
+    def initialize(code, @code_name, message, @details, *, @error_labels = Set(String).new, @topology_version : BSON? = nil, @base_backoff_ms : Int64? = nil, @reply : BSON? = nil)
       @code = code.try &.as(Int32) || 0
       @message = message.try(&.as(String)) || ""
     end

@@ -72,6 +72,10 @@ module Mongo::Unified
     property errorLabelsContain : Array(String)?
     property errorLabelsOmit : Array(String)?
     property isTimeoutError : Bool?
+    property expectResult : JSON::Any?
+    property writeErrors : JSON::Any?
+    property writeConcernErrors : JSON::Any?
+    property errorResponse : JSON::Any?
   end
 
   struct Test
