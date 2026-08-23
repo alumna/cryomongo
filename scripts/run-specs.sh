@@ -60,7 +60,7 @@ live() {
   if ! "$ROOT/scripts/mongo-rs.sh" status >/dev/null; then
     echo "mongod is not a ready replica set on 127.0.0.1:27017." >&2
     echo "Run one of:" >&2
-    echo "  sudo $ROOT/scripts/mongo-rs.sh configure-systemd" >&2
+    echo "  sudo $ROOT/scripts/mongo-topology.sh replicaset" >&2
     echo "  $ROOT/scripts/mongo-rs.sh start-local" >&2
     exit 1
   fi

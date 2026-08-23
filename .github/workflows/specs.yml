@@ -15,7 +15,7 @@ jobs:
           - topology: standalone
             uri: mongodb://localhost:27017/?compressors=zlib
           - topology: replicaset
-            uri: mongodb://localhost:27017/?replicaSet=rs0&compressors=zlib
+            uri: mongodb://127.0.0.1:27017/?replicaSet=rs0&compressors=zlib
           - topology: sharded
             uri: mongodb://localhost:27017,localhost:27016/?compressors=zlib
           - topology: load-balanced

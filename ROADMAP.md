@@ -70,7 +70,7 @@ Unified `pool-cleared-error.json` passes. zlib is Phase 3 (done). Everything sti
 
 This phase optimizes the driver to take full advantage of Crystal's new `-Dpreview_mt` / `Execution Contexts` and reduces network overhead.
 
-Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=zlib` after Phase **3.2** is **783** examples: standalone **2:02 / 209 pending**, replica set **6:08 / 94 pending**, sharded **8:05 / 101 pending**, load-balanced **5:25 / 136 pending**. Local after Phase **3.6** is still **783** examples: standalone **2:12 / 202 pending**, replica set **6:14 / 89 pending**, sharded **8:10 / 97 pending**, load-balanced **5:15 / 136 pending**. What is still skipped, and what is out of scope, is listed below and in `FIXES.md`.
+Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=zlib` after Phase **3.2** is **783** examples: standalone **2:02 / 209 pending**, replica set **6:08 / 94 pending**, sharded **8:05 / 101 pending**, load-balanced **5:25 / 136 pending**. Local after Phase **3.7** is still **783** examples: standalone **2:12 / 202 pending**, replica set **6:23 / 87 pending**, sharded **8:10 / 97 pending**, load-balanced **5:15 / 136 pending**. What is still skipped, and what is out of scope, is listed below and in `FIXES.md`.
 
 ### Concurrency
 - [x] **CI Parallel Testing:** GitHub runs `crystal spec -Dpreview_mt -Dexecution_context` and sets `CRYSTAL_WORKERS=2` so the default execution context is resized.
@@ -89,7 +89,7 @@ Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CR
 
 ## Remaining work (MongoDB 8.0, toward production grade)
 
-Phases 1–3 are done. Local Phase **3.6** `crystal spec` is green (**783** examples). Push a PR so GitHub Docker confirms the matrix. The driver is production-capable for core 8.0 (CRUD, sessions, transactions). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). The **3.x** sub-phases below close remaining 8.0 holes. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
+Phases 1–3 are done. Local Phase **3.7** `crystal spec` is green (**783** examples). Push a PR so GitHub Docker confirms the matrix (replica set is now **3** members). The driver is production-capable for core 8.0 (CRUD, sessions, transactions). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). The **3.x** sub-phases below close remaining 8.0 holes. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
 
 ### Out of scope until the user asks
 
@@ -112,7 +112,7 @@ Foundation for later CMAP / SDAM files. Create the pool when a monitor check fin
 
 `pool-clear-min-pool-size-error.json` non-auth test runs (3.4). The auth test stays skipped until 3.10. After the first `poolReady`, checkout while paused raises `PoolClearedError` (3.5). Before that, checkout may still handshake an Unknown seed. Official CMAP JSON copy is 3.11.
 
-GitHub Docker `replicaset` is **one** member, same as local `rs0`. The old note that GitHub is 3 members was wrong. `replicaset-emit-topology-changed-before-close.json` stays skipped until 3.13.
+GitHub Docker `replicaset` is **3** members (`scripts/docker-topology.sh`), same as local `rs0`. `replicaset-emit-topology-changed-before-close.json` runs (3.7).
 
 ### Phase 3.2 — Monitor hello errors
 
@@ -156,8 +156,10 @@ The files run on standalone, replica set, and sharded. Load-balanced skips them 
 
 ### Phase 3.7 — UTF topology helpers
 
-- [ ] `waitForPrimaryChange`, `recordTopologyDescription`, `assertTopologyType`.
-- [ ] Un-skip `rediscover-quickly-after-step-down.json`.
+- [x] `waitForPrimaryChange`, `recordTopologyDescription`, `assertTopologyType`.
+- [x] Un-skip `rediscover-quickly-after-step-down.json`.
+
+The file needs a replica set with a secondary (`replSetStepDown`). Native and Docker `replicaset` topologies are 3 members on 27017/27018/27019. That also un-skips `replicaset-emit-topology-changed-before-close.json` (4 `topologyDescriptionChanged` events). The leftover skip audit is still 3.13.
 
 ### Phase 3.8 — Collection CRUD leftovers
 
@@ -199,12 +201,12 @@ CI sets `auth: true` to not met. After users exist on mongod (not AWS / OIDC):
 - [ ] Load-balanced CSOT: after a dead pin, `killCursors` must not open a new socket (`timeoutMS is refreshed for close`).
 - [ ] Two mongos `serviceId`s from HAProxy (`UTF_RUN_TWO_MONGOS=1`) for `sdam-error-handling.json`.
 
-### Phase 3.13 — Replica-set topology-lifecycle and leftover skip audit
+### Phase 3.13 — Replica-set leftover skip audit
 
-`replicaset-emit-topology-changed-before-close.json` wants **4** `topologyDescriptionChanged` events before close. One-member `rs0` (local **and** GitHub Docker) only gets 3, so `waitForEvent` hangs. Standalone / sharded / load-balanced emit files already run.
+`replicaset-emit-topology-changed-before-close.json` wants **4** `topologyDescriptionChanged` events before close. The 3-member `rs0` (native and GitHub Docker, added in 3.7) emits 4, so that file runs.
 
-- [ ] Add a 3-member replica set (native `scripts/mongo-topology.sh` and GitHub Docker), **or** skip this file only when the set has one member.
-- [ ] Un-skip `replicaset-emit-topology-changed-before-close.json` when the topology can emit 4 events.
+- [x] Add a 3-member replica set (native `scripts/mongo-topology.sh` and GitHub Docker), **or** skip this file only when the set has one member.
+- [x] Un-skip `replicaset-emit-topology-changed-before-close.json` when the topology can emit 4 events.
 - [ ] Audit leftover skips from Phases 1–3 that should not have stayed skipped.
 
 ### Phase 3.14 — Performance review and improvement

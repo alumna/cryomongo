@@ -95,6 +95,21 @@ class Mongo::SDAM::TopologyDescription
     copy
   end
 
+  # Copy under the topology lock so type and servers stay consistent.
+  def snapshot : TopologyDescription
+    @lock.synchronize { clone }
+  end
+
+  # Address of the current RSPrimary, or nil when none is known.
+  def primary_address : String?
+    @lock.synchronize do
+      @servers.each do |server|
+        return server.address if server.type.rs_primary?
+      end
+      nil
+    end
+  end
+
   def replace_description(old_description, new_description)
     effective_new = if @type.load_balanced? && !new_description.type.load_balancer?
                       copy = new_description.clone

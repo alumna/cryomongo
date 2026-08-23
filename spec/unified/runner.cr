@@ -35,10 +35,8 @@ module Mongo::Unified
     }.map(&.downcase).to_set
 
     # Known holes. Do not un-skip until the file passes.
-    SKIP_FILES = {
-      # Local rs0 is one member, so this file waits forever for a 4th topology event.
-      "replicaset-emit-topology-changed-before-close.json",
-    }
+    # Replica-set topology-lifecycle runs on the 3-member rs0 (3.7 / 3.13).
+    SKIP_FILES = Set(String).new
 
     def initialize(file_path : String)
       @file_path = file_path
@@ -51,8 +49,9 @@ module Mongo::Unified
       # missing ops become SKIP_TEST. minPoolSize pool-ready is 3.1. Monitor
       # hello command / network errors is 3.2. Heartbeat events are 3.3.
       # Handshake backpressure labels are 3.4. interruptInUseConnections is 3.5.
-      # Concurrent shutdown stale-generation ignore is 3.6.
-      # pool-clear-min-pool-size-error auth test stays pending.
+      # Concurrent shutdown stale-generation ignore is 3.6. UTF topology helpers
+      # (waitForPrimaryChange / recordTopologyDescription / assertTopologyType)
+      # are 3.7. pool-clear-min-pool-size-error auth test stays pending.
       basename = File.basename(file_path)
       if basename.in?(SKIP_FILES) || file_path.includes?("/logging-")
         @skip_reason = "hardcoded skip"
