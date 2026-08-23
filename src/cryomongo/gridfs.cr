@@ -330,6 +330,25 @@ module Mongo::GridFS
       raise Mongo::Error.new "File not found." if delete_result.try &.n == 0
     end
 
+    # Delete every stored file whose filename is *filename*, and their chunks.
+    #
+    # ```
+    # gridfs = client["database"].grid_fs
+    # gridfs.delete_by_name("file.txt")
+    # ```
+    def delete_by_name(filename : String, *, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil) : Nil
+      deadline = start_deadline(timeout_ms)
+      ids = [] of BSON::Value
+      bucket.find({filename: filename}, projection: {_id: 1}, read_concern: read_concern, read_preference: read_preference, session: session, deadline: deadline).each do |doc|
+        if id = doc["_id"]?
+          ids << id
+        end
+      end
+      raise Mongo::Error.new "File not found." if ids.empty?
+      bucket.delete_many({_id: {"$in" => ids}}, write_concern: write_concern, session: session, deadline: deadline)
+      chunks.delete_many({files_id: {"$in" => ids}}, write_concern: write_concern, session: session, deadline: deadline)
+    end
+
     # Find and return the files collection documents that match *filter*.
     #
     # ```
@@ -380,6 +399,18 @@ module Mongo::GridFS
     def rename(id : FileID, new_filename : String, *, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil) : Nil forall FileID
       deadline = start_deadline(timeout_ms)
       result = bucket.update_one({_id: id}, {"$set": {filename: new_filename}}, session: session, deadline: deadline)
+      raise Mongo::Error.new "File not found." if result.try(&.n) == 0
+    end
+
+    # Rename every stored file whose filename is *filename*.
+    #
+    # ```
+    # gridfs = client["database"].grid_fs
+    # gridfs.rename_by_name("old.txt", "new.txt")
+    # ```
+    def rename_by_name(filename : String, new_filename : String, *, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil) : Nil
+      deadline = start_deadline(timeout_ms)
+      result = bucket.update_many({filename: filename}, {"$set": {filename: new_filename}}, session: session, deadline: deadline)
       raise Mongo::Error.new "File not found." if result.try(&.n) == 0
     end
 

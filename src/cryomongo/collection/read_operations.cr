@@ -12,6 +12,7 @@ class Mongo::Collection
     collation : Collation? = nil,
     hint : (String | H)? = nil,
     comment = nil,
+    let = nil,
     read_concern : ReadConcern? = nil,
     write_concern : WriteConcern? = nil,
     read_preference : ReadPreference? = nil,
@@ -43,6 +44,7 @@ class Mongo::Collection
       collation:                  collation,
       hint:                       hint_value,
       comment:                    comment,
+      let:                        let.try { BSON.new(let) },
       max_time_ms:                max_time_ms,
       read_concern:               read_concern,
       write_concern:              write_concern,
@@ -114,6 +116,47 @@ class Mongo::Collection
     bson_count(result["n"])
   end
 
+  # Legacy count command. Prefer `count_documents` or `estimated_document_count`.
+  #
+  # An empty filter omits `query` so the server uses collection metadata.
+  #
+  # NOTE: [for more details, please check the official MongoDB documentation](https://docs.mongodb.com/manual/reference/command/count/).
+  def count(
+    filter = BSON.new,
+    *,
+    skip : Int32? = nil,
+    limit : Int32? = nil,
+    collation : Collation? = nil,
+    hint : (String | H)? = nil,
+    max_time_ms : Int64? = nil,
+    read_preference : ReadPreference? = nil,
+    comment = nil,
+    session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
+  ) : Int64 forall H
+    query = BSON.new(filter)
+    query = nil if query.empty?
+    hint_value = if hint.nil?
+                   nil
+                 elsif hint.is_a?(String)
+                   hint
+                 else
+                   BSON.new(hint)
+                 end
+    result = self.command(Commands::Count, session: session, timeout_ms: timeout_ms, options: {
+      query:           query,
+      skip:            skip,
+      limit:           limit,
+      collation:       collation,
+      hint:            hint_value,
+      max_time_ms:     max_time_ms,
+      read_preference: read_preference,
+      comment:         comment,
+    })
+    raise Mongo::Error.new("Command failed to return a result") unless result
+    bson_count(result["n"])
+  end
+
   private def bson_count(value) : Int64
     case value
     when Int32
@@ -164,6 +207,77 @@ class Mongo::Collection
     result.values.each.map(&.[1]).to_a
   end
 
+  # Runs a map-reduce aggregation.
+  #
+  # *output* is `{inline: 1}` for an in-memory result, or a document that names a collection.
+  # Inline results are an array of documents. Other output returns the command reply.
+  # mapReduce is not a retryable read.
+  #
+  # NOTE: [for more details, please check the official MongoDB documentation](https://docs.mongodb.com/manual/reference/command/mapReduce/).
+  def map_reduce(
+    map,
+    reduce,
+    *,
+    output,
+    query = nil,
+    sort = nil,
+    limit : Int32? = nil,
+    finalize = nil,
+    scope = nil,
+    verbose : Bool? = nil,
+    bypass_document_validation : Bool? = nil,
+    collation : Collation? = nil,
+    comment = nil,
+    max_time_ms : Int64? = nil,
+    read_preference : ReadPreference? = nil,
+    session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
+  )
+    map_js = js_code(map)
+    reduce_js = js_code(reduce)
+    output_doc = BSON.new(output)
+    result = self.command(Commands::MapReduce, map: map_js, reduce: reduce_js, output: output_doc, session: session, timeout_ms: timeout_ms, read_preference: read_preference, options: {
+      query:                      query.try { BSON.new(query) },
+      sort:                       sort.try { BSON.new(sort) },
+      limit:                      limit,
+      finalize:                   finalize.try { js_code(finalize) },
+      scope:                      scope.try { BSON.new(scope) },
+      verbose:                    verbose,
+      bypass_document_validation: bypass_document_validation,
+      collation:                  collation,
+      comment:                    comment,
+      max_time_ms:                max_time_ms,
+    })
+    raise Mongo::Error.new("Command failed to return a result") unless result
+    if output_doc.has_key?("inline")
+      inline_map_reduce_docs(result)
+    else
+      result
+    end
+  end
+
+  # Wire type for map/reduce must be JavaScript code (`$code`), not a string.
+  private def js_code(value) : BSON::Code
+    case value
+    when BSON::Code
+      value
+    when String
+      BSON::Code.new(value)
+    else
+      BSON::Code.new(value.to_s)
+    end
+  end
+
+  private def inline_map_reduce_docs(result : BSON) : Array(BSON)
+    docs = [] of BSON
+    raw = result["results"]?
+    return docs unless raw.is_a?(BSON)
+    raw.each do |(_, value)|
+      docs << value if value.is_a?(BSON)
+    end
+    docs
+  end
+
   # Finds the documents matching the model.
   #
   # NOTE: [for more details, please check the official MongoDB documentation](https://docs.mongodb.com/manual/reference/command/find/).
@@ -179,6 +293,7 @@ class Mongo::Collection
     batch_size : Int32? = nil,
     single_batch : Bool? = nil,
     comment = nil,
+    let = nil,
     max_time_ms : Int64? = nil,
     read_concern : ReadConcern? = nil,
     max = nil,
@@ -230,6 +345,7 @@ class Mongo::Collection
       batch_size:            sent_batch_size,
       single_batch:          single_batch,
       comment:               comment,
+      let:                   let.try { BSON.new(let) },
       max_time_ms:           max_time_ms,
       read_concern:          read_concern,
       max:                   max.try { BSON.new(max) },
@@ -275,6 +391,7 @@ class Mongo::Collection
     batch_size : Int32? = nil,
     single_batch : Bool? = nil,
     comment = nil,
+    let = nil,
     max_time_ms : Int64? = nil,
     read_concern : ReadConcern? = nil,
     max = nil,
@@ -305,6 +422,7 @@ class Mongo::Collection
       batch_size: batch_size,
       single_batch: single_batch,
       comment: comment,
+      let: let,
       max_time_ms: max_time_ms,
       read_concern: read_concern,
       max: max,
@@ -337,6 +455,7 @@ class Mongo::Collection
     hint : (String | H)? = nil,
     skip : Int32? = nil,
     comment = nil,
+    let = nil,
     max_time_ms : Int64? = nil,
     read_concern : ReadConcern? = nil,
     max = nil,
@@ -361,6 +480,7 @@ class Mongo::Collection
       hint: hint,
       skip: skip,
       comment: comment,
+      let: let,
       max_time_ms: max_time_ms,
       read_concern: read_concern,
       max: max.try { BSON.new(max) },

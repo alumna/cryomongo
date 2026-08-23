@@ -8,8 +8,6 @@ module Mongo::Unified::Dispatcher
 
   UNSUPPORTED_OPS = {
     "clientBulkWrite",
-    "count",
-    "mapReduce",
     "createSearchIndex",
     "createSearchIndexes",
     "dropSearchIndex",
@@ -19,7 +17,7 @@ module Mongo::Unified::Dispatcher
   def execute(op : Operation, registry : Registry, internal_client : Mongo::Client, runner : Runner, *, raise_operation_errors : Bool = false)
     args = op.arguments
 
-    if op.name == "clientBulkWrite" || args.try(&.as_h?.try(&.has_key?("let")))
+    if op.name == "clientBulkWrite"
       raise Exception.new("SKIP_TEST")
     end
 
@@ -57,12 +55,14 @@ module Mongo::Unified::Dispatcher
                when "downloadByName"                           then execute_download_by_name(args, target)
                when "upload"                                   then execute_upload(args, target)
                when "delete"                                   then execute_gridfs_delete(args, target)
+               when "deleteByName"                             then execute_gridfs_delete_by_name(args, target)
                when "rename"
                  if target.is_a?(Mongo::GridFS::Bucket)
                    execute_gridfs_rename(args, target)
                  else
                    execute_rename_collection(args, target, session)
                  end
+               when "renameByName"                             then execute_gridfs_rename_by_name(args, target)
                when "iterateUntilDocumentOrError"              then execute_iterate_until_document_or_error(target)
                when "iterateOnce"                              then execute_iterate_once(target)
                when "createFindCursor"                         then execute_create_find_cursor(args, target, session, op, registry)
@@ -93,8 +93,10 @@ module Mongo::Unified::Dispatcher
                when "createChangeStream"                       then execute_create_change_stream(args, target, session)
                when "aggregate"                                then execute_aggregate(args, target, session)
                when "countDocuments"                           then execute_count_documents(args, target, session)
+               when "count"                                    then execute_count(args, target, session)
                when "estimatedDocumentCount"                   then execute_estimated_document_count(args, target, session)
                when "distinct"                                 then execute_distinct(args, target, session)
+               when "mapReduce"                                then execute_map_reduce(args, target, session)
                when "findOneAndDelete"                         then execute_find_one_and_delete(args, target, session)
                when "findOneAndReplace"                        then execute_find_one_and_replace(args, target, session)
                when "findOneAndUpdate"                         then execute_find_one_and_update(args, target, session)

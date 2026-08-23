@@ -34,6 +34,7 @@ class Mongo::Collection
     hint : (String | H)? = nil,
     max_time_ms : Int64? = nil,
     comment = nil,
+    let = nil,
     session : Session::ClientSession? = nil,
     timeout_ms : Int64? = nil,
   ) : BSON? forall H
@@ -47,6 +48,7 @@ class Mongo::Collection
       hint:                       hint,
       max_time_ms:                max_time_ms,
       comment:                    comment,
+      let:                        let.try { BSON.new(let) },
     })
     check_find_and_modify_result!(result)
   end
@@ -70,6 +72,7 @@ class Mongo::Collection
     hint : (String | H)? = nil,
     max_time_ms : Int64? = nil,
     comment = nil,
+    let = nil,
     session : Session::ClientSession? = nil,
     timeout_ms : Int64? = nil,
   ) : BSON? forall H
@@ -87,6 +90,7 @@ class Mongo::Collection
       hint:                       hint,
       max_time_ms:                max_time_ms,
       comment:                    comment,
+      let:                        let.try { BSON.new(let) },
     })
     check_find_and_modify_result!(result)
   end
@@ -110,6 +114,7 @@ class Mongo::Collection
     hint : (String | H)? = nil,
     max_time_ms : Int64? = nil,
     comment = nil,
+    let = nil,
     session : Session::ClientSession? = nil,
     timeout_ms : Int64? = nil,
   ) : BSON? forall H
@@ -127,6 +132,7 @@ class Mongo::Collection
       hint:                       hint,
       max_time_ms:                max_time_ms,
       comment:                    comment,
+      let:                        let.try { BSON.new(let) },
     })
     check_find_and_modify_result!(result)
   end
