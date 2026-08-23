@@ -30,6 +30,36 @@
         "WriteBench": 261.36,
         "DriverBench": 586.54
       }
+    },
+    {
+      "file": "2026-08-23T200927Z-short-standalone.json",
+      "recorded_at": "2026-08-23T20:09:27Z",
+      "mode": "short",
+      "topology": "standalone",
+      "release": true,
+      "composites": {
+        "BSONBench": 768.38,
+        "SingleBench": 80.75,
+        "MultiBench": 184.64,
+        "ReadBench": 318.65,
+        "WriteBench": 119.76,
+        "DriverBench": 219.2
+      }
+    },
+    {
+      "file": "2026-08-23T203227Z-full-replica-set.json",
+      "recorded_at": "2026-08-23T20:32:27Z",
+      "mode": "full",
+      "topology": "replica-set",
+      "release": true,
+      "composites": {
+        "BSONBench": 973.98,
+        "SingleBench": 82.67,
+        "MultiBench": 348.26,
+        "ReadBench": 886.7,
+        "WriteBench": 128.98,
+        "DriverBench": 507.84
+      }
     }
   ]
 }

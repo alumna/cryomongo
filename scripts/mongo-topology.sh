@@ -91,7 +91,10 @@ start_standalone() {
 start_rs_member() {
   local port="$1" dir="$2" log="$3"
   mkdir -p "$dir"
+  # Default WiredTiger cache is ~50% of RAM per process. Three members would
+  # not fit this host (~27 GiB). 2 GiB per member is enough for local tests.
   mongod --replSet rs0 --port "$port" --bind_ip 127.0.0.1 \
+    --wiredTigerCacheSizeGB 2 \
     --dbpath "$dir" --logpath "$log" --fork "${MONGOD_PARAMS[@]}"
 }
 

@@ -49,4 +49,33 @@ describe "DriverBench report" do
     c["WriteBench"].should be_close(write, 1e-9)
     c["DriverBench"].should be_close((c["ReadBench"] + c["WriteBench"]) / 2.0, 1e-9)
   end
+
+  it "includes client bulkWrite in WriteBench and MultiBench when those tasks ran" do
+    bson = [
+      DriverBench::Timing::Result.new("flat bson encode", 1_i64, 8, 0.1, 10.0),
+    ]
+    live = [
+      DriverBench::Timing::Result.new("find one by id", 1_i64, 8, 0.1, 12.0),
+      DriverBench::Timing::Result.new("small insertOne", 1_i64, 8, 0.1, 1.0),
+      DriverBench::Timing::Result.new("large insertOne", 1_i64, 8, 0.1, 60.0),
+      DriverBench::Timing::Result.new("find many", 1_i64, 8, 0.1, 100.0),
+      DriverBench::Timing::Result.new("small insertMany", 1_i64, 8, 0.1, 20.0),
+      DriverBench::Timing::Result.new("large insertMany", 1_i64, 8, 0.1, 70.0),
+      DriverBench::Timing::Result.new("small collection bulkWrite", 1_i64, 8, 0.1, 30.0),
+      DriverBench::Timing::Result.new("large collection bulkWrite", 1_i64, 8, 0.1, 80.0),
+      DriverBench::Timing::Result.new("small collection bulkWrite mixed", 1_i64, 8, 0.1, 2.0),
+      DriverBench::Timing::Result.new("small client bulkWrite", 1_i64, 8, 0.1, 25.0),
+      DriverBench::Timing::Result.new("large client bulkWrite", 1_i64, 8, 0.1, 75.0),
+      DriverBench::Timing::Result.new("small client bulkWrite mixed", 1_i64, 8, 0.1, 3.0),
+      DriverBench::Timing::Result.new("gridfs upload", 1_i64, 8, 0.1, 200.0),
+      DriverBench::Timing::Result.new("gridfs download", 1_i64, 8, 0.1, 400.0),
+      DriverBench::Timing::Result.new("parallel small insertMany", 1_i64, 8, 0.1, 999.0),
+    ]
+    c = DriverBench::Report.composites(bson, live)
+    write = (1.0 + 60.0 + 20.0 + 70.0 + 30.0 + 80.0 + 2.0 + 25.0 + 75.0 + 3.0 + 200.0) / 11.0
+    multi = (100.0 + 20.0 + 70.0 + 30.0 + 80.0 + 2.0 + 25.0 + 75.0 + 3.0 + 200.0 + 400.0) / 11.0
+    c["WriteBench"].should be_close(write, 1e-9)
+    c["MultiBench"].should be_close(multi, 1e-9)
+    c["DriverBench"].should be_close((c["ReadBench"] + c["WriteBench"]) / 2.0, 1e-9)
+  end
 end

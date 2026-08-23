@@ -20,7 +20,7 @@ Each run of `bench/driver_bench.cr` writes one JSON file here, unless `BENCH_SAV
 <utc>-<mode>-<topology>.json
 ```
 
-Example: `2026-08-21T120000Z-full-replica-set.json`
+Example: `2026-08-23T203227Z-full-replica-set.json`
 
 - `mode` is `short` (default) or `full` (`BENCH_FULL=1`)
 - `topology` comes from the URI (`replica-set`, `standalone`, `load-balanced`, `multi-host`, or `bson-only`)
@@ -39,6 +39,21 @@ BENCH_FULL=1 MONGODB_URI='mongodb://localhost:27017/?replicaSet=rs0' bin/driver_
 ```
 
 Then point `BENCHMARK.md` at the new `full` file if that run should be the public snapshot.
+
+Current files:
+
+```text
+bench/results/
+  README.md                                      schema and how to add a run
+  index.json                                     list of runs (composites only)
+  peers.json                                     published numbers from other drivers
+  2026-08-21T093500Z-short-replica-set.json      first local short run (debug build)
+  2026-08-21T100223Z-full-replica-set.json       full --release, no client bulkWrite
+  2026-08-23T200927Z-short-standalone.json       short --release with client bulkWrite
+  2026-08-23T203227Z-full-replica-set.json       full --release with client bulkWrite
+```
+
+Client `bulkWrite` tasks (`small client bulkWrite`, `large client bulkWrite`, `small client bulkWrite mixed`) run on MongoDB 8.0 and enter MultiBench, WriteBench, and DriverBench. Older JSON files in this folder do not have those rows; composites from those files omit the missing names.
 
 `BENCH_RESULTS_DIR` can override this folder. `BENCH_SAVE=0` skips the write (useful for a throwaway local check).
 

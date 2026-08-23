@@ -20,14 +20,20 @@ module DriverBench
     MULTI_NAMES  = {
       "find many", "small insertMany", "large insertMany",
       "small collection bulkWrite", "large collection bulkWrite",
-      "small collection bulkWrite mixed", "gridfs upload", "gridfs download",
+      "small collection bulkWrite mixed",
+      "small client bulkWrite", "large client bulkWrite",
+      "small client bulkWrite mixed",
+      "gridfs upload", "gridfs download",
     }
     READ_NAMES = {"find one by id", "find many", "gridfs download"}
     # Spec WriteBench. Parallel insertMany is a local extra task and stays out.
     WRITE_NAMES = {
       "small insertOne", "large insertOne", "small insertMany", "large insertMany",
       "small collection bulkWrite", "large collection bulkWrite",
-      "small collection bulkWrite mixed", "gridfs upload",
+      "small collection bulkWrite mixed",
+      "small client bulkWrite", "large client bulkWrite",
+      "small client bulkWrite mixed",
+      "gridfs upload",
     }
 
     class LiveMeta
@@ -190,7 +196,10 @@ module DriverBench
         "single"
       when "find many", "small insertMany", "large insertMany",
            "small collection bulkWrite", "large collection bulkWrite",
-           "small collection bulkWrite mixed", "gridfs upload", "gridfs download"
+           "small collection bulkWrite mixed",
+           "small client bulkWrite", "large client bulkWrite",
+           "small client bulkWrite mixed",
+           "gridfs upload", "gridfs download"
         "multi"
       else
         "extra"
@@ -261,9 +270,17 @@ module DriverBench
       notes = [] of String
       notes << "Generated in-memory documents. Official files were not in bench/data/." unless any_official
       notes << "GridFS file is #{grid_n} bytes (spec size is #{Datasets::GRIDFS_FILE_SIZE})." unless grid_n == Datasets::GRIDFS_FILE_SIZE
-      notes << "Mixed collection bulkWrite used #{mixed_n} documents (spec size is #{Datasets::BSON_REPEAT})." unless mixed_n == Datasets::BSON_REPEAT
+      notes << "Mixed collection and client bulkWrite used #{mixed_n} documents (spec size is #{Datasets::BSON_REPEAT})." unless mixed_n == Datasets::BSON_REPEAT
       notes << "BSON decode walks fields with to_h (native Hash). Encode keeps the byte size so --release cannot drop the loop."
       notes << "Parallel small insertMany is a local extra task. It is not in WriteBench or DriverBench."
+      has_coll = live.any? { |r| r.name == "small collection bulkWrite" }
+      has_client = live.any? { |r| r.name == "small client bulkWrite" }
+      if has_coll && !has_client
+        notes << "Client bulkWrite tasks were skipped (need MongoDB 8.0, wire version 25)."
+      end
+      if has_client
+        notes << "Client bulkWrite insert and mixed tasks are in MultiBench, WriteBench, and DriverBench."
+      end
       notes << "Crystal default build (not --release)." unless release_build?
 
       mongo = if live.empty?
