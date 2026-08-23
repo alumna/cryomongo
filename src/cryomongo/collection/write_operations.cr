@@ -4,10 +4,10 @@ class Mongo::Collection
   # An error will be raised if the *requests* parameter is empty.
   #
   # NOTE: [for more details, please check the official specifications document](https://github.com/mongodb/specifications/blob/master/source/driver-bulk-update.rst).
-  def bulk_write(requests : Array(Bulk::WriteModel), *, ordered : Bool, bypass_document_validation : Bool? = nil, comment = nil, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil) : Bulk::WriteResult
+  def bulk_write(requests : Array(Bulk::WriteModel), *, ordered : Bool, bypass_document_validation : Bool? = nil, comment = nil, let = nil, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil) : Bulk::WriteResult
     raise Mongo::Bulk::Error.new "Tried to execute an empty bulk" unless requests.size > 0
     bulk = Mongo::Bulk.new(self, ordered, requests, session: session)
-    bulk.execute(bypass_document_validation: bypass_document_validation, comment: comment, timeout_ms: timeout_ms)
+    bulk.execute(bypass_document_validation: bypass_document_validation, comment: comment, let: let, timeout_ms: timeout_ms)
   end
 
   # Create a `Mongo::Bulk` instance.
@@ -75,6 +75,7 @@ class Mongo::Collection
     ordered : Bool? = true,
     write_concern : WriteConcern? = nil,
     comment = nil,
+    let = nil,
     session : Session::ClientSession? = nil,
     timeout_ms : Int64? = nil,
     deadline : Mongo::Deadline? = nil,
@@ -90,6 +91,7 @@ class Mongo::Collection
       ordered:       ordered,
       write_concern: write_concern,
       comment:       comment,
+      let:           let.try { BSON.new(let) },
     })
   end
 
@@ -104,6 +106,7 @@ class Mongo::Collection
     ordered : Bool? = true,
     write_concern : WriteConcern? = nil,
     comment = nil,
+    let = nil,
     session : Session::ClientSession? = nil,
     timeout_ms : Int64? = nil,
     deadline : Mongo::Deadline? = nil,
@@ -119,6 +122,7 @@ class Mongo::Collection
       ordered:       ordered,
       write_concern: write_concern,
       comment:       comment,
+      let:           let.try { BSON.new(let) },
     })
   end
 
@@ -163,6 +167,7 @@ class Mongo::Collection
     write_concern : WriteConcern? = nil,
     bypass_document_validation : Bool? = nil,
     comment = nil,
+    let = nil,
     sort = nil,
     session : Session::ClientSession? = nil,
     timeout_ms : Int64? = nil,
@@ -184,6 +189,7 @@ class Mongo::Collection
       write_concern:              write_concern,
       bypass_document_validation: bypass_document_validation,
       comment:                    comment,
+      let:                        let.try { BSON.new(let) },
     })
   end
 
@@ -202,6 +208,7 @@ class Mongo::Collection
     write_concern : WriteConcern? = nil,
     bypass_document_validation : Bool? = nil,
     comment = nil,
+    let = nil,
     sort = nil,
     session : Session::ClientSession? = nil,
     timeout_ms : Int64? = nil,
@@ -225,6 +232,7 @@ class Mongo::Collection
       write_concern:              write_concern,
       bypass_document_validation: bypass_document_validation,
       comment:                    comment,
+      let:                        let.try { BSON.new(let) },
     })
   end
 
@@ -243,8 +251,10 @@ class Mongo::Collection
     write_concern : WriteConcern? = nil,
     bypass_document_validation : Bool? = nil,
     comment = nil,
+    let = nil,
     session : Session::ClientSession? = nil,
     timeout_ms : Int64? = nil,
+    deadline : Mongo::Deadline? = nil,
   ) : Commands::Common::UpdateResult? forall H
     updates = [
       Tools.merge_bson({
@@ -258,11 +268,12 @@ class Mongo::Collection
         hint:          hint,
       }),
     ]
-    self.command(Commands::Update, updates: updates, session: session, timeout_ms: timeout_ms, options: {
+    self.command(Commands::Update, updates: updates, session: session, timeout_ms: timeout_ms, deadline: deadline, options: {
       ordered:                    ordered,
       write_concern:              write_concern,
       bypass_document_validation: bypass_document_validation,
       comment:                    comment,
+      let:                        let.try { BSON.new(let) },
     })
   end
 end

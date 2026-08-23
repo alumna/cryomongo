@@ -30,7 +30,7 @@ The UTF runner is **clear**: unknown operations become Crystal `pending`, they d
 The driver is **0.x**. It is ready for core CRUD, sessions, and transactions on standalone, replica set, and sharded MongoDB 8.0. Its is not **1.0** yet, which waits on CSFLE.
 
 **Done enough to build apps (Phase 1, Phase 2, and Phase 3)**
-- CRUD helpers, bulk, aggregation (no mapReduce).
+- CRUD helpers, bulk, aggregation, mapReduce, legacy `count`. `let` on find / aggregate / updates / deletes / findOneAnd* / collection bulkWrite.
 - Sessions, causal consistency, transactions, convenient `with_transaction`.
 - Retryable reads and writes (including `insertMany` as one command).
 - Command redaction in APM / `Log.trace`. Handshake metadata. Cursor `#each` / block `find` close the cursor.
@@ -46,9 +46,9 @@ The driver is **0.x**. It is ready for core CRUD, sessions, and transactions on 
 
 **Not done yet (MongoDB 8.0). See [ROADMAP.md](ROADMAP.md) Phase 3.1–3.14 and [FIXES.md](FIXES.md).**
 - Unified SDAM still skipped: SDAM logging. `minPoolSize-error.json`, `hello-command-error.json`, `hello-network-error.json`, `serverMonitoringMode.json`, handshake backpressure files, `interruptInUse-pool-clear.json`, `find-shutdown-error.json`, `insert-shutdown-error.json`, `rediscover-quickly-after-step-down.json`, and replica-set topology-lifecycle now run. Replica set topologies are 3 members.
-- UTF ops still `SKIP_TEST`: client `bulkWrite`, `let` on CRUD, legacy `count`, `mapReduce`.
+- UTF ops still `SKIP_TEST`: client `bulkWrite`. Search-index ops stay skipped (Atlas).
 - No users on CI, so `auth: true` UTF does not run (handshake-error files, unified SDAM auth-error files). Speculative auth and monitor auth are missing.
-- snappy / zstd. TLS key-file password and OCSP flags are parsed and unused. Official CMAP JSON is not copied. CLAM is 1 of 23 files. GridFS `deleteByName` / `renameByName` not copied.
+- snappy / zstd. TLS key-file password and OCSP flags are parsed and unused. Official CMAP JSON is not copied. CLAM is 1 of 23 files. Remaining official index-management JSON is Atlas Search (not copied).
 - CSFLE (`libmongocrypt`) is Phase 4. AWS / OIDC is Phase 5.
 
 **Out of scope**
@@ -165,7 +165,7 @@ puts cursor.of(User).to_a.to_pretty_json
 ## Features
 
 - **[CRUD operations](https://docs.mongodb.com/manual/crud/index.html)**
-- **[Aggregation](https://docs.mongodb.com/manual/aggregation/) (except: Map-Reduce)**
+- **[Aggregation](https://docs.mongodb.com/manual/aggregation/)** (including mapReduce)
 - **[Bulk](https://docs.mongodb.com/manual/reference/method/Bulk/index.html)**
 - **[Read](https://docs.mongodb.com/manual/reference/read-concern/index.html) and [Write](https://docs.mongodb.com/manual/reference/write-concern/) Concerns**
 - **[Read Preference](https://docs.mongodb.com/manual/core/read-preference/index.html)**
@@ -325,6 +325,19 @@ cursor = collection.aggregate([
 ])
 cursor.try &.each { |bson| puts bson.to_json }
 
+# let variables (also on find, updates, deletes, find_one_and_*, bulk_write)
+cursor = collection.aggregate(
+  [{"$match": {"$expr": {"$eq": ["$status", "$$st"]}}}],
+  let: { st: "available" },
+)
+
+# Map-Reduce (not retryable). Crystal uses output: because out is reserved.
+inline = collection.map_reduce(
+  "function() { emit(this.status, 1) }",
+  "function(key, values) { return Array.sum(values) }",
+  output: {inline: 1},
+)
+
 # Distinct collection values
 values = collection.distinct(
   key: "field",
@@ -336,6 +349,9 @@ counter = collection.count_documents({ age: { "$lt": 18 }})
 
 # Estimated count (also Int64)
 counter = collection.estimated_document_count
+
+# Legacy count command (prefer count_documents). Empty filter omits query.
+counter = collection.count({ age: { "$lt": 18 }})
 
 # Raw command (not retryable; database read/write concern is not applied).
 database = client["database_name"]
@@ -461,8 +477,13 @@ files.each do |file|
   puts file.filename
 end
 
-# Delete
+# Delete by id or by filename
 gridfs.delete(id)
+gridfs.delete_by_name("file.txt")
+
+# Rename by id or by filename
+gridfs.rename(id, "new.txt")
+gridfs.rename_by_name("file.txt", "new.txt")
 
 # And many more methods… (check the link below.)
 ```

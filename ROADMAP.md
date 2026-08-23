@@ -70,7 +70,7 @@ Unified `pool-cleared-error.json` passes. zlib is Phase 3 (done). Everything sti
 
 This phase optimizes the driver to take full advantage of Crystal's new `-Dpreview_mt` / `Execution Contexts` and reduces network overhead.
 
-Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=zlib` after Phase **3.2** is **783** examples: standalone **2:02 / 209 pending**, replica set **6:08 / 94 pending**, sharded **8:05 / 101 pending**, load-balanced **5:25 / 136 pending**. Local after Phase **3.7** is still **783** examples: standalone **2:12 / 202 pending**, replica set **6:23 / 87 pending**, sharded **8:10 / 97 pending**, load-balanced **5:15 / 136 pending**. What is still skipped, and what is out of scope, is listed below and in `FIXES.md`.
+Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=zlib` after Phase **3.2** is **783** examples: standalone **2:02 / 209 pending**, replica set **6:08 / 94 pending**, sharded **8:05 / 101 pending**, load-balanced **5:25 / 136 pending**. Local after Phase **3.8** is **785** examples: standalone **2:13 / 183 pending**, replica set **6:23 / 67 pending**, sharded **8:17 / 77 pending**, load-balanced **5:22 / 116 pending**. What is still skipped, and what is out of scope, is listed below and in `FIXES.md`.
 
 ### Concurrency
 - [x] **CI Parallel Testing:** GitHub runs `crystal spec -Dpreview_mt -Dexecution_context` and sets `CRYSTAL_WORKERS=2` so the default execution context is resized.
@@ -89,7 +89,7 @@ Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CR
 
 ## Remaining work (MongoDB 8.0, toward production grade)
 
-Phases 1–3 are done. Local Phase **3.7** `crystal spec` is green (**783** examples). Push a PR so GitHub Docker confirms the matrix (replica set is now **3** members). The driver is production-capable for core 8.0 (CRUD, sessions, transactions). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). The **3.x** sub-phases below close remaining 8.0 holes. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
+Phases 1–3 are done. Local Phase **3.8** `crystal spec` is green (**785** examples). Push a PR so GitHub Docker confirms the matrix (replica set is **3** members). The driver is production-capable for core 8.0 (CRUD, sessions, transactions). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). The **3.x** sub-phases below close remaining 8.0 holes. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
 
 ### Out of scope until the user asks
 
@@ -163,10 +163,10 @@ The file needs a replica set with a secondary (`replSetStepDown`). Native and Do
 
 ### Phase 3.8 — Collection CRUD leftovers
 
-- [ ] `let` on find / aggregate / updates / deletes / findOneAnd*. Un-skip CRUD `*-let.json` and `aggregate-let.json`.
-- [ ] Legacy `count` command (not `countDocuments`). Un-skip `count-rawdata.json`, `retryable-reads/count.json`, `count-serverErrors.json`, `transactions/count.json`.
-- [ ] `mapReduce` helper. Un-skip `retryable-reads/mapReduce.json`.
-- [ ] Copy GridFS `deleteByName` / `renameByName` (5 of 8 copied) and non-search index-management JSON (1 of 7 copied).
+- [x] `let` on find / aggregate / updates / deletes / findOneAnd* / collection `bulkWrite` (not insert). Un-skip CRUD `*-let.json` and `aggregate-let.json`.
+- [x] Legacy `count` command (not `countDocuments`). Un-skip `count.json`, `count-collation.json`, `count-empty.json`, `retryable-reads/count.json`, `count-serverErrors.json`, `transactions/count.json`. `count-rawdata.json` test 1 stays pending on 8.0 (needs **8.2**).
+- [x] `mapReduce` helper. Not retryable. Un-skip `retryable-reads/mapReduce.json`. Crystal uses `output:` (`out` is reserved).
+- [x] Copy GridFS `deleteByName` / `renameByName` (7 of 8 copied; leftover is `upload-disableMD5`). Remaining official index-management JSON is Atlas Search only (out of scope).
 
 ### Phase 3.9 — Client `bulkWrite`
 

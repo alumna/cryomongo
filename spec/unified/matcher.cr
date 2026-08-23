@@ -156,7 +156,7 @@ module Mongo::Unified::Matcher
   private def type_matches?(type : String, actual : JSON::Any) : Bool
     raw = actual.raw
     case type
-    when "double"                  then raw.is_a?(Float64)
+    when "double"                  then raw.is_a?(Float64) || (raw.is_a?(Hash) && actual.as_h.has_key?("$numberDouble"))
     when "string"                  then raw.is_a?(String)
     when "object"                  then raw.is_a?(Hash)
     when "array"                   then raw.is_a?(Array)
