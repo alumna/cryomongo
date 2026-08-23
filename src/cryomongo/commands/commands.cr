@@ -109,6 +109,7 @@ module Mongo::Commands
       property errmsg : String
       @[BSON::Field(key: "errInfo")]
       property err_info : BSON?
+      property error_labels : Array(String)?
     }
 
     # Cursor bson sub-document.

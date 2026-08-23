@@ -166,7 +166,7 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
       base_backoff_ms = cached_body["baseBackoffMS"]?.try { |v|
         v.as?(Int) ? v.as(Int).to_i64 : nil
       }
-      Mongo::Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: err_label_set, topology_version: topology_version, base_backoff_ms: base_backoff_ms)
+      Mongo::Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: err_label_set, topology_version: topology_version, base_backoff_ms: base_backoff_ms, reply: BSON.new(cached_body.data))
     end
   end
 

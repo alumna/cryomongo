@@ -11,7 +11,7 @@
 # Each run writes bench/results/<utc>-<mode>-<topology>.json unless BENCH_SAVE=0.
 #
 # Score is MB/s from the median iteration (SI megabyte = 1,000,000 bytes).
-# Client bulkWrite is skipped (the driver has no client bulk API yet).
+# Client bulkWrite is implemented (`Client#bulk_write`). This bench still uses collection writes.
 # Official 500k LDJSON parallel files are skipped (too large to vendor).
 
 require "wait_group"

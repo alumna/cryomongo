@@ -170,8 +170,8 @@ The file needs a replica set with a secondary (`replSetStepDown`). Native and Do
 
 ### Phase 3.9 — Client `bulkWrite`
 
-- [ ] Client-level `bulkWrite` (MongoDB 8.0).
-- [ ] Un-skip `crud/client-bulkWrite-*.json`, `retryable-writes/client-bulkWrite-*.json`, `transactions/client-bulkWrite.json`, `causal-consistency-clientBulkWrite.json`.
+- [x] Client-level `bulkWrite` (MongoDB 8.0).
+- [x] Un-skip `crud/client-bulkWrite-*.json`, `retryable-writes/client-bulkWrite-*.json`, `transactions/client-bulkWrite.json`, `causal-consistency-clientBulkWrite.json`.
 
 ### Phase 3.10 — Auth on CI, speculative auth, monitor auth
 

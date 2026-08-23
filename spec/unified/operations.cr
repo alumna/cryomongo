@@ -731,6 +731,140 @@ module Mongo::Unified::Operations
     }
   end
 
+  private def execute_client_bulk_write(args, target, session)
+    raise "Missing arguments" unless args
+    models = args["models"].as_a.map { |model_any| parse_client_bulk_model(model_any) }
+    ordered = args["ordered"]?.try(&.as_bool)
+    ordered = true if ordered.nil?
+    verbose = args["verboseResults"]?.try(&.as_bool) || false
+    comment = args["comment"]?.try { |c| json_to_bson_value(c) }
+    bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
+    wc = args["writeConcern"]?.try { |v| Parse.write_concern(v) }
+    result = target.as(Mongo::Client).bulk_write(
+      models,
+      ordered: ordered,
+      comment: comment,
+      bypass_document_validation: bypass,
+      let: op_let(args),
+      write_concern: wc,
+      verbose_results: verbose,
+      session: session,
+      timeout_ms: op_timeout_ms(args),
+    )
+    utf_client_bulk_result(result)
+  end
+
+  private def parse_client_bulk_model(model_any : JSON::Any) : Mongo::ClientBulk::WriteModel
+    req = model_any.as_h
+    if req["insertOne"]?
+      req_args = req["insertOne"]
+      ns = req_args["namespace"].as_s
+      doc = BSON.from_json(req_args["document"].to_json)
+      Mongo::ClientBulk::InsertOne.new(ns, doc)
+    elsif req["updateOne"]?
+      req_args = req["updateOne"]
+      Mongo::ClientBulk::UpdateOne.new(
+        req_args["namespace"].as_s,
+        BSON.from_json(req_args["filter"].to_json),
+        parse_update_arg(req_args["update"]),
+        upsert: req_args["upsert"]?.try(&.as_bool),
+        collation: req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) },
+        hint: req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) },
+        array_filters: req_args["arrayFilters"]?.try { |af| af.as_a.map { |f_el| BSON.from_json(f_el.to_json) } },
+        sort: req_args["sort"]?.try { |s| BSON.from_json(s.to_json) },
+      )
+    elsif req["updateMany"]?
+      req_args = req["updateMany"]
+      Mongo::ClientBulk::UpdateMany.new(
+        req_args["namespace"].as_s,
+        BSON.from_json(req_args["filter"].to_json),
+        parse_update_arg(req_args["update"]),
+        upsert: req_args["upsert"]?.try(&.as_bool),
+        collation: req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) },
+        hint: req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) },
+        array_filters: req_args["arrayFilters"]?.try { |af| af.as_a.map { |f_el| BSON.from_json(f_el.to_json) } },
+      )
+    elsif req["replaceOne"]?
+      req_args = req["replaceOne"]
+      Mongo::ClientBulk::ReplaceOne.new(
+        req_args["namespace"].as_s,
+        BSON.from_json(req_args["filter"].to_json),
+        BSON.from_json(req_args["replacement"].to_json),
+        upsert: req_args["upsert"]?.try(&.as_bool),
+        collation: req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) },
+        hint: req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) },
+        sort: req_args["sort"]?.try { |s| BSON.from_json(s.to_json) },
+      )
+    elsif req["deleteOne"]?
+      req_args = req["deleteOne"]
+      Mongo::ClientBulk::DeleteOne.new(
+        req_args["namespace"].as_s,
+        BSON.from_json(req_args["filter"].to_json),
+        collation: req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) },
+        hint: req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) },
+      )
+    elsif req["deleteMany"]?
+      req_args = req["deleteMany"]
+      Mongo::ClientBulk::DeleteMany.new(
+        req_args["namespace"].as_s,
+        BSON.from_json(req_args["filter"].to_json),
+        collation: req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) },
+        hint: req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) },
+      )
+    else
+      raise "Unsupported clientBulkWrite model type"
+    end
+  end
+
+  def utf_client_bulk_result(result : Mongo::ClientBulk::WriteResult)
+    hash = {
+      "insertedCount" => result.inserted_count,
+      "upsertedCount" => result.upserted_count,
+      "matchedCount"  => result.matched_count,
+      "modifiedCount" => result.modified_count,
+      "deletedCount"  => result.deleted_count,
+    } of String => Int32 | Hash(String, Hash(String, BSON::Value | Int32))
+    if inserts = result.insert_results
+      mapped = {} of String => Hash(String, BSON::Value | Int32)
+      inserts.each { |idx, row| mapped[idx.to_s] = {"insertedId" => row.inserted_id} of String => BSON::Value | Int32 }
+      hash["insertResults"] = mapped
+    end
+    if updates = result.update_results
+      mapped = {} of String => Hash(String, BSON::Value | Int32)
+      updates.each do |idx, row|
+        row_h = {
+          "matchedCount"  => row.matched_count,
+          "modifiedCount" => row.modified_count,
+        } of String => BSON::Value | Int32
+        if uid = row.upserted_id
+          row_h["upsertedId"] = uid
+        end
+        mapped[idx.to_s] = row_h
+      end
+      hash["updateResults"] = mapped
+    end
+    if deletes = result.delete_results
+      mapped = {} of String => Hash(String, BSON::Value | Int32)
+      deletes.each { |idx, row| mapped[idx.to_s] = {"deletedCount" => row.deleted_count} of String => BSON::Value | Int32 }
+      hash["deleteResults"] = mapped
+    end
+    hash
+  end
+
+  def utf_client_bulk_write_errors(error : Mongo::Error::ClientBulkWrite)
+    mapped = {} of String => Hash(String, Int32 | String)
+    error.write_errors.each do |idx, we|
+      mapped[idx.to_s] = {"code" => we.code, "message" => we.message} of String => Int32 | String
+    end
+    mapped
+  end
+
+  def utf_client_bulk_write_concern_errors(error : Mongo::Error::ClientBulkWrite)
+    error.write_concern_errors.map do |wce|
+      {"code" => wce.code, "message" => wce.message} of String => Int32 | String
+    end
+  end
+
   private def utf_update_result(result)
     upserted = result.try(&.upserted)
     upserted_count = upserted.try(&.size) || 0

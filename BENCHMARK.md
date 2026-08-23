@@ -68,7 +68,7 @@ Use `--release` for a number you might compare to Java or Go. A default `crystal
 
 **MultiBench** (needs a server): find many, small/large `insertMany`, collection `bulkWrite` insert, mixed collection `bulkWrite`, GridFS upload and download.
 
-**ReadBench / WriteBench / DriverBench**: averages as in the spec. Client `bulkWrite` is not included (the driver has no client bulk API yet). Official 500,000-document LDJSON parallel files are not vendored.
+**ReadBench / WriteBench / DriverBench**: averages as in the spec. Client `bulkWrite` is implemented but not part of this DriverBench set. Official 500,000-document LDJSON parallel files are not vendored.
 
 An extra **parallel small insertMany** task uses Crystal fibers. It is a local concurrency check. It is **not** in WriteBench or DriverBench.
 
@@ -277,7 +277,7 @@ Java ASCII **before** opts: large insertOne 51.
 
 Java ASCII **before** opts: large bulk insert 47, small bulk insert 25.
 
-PyMongo collection vs client bulkWrite on Evergreen 8.0 standalone (PR [1796](https://github.com/mongodb/mongo-python-driver/pull/1796), 2024): large insertMany **105**, small insertMany **42**, mixed collection **0.65**, large **client** bulk insert **21**, small **client** bulk insert **8.4**, small **client** mixed **1.35**. Collection bulk was much faster than `client.bulk_write` in that snapshot. cryomongo has no client bulk API.
+PyMongo collection vs client bulkWrite on Evergreen 8.0 standalone (PR [1796](https://github.com/mongodb/mongo-python-driver/pull/1796), 2024): large insertMany **105**, small insertMany **42**, mixed collection **0.65**, large **client** bulk insert **21**, small **client** bulk insert **8.4**, small **client** mixed **1.35**. Collection bulk was much faster than `client.bulk_write` in that snapshot. cryomongo now has `Client#bulk_write`; this DriverBench set still uses collection writes.
 
 ### Composites (MB/s)
 

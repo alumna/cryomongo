@@ -9,12 +9,26 @@ module Mongo::Commands::Insert
   extend Retryable
   extend self
 
-  # Generate `_id` on each document. Mutates a caller BSON (BSON.new is a no-op).
+  # Generate `_id` on each document and put it first (CRUD prose: generated identifiers are the first field).
+  # If `_id` is already present, leave the document as-is. BSON.new is a no-op for BSON.
   def with_ids(documents : Array) : Array(BSON)
     documents.map { |elt|
-      doc = BSON.new(elt)
-      doc["_id"] = BSON::ObjectId.new unless doc.has_key?("_id")
-      doc
+      src = BSON.new(elt)
+      if src.has_key?("_id")
+        src
+      else
+        id = BSON::ObjectId.new
+        BSON.build do |builder|
+          builder["_id"] = id
+          src.each { |key, value, code|
+            if value.is_a?(BSON) && code.array?
+              builder.append_array(key, value)
+            else
+              builder[key] = value
+            end
+          }
+        end
+      end
     }
   end
 

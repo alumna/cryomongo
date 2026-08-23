@@ -7,7 +7,6 @@ module Mongo::Unified::Dispatcher
   include Operations
 
   UNSUPPORTED_OPS = {
-    "clientBulkWrite",
     "createSearchIndex",
     "createSearchIndexes",
     "dropSearchIndex",
@@ -16,10 +15,6 @@ module Mongo::Unified::Dispatcher
 
   def execute(op : Operation, registry : Registry, internal_client : Mongo::Client, runner : Runner, *, raise_operation_errors : Bool = false)
     args = op.arguments
-
-    if op.name == "clientBulkWrite"
-      raise Exception.new("SKIP_TEST")
-    end
 
     if UNSUPPORTED_OPS.includes?(op.name)
       raise Exception.new("SKIP_TEST")
@@ -101,6 +96,7 @@ module Mongo::Unified::Dispatcher
                when "findOneAndReplace"                        then execute_find_one_and_replace(args, target, session)
                when "findOneAndUpdate"                         then execute_find_one_and_update(args, target, session)
                when "bulkWrite"                                then execute_bulk_write(args, target, session)
+               when "clientBulkWrite"                          then execute_client_bulk_write(args, target, session)
                when "startTransaction"                         then execute_start_transaction(args, target)
                when "commitTransaction"                        then execute_commit_transaction(args, target)
                when "abortTransaction"                         then execute_abort_transaction(args, target)
@@ -150,7 +146,7 @@ module Mongo::Unified::Dispatcher
       elsif ignore
         raise e if raise_operation_errors
       elsif expected_error
-        check_expected_error!(e, expected_error)
+        check_expected_error!(e, expected_error, registry)
         # Callback operations still need to surface the error to withTransaction.
         raise e if raise_operation_errors
       else
@@ -159,9 +155,9 @@ module Mongo::Unified::Dispatcher
     end
   end
 
-  private def check_expected_error!(error : Exception, expected : ExpectedError)
+  private def check_expected_error!(error : Exception, expected : ExpectedError, registry : Registry)
     if expected.isClientError
-      if error.is_a?(Mongo::Error::Command) || error.is_a?(Mongo::Error::CommandWrite) || error.is_a?(Mongo::Error::WriteConcern)
+      if error.is_a?(Mongo::Error::Command) || error.is_a?(Mongo::Error::CommandWrite) || error.is_a?(Mongo::Error::WriteConcern) || error.is_a?(Mongo::Error::ClientBulkWrite)
         raise Exception.new("TEST_FAILED: Expected a client error, got server error: #{error}")
       end
     end
@@ -207,6 +203,43 @@ module Mongo::Unified::Dispatcher
       unless error.is_a?(Mongo::Error::Timeout)
         raise Exception.new("TEST_FAILED: Expected a timeout error, got #{error.class}: #{error}")
       end
+    end
+
+    if expected_result = expected.expectResult
+      # Collection insertMany/bulkWrite errors do not carry a result object yet.
+      # Only client bulkWrite expectResult is matched here.
+      # UTF $$unsetOrMatches allows a nil partial_result (no writes succeeded).
+      if error.is_a?(Mongo::Error::ClientBulkWrite)
+        partial = error.partial_result
+        actual = if partial
+                   Matcher.json_from(utf_client_bulk_result(partial))
+                 else
+                   Matcher.json_from(nil)
+                 end
+        Matcher.match!(expected_result, actual, registry: registry)
+      end
+    end
+
+    if expected_we = expected.writeErrors
+      unless error.is_a?(Mongo::Error::ClientBulkWrite)
+        raise Exception.new("TEST_FAILED: Expected client bulkWrite writeErrors, got #{error.class}: #{error}")
+      end
+      Matcher.match!(expected_we, Matcher.json_from(utf_client_bulk_write_errors(error)), registry: registry)
+    end
+
+    if expected_wce = expected.writeConcernErrors
+      unless error.is_a?(Mongo::Error::ClientBulkWrite)
+        raise Exception.new("TEST_FAILED: Expected client bulkWrite writeConcernErrors, got #{error.class}: #{error}")
+      end
+      Matcher.match!(expected_wce, Matcher.json_from(utf_client_bulk_write_concern_errors(error)), registry: registry)
+    end
+
+    if expected_reply = expected.errorResponse
+      reply = error.responds_to?(:reply) ? error.reply : nil
+      unless reply
+        raise Exception.new("TEST_FAILED: Expected errorResponse, got no reply on #{error.class}: #{error}")
+      end
+      Matcher.match!(expected_reply, Matcher.json_from(reply), registry: registry)
     end
   end
 end

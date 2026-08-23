@@ -325,13 +325,17 @@ class Mongo::Client
     end
 
     # Receive the server sent OP_MSG.
+    reply_error = nil.as(Exception?)
     op_msg = connection.receive do |message|
       op_msg = message.contents.as(Messages::OpMsg)
       duration = duration_start.elapsed
+      reply_error = op_msg.error?
+      # bulkWrite ok:1 plus writeConcernError is a success for APM. The caller drains the cursor, then raises at the end.
+      bulk_wce = command == Commands::BulkWrite && reply_error.is_a?(Error::WriteConcern)
 
       # Monitor.
       if @commands_observable.has_subscribers?
-        if error = op_msg.error?
+        if reply_error && !bulk_wce
           @commands_observable.broadcast(Monitoring::Commands::CommandFailedEvent.new(
             command_name: command_name,
             request_id: message.header.response_to.to_i64,
@@ -339,7 +343,7 @@ class Mongo::Client
             address: address,
             duration: duration,
             reply: op_msg.safe_payload(command),
-            failure: Monitoring::Redact.failure(command_name, error, op_msg.body),
+            failure: Monitoring::Redact.failure(command_name, reply_error, op_msg.body),
             service_id: connection.service_id
           ))
         else
@@ -385,13 +389,29 @@ class Mongo::Client
     end
 
     # Raise if the server replied with an error.
-    if error = op_msg.error?
+    # bulkWrite writeConcernError is not raised here so the caller can drain the cursor and continue batches.
+    if (error = reply_error) && !(command == Commands::BulkWrite && error.is_a?(Error::WriteConcern))
       raise wrap_csot_timeout(error, deadline)
     end
 
     # Parse and return the body as a custom Result type.
     result = command.result(op_msg.body)
     session.last_operation_server = server_description
+
+    # APM already recorded Succeeded for bulkWrite ok:1 + writeConcernError.
+    # If the write is retryable, raise so execute_retryable_write can retry.
+    # Do not pin or return this attempt: the leftover cursor must not be drained.
+    if command == Commands::BulkWrite && (wce_error = reply_error).is_a?(Error::WriteConcern)
+      if @options.retry_writes && command.responds_to?(:retryable?) && command.retryable?(**args, session: session) && wce_error.retryable_write?
+        if result.is_a?(Commands::BulkWrite::Result)
+          if cursor = result.cursor
+            kill_client_bulk_cursor(cursor.id, cursor.ns, session, server_description, connection, deadline)
+          end
+        end
+        raise wrap_csot_timeout(wce_error, deadline)
+      end
+    end
+
     if @options.load_balanced && owns_connection
       if (cid = cursor_id_of(result)) && cid != 0
         session.pending_cursor_connection = connection
@@ -755,6 +775,12 @@ class Mongo::Client
       result.cursor.id != 0
     when Commands::GetMore::Result
       result.cursor.id != 0
+    when Commands::BulkWrite::Result
+      if id = result.cursor.try(&.id)
+        id != 0
+      else
+        false
+      end
     when Cursor
       true
     when BSON
@@ -774,6 +800,8 @@ class Mongo::Client
       result.cursor.id
     when Commands::GetMore::Result
       result.cursor.id
+    when Commands::BulkWrite::Result
+      result.cursor.try(&.id)
     when BSON
       bson_cursor_id(result)
     else
