@@ -14,13 +14,17 @@ describe "Server selection spec tests" do
       read_pref = Mongo::SpecSupport.read_preference_from_json(json["read_preference"]?)
       write = json["operation"]?.try(&.as_s?) == "write"
       heartbeat = Mongo::SpecSupport.heartbeat_frequency(json)
+      deprioritized = json["deprioritized_servers"]?.try(&.as_a?).try { |arr|
+        arr.map { |s| s["address"].as_s }
+      }
 
       suitable = Mongo::SDAM::Selector.suitable_servers(
         topology_type,
         servers,
         read_pref,
         write: write,
-        heartbeat_frequency: heartbeat
+        heartbeat_frequency: heartbeat,
+        deprioritized: deprioritized
       )
       window = Mongo::SDAM::Selector.in_latency_window(suitable)
 

@@ -16,6 +16,12 @@ dependencies:
   dns:
     github: spider-gazelle/dns
     branch: main
+  snappy:
+    github: naqvis/snappy
+    version: "~> 0.2.0"
+  zstd:
+    github: didactic-drunk/zstd.cr
+    version: "~> 1.2.0"
 
 targets:
   cryomongo:

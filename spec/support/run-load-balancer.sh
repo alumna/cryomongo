@@ -57,6 +57,41 @@ remove_sock() {
   rm -f "$sock" 2>/dev/null || sudo rm -f "$sock" 2>/dev/null || true
 }
 
+wait_backends_up() {
+  local sock="${TMP}/haproxy.sock"
+  python3 - "$sock" <<'PY'
+import socket, sys, time
+path = sys.argv[1]
+for _ in range(50):
+    data = b""
+    try:
+        s = socket.socket(socket.AF_UNIX)
+        s.settimeout(1)
+        s.connect(path)
+        s.sendall(b"show stat\n")
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        s.close()
+    except Exception:
+        time.sleep(0.1)
+        continue
+    up = 0
+    for line in data.decode("utf-8", "replace").splitlines():
+        if line.startswith("mongoses_backend,mongos_"):
+            parts = line.split(",")
+            if len(parts) > 17 and parts[17] == "UP":
+                up += 1
+    if up >= 2:
+        sys.exit(0)
+    time.sleep(0.1)
+print("HAProxy mongoses backends are not both UP", file=sys.stderr)
+sys.exit(1)
+PY
+}
+
 start() {
   need_haproxy
   mkdir -p "$TMP"
@@ -93,11 +128,13 @@ backend mongoses_backend
     # can send both to one mongos when they start with the same idle count).
     balance roundrobin
     retries 0
+    option redispatch
     server mongos_one ${LB1} send-proxy-v2 check port ${CHECK1}
     server mongos_two ${LB2} send-proxy-v2 check port ${CHECK2}
 EOF
 
   haproxy -D -f "$CONF" -p "$PIDFILE"
+  wait_backends_up
   AUTH_USER="${AUTH_USER:-bob}"
   AUTH_PASS="${AUTH_PASS:-pwd123}"
   AUTH_DB="${AUTH_DB:-admin}"
@@ -108,6 +145,7 @@ export SINGLE_MONGOS_LB_URI='${SINGLE}'
 export MULTI_MONGOS_LB_URI='${MULTI}'
 export MONGODB_URI='${SINGLE}'
 export TOPOLOGY=load-balanced
+export UTF_RUN_TWO_MONGOS=1
 EOF
   echo "SINGLE_MONGOS_LB_URI=${SINGLE}"
   echo "MULTI_MONGOS_LB_URI=${MULTI}"

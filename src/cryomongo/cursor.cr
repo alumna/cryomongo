@@ -234,7 +234,7 @@ class Mongo::Cursor
   end
 
   protected def end_implicit_session
-    if (session = @session) && session.implicit?
+    if (session = @session) && session.implicit? && !session.fiber_owned?
       session.end
     end
   end
@@ -265,7 +265,7 @@ class Mongo::Cursor
     @batch_index = 0
     release_pin if @cursor_id == 0
 
-    if (session = @session) && exhausted? && session.implicit?
+    if (session = @session) && exhausted? && session.implicit? && !session.fiber_owned?
       session.end
     end
 

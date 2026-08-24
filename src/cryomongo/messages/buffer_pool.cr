@@ -1,6 +1,7 @@
-# Reusable receive buffers. OP_MSG BSON.view needs the bytes to stay alive, so a
-# successful read keeps the buffer. Failed reads return it. Compression staging
-# on Connection uses its own IO::Memory and does not need this pool.
+# Reusable receive buffers. After a successful OP_MSG / OP_REPLY parse, BSON
+# is copied and the buffer returns here. Failed reads also return it.
+# Compression staging on Connection uses its own IO::Memory and does not need
+# this pool.
 module Mongo::Messages::BufferPool
   extend self
 
@@ -18,7 +19,9 @@ module Mongo::Messages::BufferPool
       cap = min_size > DEFAULT_SIZE ? min_size : DEFAULT_SIZE
       buf = Bytes.new(cap)
     end
-    buf.size >= min_size ? buf : Bytes.new(min_size)
+    return buf if buf.size >= min_size
+    checkin(buf)
+    Bytes.new(min_size)
   end
 
   def checkin(buf : Bytes) : Nil

@@ -125,10 +125,10 @@ describe Mongo::Options do
     options.max_adaptive_retries.should eq 1
   end
 
-  it "keeps zlib in compressor_list and drops unknown names" do
-    _, options, _, _ = Mongo::URI.parse("mongodb://localhost/?compressors=snoopy,zlib,snappy", Mongo::Options.new)
-    options.compressors.should eq "snoopy,zlib,snappy"
-    options.compressor_list.should eq ["zlib"]
+  it "keeps zlib, snappy, and zstd in compressor_list and drops unknown names" do
+    _, options, _, _ = Mongo::URI.parse("mongodb://localhost/?compressors=snoopy,zlib,snappy,zstd", Mongo::Options.new)
+    options.compressors.should eq "snoopy,zlib,snappy,zstd"
+    options.compressor_list.should eq ["zlib", "snappy", "zstd"]
   end
 
   it "rejects zlibCompressionLevel outside -1..9" do

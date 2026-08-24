@@ -13,6 +13,7 @@ class Mongo::Client
   )
     # getMore must stay on the originating server. Keep a caller pin on retry.
     provided_server = server_description
+    deprioritized = nil.as(Array(String)?)
     server_description ||= server_selection(command, args, read_preference, deadline)
 
     if !topology.supports_sessions? || !server_description.supports_retryable_reads?
@@ -27,7 +28,7 @@ class Mongo::Client
 
     loop do
       begin
-        server_description = provided_server || session.server_description || server_selection(command, args, read_preference, deadline)
+        server_description = provided_server || session.server_description || server_selection(command, args, read_preference, deadline, deprioritized)
         # TopologyType Single returns an Unknown server immediately. Connecting
         # runs hello and rediscovers. Do not abort the retry just because
         # sessions dropped while the only server was Unknown.
@@ -69,6 +70,10 @@ class Mongo::Client
       end
 
       apply_overload_backoff(attempt, original_error) if overload && original_error
+      if overload && @options.enable_overload_retargeting && !session.is_transaction? && provided_server.nil?
+        session.unpin
+        deprioritized = [server_description.address]
+      end
     end
   end
 end

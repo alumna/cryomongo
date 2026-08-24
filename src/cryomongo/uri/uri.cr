@@ -140,10 +140,9 @@ module Mongo::URI
     mech_props_str = options.auth_mechanism_properties
     mech_props = parse_mechanism_properties(mech_props_str)
 
-    # Inject the default SERVICE_NAME for GSSAPI without restructuring the entire string if it wasn't mutated
+    # Inject the default SERVICE_NAME for GSSAPI.
     if mech == "GSSAPI" && !mech_props.has_key?("SERVICE_NAME")
       mech_props["SERVICE_NAME"] = "mongodb"
-      mech_props_str = mech_props_str ? "#{mech_props_str},SERVICE_NAME:mongodb" : "SERVICE_NAME:mongodb"
     end
 
     username = parsed_uri.user
@@ -154,7 +153,7 @@ module Mongo::URI
       password: password ? ::URI.decode(password) : nil,
       source: options.auth_source || default_source || "",
       mechanism: options.auth_mechanism,
-      mechanism_properties: mech_props_str
+      mechanism_properties: mech_props
     )
 
     validate_credentials(credentials, mech_props)

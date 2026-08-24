@@ -26,6 +26,8 @@ offline() {
   need_shards
   echo "==> URI options (no mongod)"
   crystal spec spec/options_spec.cr
+  echo "==> TLS key password (no mongod)"
+  crystal spec spec/tls_spec.cr
   echo "==> compression (no mongod)"
   crystal spec spec/compression_spec.cr
   echo "==> driver BSON helpers (no mongod)"

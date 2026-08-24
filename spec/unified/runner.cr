@@ -201,13 +201,6 @@ module Mongo::Unified
           Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "waitQueueSize / waitQueueMultiple are not implemented", duration_ms: Timing.elapsed_ms(test_started))
           next
         end
-        # After a timed-out getMore the load-balanced pin is dead. killCursors
-        # must not open a new socket (the mongos already dropped the cursor).
-        if test.description == "timeoutMS is refreshed for close" && @@topology == "load-balanced"
-          skipped += 1
-          Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "no killCursors after a dead load-balanced pin", duration_ms: Timing.elapsed_ms(test_started))
-          next
-        end
         if only = ENV["UTF_TEST"]?
           unless test.description.includes?(only)
             skipped += 1

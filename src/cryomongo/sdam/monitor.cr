@@ -37,12 +37,7 @@ module Mongo::SDAM
 
     # Close the monitor socket only. The application pool stays.
     def drop_monitor_socket : Nil
-      conn = @socket_lock.synchronize do
-        c = @connection
-        @connection = nil
-        c
-      end
-      conn.try(&.interrupt)
+      steal_monitor_connection.try(&.interrupt)
     end
 
     def scan
@@ -103,11 +98,7 @@ module Mongo::SDAM
         # Close the monitor socket from this fiber. Do not close the application
         # pool: scan can stop when hello.me replaces localhost with 127.0.0.1,
         # and an in-use insert still sits on the old pool.
-        conn = @socket_lock.synchronize do
-          c = @connection
-          @connection = nil
-          c
-        end
+        conn = steal_monitor_connection
         conn.try(&.interrupt)
         conn.try { |c| c.close rescue nil }
         @client.stop_monitoring(@server_description)
@@ -145,10 +136,18 @@ module Mongo::SDAM
 
     def close
       @closed.set(true)
-      drop_monitor_socket
+      steal_monitor_connection.try(&.interrupt_and_wake)
       request_immediate_scan
       @resume_scan.close rescue nil
       @done.wait
+    end
+
+    private def steal_monitor_connection : Mongo::Connection?
+      @socket_lock.synchronize do
+        c = @connection
+        @connection = nil
+        c
+      end
     end
 
     # Sleep until the minHeartbeatFrequency cooldown, but wake if close() runs.

@@ -50,7 +50,6 @@ module Mongo::Session
   class ClientSession
     getter client : Mongo::Client
     @server_session : ServerSession
-    @released = false
     @lock = Sync::Mutex.new
 
     # This property returns the most recent cluster time seen by this session.
@@ -69,13 +68,15 @@ module Mongo::Session
     property operation_deadline : Mongo::Deadline? = nil
 
     protected getter? implicit : Bool = true
+    protected getter? fiber_owned : Bool = false
+    protected getter? released : Bool = false
     protected delegate :dirty, :dirty=, :txn_number, to: @server_session
 
     def session_id
       @server_session.session_id
     end
 
-    protected def initialize(@client : Mongo::Client, @implicit = true, *, pooled = true, **options : **U) forall U
+    protected def initialize(@client : Mongo::Client, @implicit = true, *, pooled = true, fiber_owned = false, **options : **U) forall U
       {% begin %}
       {{ @type }} # see: https://github.com/crystal-lang/crystal/issues/2731
       raw_causal = options["causal_consistency"]?
@@ -101,6 +102,7 @@ module Mongo::Session
         default_timeout_ms: options["default_timeout_ms"]?
       )
       @snapshot_time = raw_snapshot_time
+      @fiber_owned = fiber_owned
       # endSessions during pool close must not check out from this pool.
       @server_session = if pooled
                           @client.session_pool.acquire(logical_timeout)
@@ -138,9 +140,22 @@ module Mongo::Session
     def end
       return if @released
       @lock.synchronize {
+        return if @released
         @released = true
         @client.session_pool.release(@client, @server_session, logical_timeout)
       }
+    end
+
+    # After a dirty implicit command, the next command on this fiber needs a
+    # new ServerSession. Retry of the same command keeps the dirty session.
+    protected def recycle_dirty_server_session : Nil
+      return unless @server_session.dirty
+      @lock.synchronize do
+        return unless @server_session.dirty
+        return if @released
+        @client.session_pool.release(@client, @server_session, logical_timeout)
+        @server_session = @client.session_pool.acquire(logical_timeout)
+      end
     end
 
     protected def logical_timeout

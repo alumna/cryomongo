@@ -17,9 +17,6 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
   getter flag_bits : Flags
   getter sections : Array(Part)
   getter checksum : UInt32?
-  # Keeps the receive buffer alive so BSON.view slices stay valid.
-  @[Field(ignore: true)]
-  @payload_bytes : Bytes? = nil
 
   def initialize(@flag_bits : Flags, @sections, @checksum = nil)
   end
@@ -46,49 +43,76 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
   end
 
   def initialize(msg_bytes : Bytes, header : Messages::Header, used : Int32 = msg_bytes.size)
-    @payload_bytes = msg_bytes
-    view_bytes = msg_bytes[0, used]
-    msg_view = IO::Memory.new(view_bytes, writable: false)
+    begin
+      view_bytes = msg_bytes[0, used]
+      msg_view = IO::Memory.new(view_bytes, writable: false)
 
-    @flag_bits = Flags.from_value(msg_view.read_bytes(UInt32, IO::ByteFormat::LittleEndian))
-    @sections = typeof(@sections).new
+      @flag_bits = Flags.from_value(msg_view.read_bytes(UInt32, IO::ByteFormat::LittleEndian))
+      @sections = typeof(@sections).new
 
-    has_checksum = @flag_bits.checksum_present?
-    limit_pos = used - (has_checksum ? 4 : 0)
+      has_checksum = @flag_bits.checksum_present?
+      limit_pos = used - (has_checksum ? 4 : 0)
 
-    while msg_view.pos < limit_pos
-      payload_type = msg_view.read_bytes(UInt8, IO::ByteFormat::LittleEndian)
+      while msg_view.pos < limit_pos
+        payload_type = msg_view.read_bytes(UInt8, IO::ByteFormat::LittleEndian)
 
-      case payload_type
-      when 0_u8
-        payload = Messages.read_bson_view(view_bytes, msg_view)
-        @sections << SectionBody.new(payload)
-      when 1_u8
-        marker = msg_view.pos
-        sequence_size = msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian)
+        case payload_type
+        when 0_u8
+          payload = Messages.read_bson_view(view_bytes, msg_view)
+          @sections << SectionBody.new(payload)
+        when 1_u8
+          marker = msg_view.pos
+          sequence_size = msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian)
 
-        sequence_identifier = msg_view.gets('\0', chomp: true)
-        raise Mongo::Error.new("Invalid OP_MSG: EOF while reading sequence identifier") unless sequence_identifier
+          sequence_identifier = msg_view.gets('\0', chomp: true)
+          raise Mongo::Error.new("Invalid OP_MSG: EOF while reading sequence identifier") unless sequence_identifier
 
-        contents = Array(BSON).new
+          contents = Array(BSON).new
 
-        while msg_view.pos - marker < sequence_size
-          contents << Messages.read_bson_view(view_bytes, msg_view)
+          while msg_view.pos - marker < sequence_size
+            contents << Messages.read_bson_view(view_bytes, msg_view)
+          end
+
+          @sections << SectionDocumentSequence.new(
+            payload: SectionDocumentSequence::SectionPayload.new(
+              sequence_identifier, contents
+            )
+          )
+        else
+          raise Mongo::Error.new "Received invalid payload type: #{payload_type}"
         end
+      end
 
-        @sections << SectionDocumentSequence.new(
+      if has_checksum
+        @checksum = msg_view.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+      end
+      own_payload
+    ensure
+      Messages::BufferPool.checkin(msg_bytes)
+    end
+  end
+
+  # Copy BSON out of the receive buffer so the Channel pool can take it back.
+  private def own_payload : Nil
+    owned = Array(Part).new(@sections.size)
+    @sections.each do |section|
+      case section
+      when SectionBody
+        owned << SectionBody.new(BSON.new(section.payload.data))
+      when SectionDocumentSequence
+        docs = Array(BSON).new(section.payload.contents.size)
+        section.payload.contents.each { |doc| docs << BSON.new(doc.data) }
+        owned << SectionDocumentSequence.new(
           payload: SectionDocumentSequence::SectionPayload.new(
-            sequence_identifier, contents
+            section.payload.sequence_identifier,
+            docs
           )
         )
       else
-        raise Mongo::Error.new "Received invalid payload type: #{payload_type}"
+        owned << section
       end
     end
-
-    if has_checksum
-      @checksum = msg_view.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
-    end
+    @sections = owned
   end
 
   struct SectionBody < Part
