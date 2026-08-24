@@ -1,5 +1,6 @@
 require "./spec_helper"
 require "./unified/runner"
+require "./unified/filter"
 require "./unified/timing"
 require "./sharding"
 
@@ -19,6 +20,15 @@ describe "Unified Test Runner" do
     Mongo::Unified::Runner.utf_topology_name("load_balanced").should eq "load-balanced"
   end
 
+  it "omits UTF files whose topologies do not include the current topology" do
+    lb = "spec/tests/unified/load-balancers/cursors.json"
+    rs = "spec/tests/unified/retryable-writes/insertOne.json"
+    Mongo::Unified::TopologyFilter.keep?(lb, "sharded").should be_false
+    Mongo::Unified::TopologyFilter.keep?(lb, "load-balanced").should be_true
+    Mongo::Unified::TopologyFilter.keep?(rs, "sharded").should be_false
+    Mongo::Unified::TopologyFilter.keep?(rs, "replicaset").should be_true
+  end
+
   it "bootstraps the environment successfully" do
     uri = ENV["MONGODB_URI"]
     client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=3000"))
@@ -36,14 +46,30 @@ describe "Unified Test Runner" do
     end
   end
 
+  it "closes a client without waiting a full heartbeat" do
+    uri = ENV["MONGODB_URI"]
+    client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=3000"))
+    begin
+      client.command(Mongo::Commands::Ping)
+    rescue e : Mongo::Error::ServerSelection
+      pending! "MongoDB is not reachable as a replica set (#{e.message}). Run: sudo scripts/mongo-topology.sh replicaset"
+    end
+    started = Time.instant
+    client.close
+    (Time.instant - started).should be < 3.seconds
+  end
+
   # Gather all JSON files and sort them deterministically
   files = Dir.glob("spec/tests/unified/**/*.json").sort
 
   # Dynamically filter the files using our cost-aware bin-packing algorithm
   files = Mongo::SpecSharding.filter(files)
 
-  # Recursively generate a test for every JSON file in our current shard
+  # Recursively generate a test for every JSON file in our current shard.
+  # Wrong-topology files are omitted (not Crystal pending). Newer-server files stay pending.
+  utf_topology = ENV["TOPOLOGY"]?.try { |value| Mongo::Unified::Runner.utf_topology_name(value) }
   files.each do |file|
+    next if utf_topology && !Mongo::Unified::TopologyFilter.keep?(file, utf_topology)
     it "executes: #{file}" do
       runner = Mongo::Unified::Runner.new(file)
       runner.run

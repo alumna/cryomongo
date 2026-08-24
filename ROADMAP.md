@@ -89,7 +89,7 @@ Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CR
 
 ## Remaining work (MongoDB 8.0, toward production grade)
 
-Phases 1–3 are done. GitHub Docker Phase **3.12** `crystal spec` is **905** examples: standalone **1:59 / 167 pending**, replica set **4:26 / 45 pending**, sharded **6:56 / 56 pending**, load-balanced **4:24 / 102 pending**. Replica set is **3** members. Phase **3.13.1** closed leftover UTF `dropDatabase` and GridFS `drop`. Remaining pending is `runOnRequirements` / official `skipReason` / out of scope. Optional CMAP wait-queue options are 3.13.2. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
+Phases 1–3 are done. GitHub Docker Phase **3.13.1** `crystal spec` is **905** examples: standalone **2:01 / 167 pending**, replica set **4:29 / 45 pending**, sharded **8:11 / 56 pending**, load-balanced **4:13 / 102 pending**. Replica set is **3** members. Phase **3.13.1** closed leftover UTF `dropDatabase` and GridFS `drop`. Wrong-topology UTF files are omitted from Crystal spec (not `pending`). Remaining pending is newer-server / `auth: false` / official `skipReason` / out of scope. Optional CMAP wait-queue options are 3.13.2. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
 
 ### Out of scope until the user asks
 
@@ -207,14 +207,14 @@ Env: `MONGODB_LOG_COMMAND`, `MONGODB_LOG_TOPOLOGY`, `MONGODB_LOG_CONNECTION`, `M
 
 `replicaset-emit-topology-changed-before-close.json` wants **4** `topologyDescriptionChanged` events before close. The 3-member `rs0` (native and GitHub Docker, added in 3.7) emits 4, so that file runs.
 
-GitHub Docker 3.12 pending counts (file-level Crystal `pending`) are standalone **167**, replica set **45**, sharded **56**, load-balanced **102**. Almost all of those files skip because `runOnRequirements` does not match (wrong topology, `auth: false` with URI userinfo, `maxServerVersion` for old servers) or because of an official `skipReason`. Intra-file `skip_op` leftovers are 3.13.1.
+GitHub Docker 3.13.1 pending counts (file-level Crystal `pending`) were standalone **167**, replica set **45**, sharded **56**, load-balanced **102**. Wrong-topology UTF files are now omitted from Crystal spec (not `pending`). Newer-server files stay `pending`. Intra-file `skip_op` leftovers are done in 3.13.1.
 
 - [x] Add a 3-member replica set (native `scripts/mongo-topology.sh` and GitHub Docker), **or** skip this file only when the set has one member.
 - [x] Un-skip `replicaset-emit-topology-changed-before-close.json` when the topology can emit 4 events.
-- [x] **3.13.1** Audit leftover skips and pending lists. UTF `dropDatabase` and GridFS `drop` (CSOT `gridfs-advanced.json` drop tests). `Database#drop` / `Collection#drop`.
+- [x] **3.13.1** Audit leftover skips and pending lists. UTF `dropDatabase` and GridFS `drop` (CSOT `gridfs-advanced.json` drop tests). `Database#drop` / `Collection#drop`. Omit Crystal examples for UTF files that cannot run on the current topology. RTT `close` interrupts an in-flight hello.
 - [ ] **3.13.2** Optional CMAP `waitQueueSize` / `waitQueueMultiple` (deprecated; the spec says skip if the driver does not support them). Do not start unless we want those two log tests.
 - [x] Audit leftover skips from Phases 1–3 that should not have stayed skipped.
-- [x] Audit any item showed as "Pending" when executing crystal spec in the multiple different topologies. Remaining pending is expected (topology / auth / old-server / out of scope). Details: `FIXES.md`.
+- [x] Audit any item showed as "Pending" when executing crystal spec in the multiple different topologies. Wrong-topology UTF files are omitted (not pending). Remaining pending is newer-server / auth / skipReason / out of scope. Details: `FIXES.md`.
 
 ### Phase 3.14 — Performance review and improvement
 

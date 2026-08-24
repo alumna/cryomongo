@@ -35,6 +35,9 @@ class Mongo::SDAM::RttMonitor
 
   def close : Nil
     @closed.set(true)
+    # Interrupt an in-flight hello. Sending on @wake only helps the sleep
+    # between pings; hello() does not wait on that channel.
+    drop_socket(close_socket: true)
     select
     when @wake.send(nil)
     else
@@ -97,7 +100,7 @@ class Mongo::SDAM::RttMonitor
     if conn.nil? || conn.socket.closed?
       drop_socket(close_socket: true)
       conn = open_connection
-      @connection = conn
+      @lock.synchronize { @connection = conn }
       legacy = @client.options.server_api.nil?
       _, rtt = conn.handshake(
         send_metadata: true,
@@ -122,7 +125,7 @@ class Mongo::SDAM::RttMonitor
       c
     end
     return unless conn
-    conn.interrupt
+    conn.interrupt_and_wake
     conn.close rescue nil if close_socket
   end
 end

@@ -213,34 +213,35 @@ describe "CRUD prose: client bulkWrite" do
     end
   end
 
-  it "8. drains getMore inside a transaction" do
-    pending! "needs a replica set or sharded cluster" if ENV["TOPOLOGY"]? == "standalone"
-    client = open_client
-    events = [] of Mongo::Monitoring::Commands::CommandStartedEvent
-    session = nil.as(Mongo::Session::ClientSession?)
-    begin
-      hello = hello_or_pending(client)
-      subscribe_started(client, events)
-      drop_coll(client)
-      txn_session = client.start_session
-      session = txn_session
-      txn_session.start_transaction
-      half = hello.max_bson_object_size // 2
-      models = [
-        Mongo::ClientBulk::UpdateOne.new(NS, {_id: "a" * half}, BSON.new({"$set" => {"x" => 1}}), upsert: true),
-        Mongo::ClientBulk::UpdateOne.new(NS, {_id: "b" * half}, BSON.new({"$set" => {"x" => 1}}), upsert: true),
-      ] of Mongo::ClientBulk::WriteModel
-      result = client.bulk_write(models, verbose_results: true, session: txn_session)
-      result.upserted_count.should eq 2
-      result.update_results.try(&.size).should eq 2
-      events.any? { |event| event.command_name == "getMore" }.should eq true
-      txn_session.commit_transaction
-    ensure
-      if txn = session
-        txn.end
+  unless ENV["TOPOLOGY"]? == "standalone"
+    it "8. drains getMore inside a transaction" do
+      client = open_client
+      events = [] of Mongo::Monitoring::Commands::CommandStartedEvent
+      session = nil.as(Mongo::Session::ClientSession?)
+      begin
+        hello = hello_or_pending(client)
+        subscribe_started(client, events)
+        drop_coll(client)
+        txn_session = client.start_session
+        session = txn_session
+        txn_session.start_transaction
+        half = hello.max_bson_object_size // 2
+        models = [
+          Mongo::ClientBulk::UpdateOne.new(NS, {_id: "a" * half}, BSON.new({"$set" => {"x" => 1}}), upsert: true),
+          Mongo::ClientBulk::UpdateOne.new(NS, {_id: "b" * half}, BSON.new({"$set" => {"x" => 1}}), upsert: true),
+        ] of Mongo::ClientBulk::WriteModel
+        result = client.bulk_write(models, verbose_results: true, session: txn_session)
+        result.upserted_count.should eq 2
+        result.update_results.try(&.size).should eq 2
+        events.any? { |event| event.command_name == "getMore" }.should eq true
+        txn_session.commit_transaction
+      ensure
+        if txn = session
+          txn.end
+        end
+        drop_coll(client)
+        client.close
       end
-      drop_coll(client)
-      client.close
     end
   end
 
