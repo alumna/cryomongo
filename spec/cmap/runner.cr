@@ -158,20 +158,34 @@ module Mongo::Cmap
       end
     end
 
-    private def cmap_uri(pool_options : JSON::Any?) : String
+    # One mongod/mongos, no replicaSet / loadBalanced. Shared with the admin
+    # client so failCommand on hello hits the same process the pool handshakes.
+    # Docker replica set often elects a primary that is not 27017; an admin
+    # client that still has replicaSet=rs0 would set the fail point there.
+    def self.direct_pool_base : String
+      if cached = @@direct_base
+        return cached
+      end
       uri = mongodb_uri_one_host(ENV["MONGODB_URI"])
-      extras = ["directConnection=true"]
-      # Pool tests talk to one host. replicaSet / loadBalanced would change topology.
       uri = strip_uri_option(uri, "replicaSet")
       uri = strip_uri_option(uri, "loadBalanced")
+      unless uri.downcase.includes?("directconnection=")
+        uri = mongodb_uri_with(uri, "directConnection=true")
+      end
+      @@direct_base = uri
+      uri
+    end
+
+    private def cmap_uri(pool_options : JSON::Any?) : String
+      extras = [] of String
       pool_options.try(&.as_h?).try(&.each do |key, value|
         next if key == "backgroundThreadIntervalMS"
         extras << "#{key}=#{json_option_value(value)}"
       end)
-      mongodb_uri_with(uri, extras.join("&"))
+      extras.empty? ? Runner.direct_pool_base : mongodb_uri_with(Runner.direct_pool_base, extras.join("&"))
     end
 
-    private def strip_uri_option(uri : String, name : String) : String
+    def self.strip_uri_option(uri : String, name : String) : String
       return uri unless uri.includes?('?')
       base, query = uri.split('?', 2)
       kept = query.split('&').reject { |part| part.downcase.starts_with?(name.downcase + "=") }
@@ -255,15 +269,17 @@ module Mongo::Cmap
     end
 
     def self.admin_client : Mongo::Client
-      @@admin ||= Mongo::Client.new(mongodb_uri_with(mongodb_uri_one_host(ENV["MONGODB_URI"]), "serverSelectionTimeoutMS=3000"))
+      @@admin ||= Mongo::Client.new(mongodb_uri_with(direct_pool_base, "serverSelectionTimeoutMS=3000"))
     end
 
     def self.close_admin_client : Nil
       @@admin.try(&.close)
       @@admin = nil
+      @@direct_base = nil
     end
 
     @@admin : Mongo::Client? = nil
+    @@direct_base : String? = nil
 
     private def error_matches?(expected : JSON::Any, actual : Exception) : Bool
       if type = expected["type"]?.try(&.as_s?)
