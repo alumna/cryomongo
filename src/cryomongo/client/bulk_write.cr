@@ -78,7 +78,10 @@ class Mongo::Client
     operation_id : Int64,
   ) : ClientBulk::WriteResult
     dummy = {ops: [] of BSON, ns_info: [] of BSON, options: {errors_only: true, ordered: true}}
-    selected = server_selection(Commands::BulkWrite, dummy, PRIMARY_READ_PREFERENCE, deadline)
+    # Honor a mongos transaction pin. A second pick() can land on the other
+    # mongos and return NoSuchTransaction (code 251, txnId -1) with
+    # TransientTransactionError instead of the targeted failPoint.
+    selected = session.server_description || server_selection(Commands::BulkWrite, dummy, PRIMARY_READ_PREFERENCE, deadline)
     max_batch = selected.max_write_batch_size
     max_batch = 100_000 if max_batch <= 0
     max_msg = selected.max_message_size_bytes
