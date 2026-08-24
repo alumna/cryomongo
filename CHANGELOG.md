@@ -32,11 +32,8 @@ Number of examples after 3.12: **905** (859 after 3.11 plus 34 Deprioritized sel
 
 GitHub Docker - Phase 3.9 (`CRYSTAL_WORKERS=2`): standalone **2:22 / 168 pending**, replica set **6:45 / 47 pending**, sharded **8:26 / 57 pending**, load-balanced **5:39 / 96 pending**. 0 failures, 0 errors. 
 
-<<<<<<< HEAD
-=======
-GitHub Docker - Phase 3.12: **905** examples, 0 failures, 0 errors. Standalone **2:59 / 167 pending**, replica set **7:45 / 45 pending**, sharded **12:20 / 56 pending**, load-balanced **6:35 / 102 pending**. Pending counts match 3.11. That run still had zlib first. After this change the CI URI is `compressors=snappy,zstd,zlib` (snappy first) and `Monitor#close` uses `interrupt_and_wake`. Local 3.12: standalone **2:55 / 167**, replica set **7:24 / 45**, load-balanced **6:28 / 102**.
+GitHub Docker - Phase 3.12 after close-wake + snappy-first: **905** examples, 0 failures, 0 errors. Standalone **1:59 / 167 pending**, replica set **4:26 / 45 pending**, sharded **6:56 / 56 pending**, load-balanced **4:24 / 102 pending**. The run before those two changes was 2:59 / 7:45 / 12:20 / 6:35. Pending counts match 3.11. Local 3.12 before close-wake: standalone **2:55 / 167**, replica set **7:24 / 45**, load-balanced **6:28 / 102**.
 
->>>>>>> db9a6483d3b48121971a55b4d72e6c8e14a6d3e0
 GitHub Docker - Phase 3.11: **859** examples, 0 failures, 0 errors. Standalone **2:55 / 167 pending**, replica set **7:25 / 45 pending**, sharded **9:24 / 56 pending**, load-balanced **6:26 / 102 pending**. cmap-format `failCommand` uses the same `directConnection` host as the pool. Native `mongo-topology.sh replicaset` waits for a PRIMARY, not only 3 data-bearing members.
 
 mongod 8.0 default awaitable hello wait is ~1s; test topologies set `minWaitForStreamingHelloMillis=0`. The awaitable socket extra is still at least 1s on non-mongos when the spec sum is under 1s.
