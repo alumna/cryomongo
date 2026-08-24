@@ -403,36 +403,15 @@ module Mongo::Unified::Operations
   end
 
   private def execute_find(args, target, session)
-    filter = BSON.new
-    sort = nil; skip = nil; limit = nil; batch_size = nil
-    collation = nil; hint = nil; allow_disk_use = nil; max_time_ms = nil
-    tailable = nil; await_data = nil
-
-    if args
-      filter = BSON.from_json(args["filter"].to_json) if args["filter"]?
-      sort = BSON.from_json(args["sort"].to_json) if args["sort"]?
-      skip = args["skip"]?.try(&.as_i)
-      limit = args["limit"]?.try(&.as_i)
-      batch_size = args["batchSize"]?.try(&.as_i)
-      collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-      hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-      allow_disk_use = args["allowDiskUse"]?.try(&.as_bool)
-      max_time_ms = args["maxTimeMS"]?.try(&.as_i64) || args["maxAwaitTimeMS"]?.try(&.as_i64)
-      tailable = args["tailable"]?.try(&.as_bool)
-      await_data = args["awaitData"]?.try(&.as_bool)
-      case args["cursorType"]?.try(&.as_s?)
-      when "tailable"
-        tailable = true
-      when "tailableAwait"
-        tailable = true
-        await_data = true
-      end
-    end
-    comment = args.try(&.["comment"]?).try { |c| json_to_bson_value(c) }
     if target.is_a?(Mongo::GridFS::Bucket)
+      filter = args && args["filter"]? ? BSON.from_json(args["filter"].to_json) : BSON.new
+      skip = args.try(&.["skip"]?).try(&.as_i)
+      limit = args.try(&.["limit"]?).try(&.as_i)
+      batch_size = args.try(&.["batchSize"]?).try(&.as_i)
+      max_time_ms = args.try(&.["maxTimeMS"]?).try(&.as_i64) || args.try(&.["maxAwaitTimeMS"]?).try(&.as_i64)
       return target.find(filter, skip: skip, limit: limit, batch_size: batch_size, max_time_ms: max_time_ms, timeout_ms: op_timeout_ms(args)).to_a
     end
-    target.as(Mongo::Collection).find(filter, sort: sort, skip: skip, limit: limit, batch_size: batch_size, collation: collation, hint: hint, allow_disk_use: allow_disk_use, max_time_ms: max_time_ms, comment: comment, let: op_let(args), session: session, tailable: tailable, await_data: await_data, timeout_ms: op_timeout_ms(args), timeout_mode: op_timeout_mode(args)).to_a
+    find_cursor(args, target, session).to_a
   end
 
   private def execute_find_one(args, target, session)
@@ -1087,9 +1066,19 @@ module Mongo::Unified::Operations
         e.is_a?(Mongo::Monitoring::CMAP::PoolClearedEvent)
       }
     end
+    if event["poolClosedEvent"]?
+      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::CMAP::PoolClosedEvent)
+      }
+    end
     if event["connectionCreatedEvent"]?
       return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
         e.is_a?(Mongo::Monitoring::CMAP::ConnectionCreatedEvent)
+      }
+    end
+    if event["connectionReadyEvent"]?
+      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::CMAP::ConnectionReadyEvent)
       }
     end
     if event["connectionClosedEvent"]?
@@ -1097,9 +1086,19 @@ module Mongo::Unified::Operations
         e.is_a?(Mongo::Monitoring::CMAP::ConnectionClosedEvent)
       }
     end
+    if event["connectionCheckOutStartedEvent"]?
+      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckOutStartedEvent)
+      }
+    end
     if event["connectionCheckedOutEvent"]?
       return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
         e.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckedOutEvent)
+      }
+    end
+    if event["connectionCheckOutFailedEvent"]?
+      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+        e.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckOutFailedEvent)
       }
     end
     if event["connectionCheckedInEvent"]?
@@ -1260,6 +1259,8 @@ module Mongo::Unified::Operations
     sort = nil; skip = nil; limit = nil; batch_size = nil
     collation = nil; hint = nil; allow_disk_use = nil; max_time_ms = nil
     comment = nil; tailable = nil; await_data = nil
+    projection = nil; max = nil; min = nil
+    return_key = nil; show_record_id = nil
     if args
       filter = BSON.from_json(args["filter"].to_json) if args["filter"]?
       sort = BSON.from_json(args["sort"].to_json) if args["sort"]?
@@ -1273,6 +1274,11 @@ module Mongo::Unified::Operations
       comment = args["comment"]?.try { |c| json_to_bson_value(c) }
       tailable = args["tailable"]?.try(&.as_bool)
       await_data = args["awaitData"]?.try(&.as_bool)
+      projection = BSON.from_json(args["projection"].to_json) if args["projection"]?
+      max = BSON.from_json(args["max"].to_json) if args["max"]?
+      min = BSON.from_json(args["min"].to_json) if args["min"]?
+      return_key = args["returnKey"]?.try(&.as_bool)
+      show_record_id = args["showRecordId"]?.try(&.as_bool)
       case args["cursorType"]?.try(&.as_s?)
       when "tailable"
         tailable = true
@@ -1281,7 +1287,7 @@ module Mongo::Unified::Operations
         await_data = true
       end
     end
-    target.as(Mongo::Collection).find(filter, sort: sort, skip: skip, limit: limit, batch_size: batch_size, collation: collation, hint: hint, allow_disk_use: allow_disk_use, max_time_ms: max_time_ms, comment: comment, let: op_let(args), session: session, tailable: tailable, await_data: await_data, timeout_ms: op_timeout_ms(args), timeout_mode: op_timeout_mode(args))
+    target.as(Mongo::Collection).find(filter, sort: sort, skip: skip, limit: limit, batch_size: batch_size, collation: collation, hint: hint, allow_disk_use: allow_disk_use, max_time_ms: max_time_ms, comment: comment, let: op_let(args), session: session, tailable: tailable, await_data: await_data, timeout_ms: op_timeout_ms(args), timeout_mode: op_timeout_mode(args), projection: projection, max: max, min: min, return_key: return_key, show_record_id: show_record_id)
   end
 
   private def execute_drop_index(args, target, session)

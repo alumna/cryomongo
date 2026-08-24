@@ -95,6 +95,10 @@ module Mongo
   class Error::PoolCleared < Error::Network
   end
 
+  # Checkout on a closed pool. Not a network error.
+  class Error::PoolClosed < Error::Client
+  end
+
   class Error::Connection < Error::Client
   end
 

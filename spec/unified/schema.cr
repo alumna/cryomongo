@@ -38,6 +38,7 @@ module Mongo::Unified
     property useMultipleMongoses : Bool?
     # CSOT: wait until minPoolSize sockets exist, up to this many milliseconds.
     property awaitMinPoolSizeMS : Int32?
+    property observeLogMessages : Hash(String, String)?
 
     property client : String?
     property databaseName : String?
@@ -87,6 +88,7 @@ module Mongo::Unified
     property runOnRequirements : Array(RunOnRequirement)?
     property operations : Array(Operation)
     property expectEvents : JSON::Any?
+    property expectLogMessages : JSON::Any?
     property outcome : Array(CollectionData)?
   end
 

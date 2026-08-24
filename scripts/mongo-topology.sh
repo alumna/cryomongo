@@ -164,14 +164,16 @@ wait_rs_members() {
     if mongosh --port 27017 --quiet --eval '
       const s = rs.status();
       if (!s.ok) quit(1);
-      const n = (s.members || []).filter(m => m.stateStr === "PRIMARY" || m.stateStr === "SECONDARY").length;
-      quit(n >= 3 ? 0 : 1);
+      const members = s.members || [];
+      const n = members.filter(m => m.stateStr === "PRIMARY" || m.stateStr === "SECONDARY").length;
+      const primary = members.some(m => m.stateStr === "PRIMARY");
+      quit(primary && n >= 3 ? 0 : 1);
     ' >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
   done
-  echo "timed out waiting for 3 replica set members" >&2
+  echo "timed out waiting for 3 replica set members with a primary" >&2
   return 1
 }
 

@@ -13,7 +13,7 @@ This is a fork of `elbywan/cryomongo`. The goal is to make the driver ready for 
 
 It is **0.x** pre-release. **Phase 1, Phase 2 and Phase 3** of [ROADMAP.md](ROADMAP.md) are done. Core CRUD, sessions and transactions work on MongoDB 8.0. **1.0** waits on client-side encryption (Phase 4). Cloud auth (Phase 5: AWS / OIDC) for post 1.0.
 
-The driver is ready for **core CRUD, sessions, and transactions** on MongoDB 8.0. Remaining 8.0 work is [ROADMAP.md](ROADMAP.md) Phase 3.11–3.14.
+The driver is ready for **core CRUD, sessions, and transactions** on MongoDB 8.0. Remaining 8.0 work is [ROADMAP.md](ROADMAP.md) Phase 3.12–3.14.
 
 What is already in place:
 
@@ -44,11 +44,12 @@ The driver is **0.x**. It is ready for core CRUD, sessions, and transactions on 
 - zlib OP_COMPRESSED (`compressors=zlib`). Pool map lock is not nested with handshake I/O.
 - Unified `pool-cleared-error.json`. Socket timeouts after handshake do not mark the server Unknown.
 - CI and local topologies create user `bob` / `pwd123` on `admin` (no `--auth`). `auth: true` UTF runs. Speculative auth is on the first application hello. Monitor sockets do not authenticate (SDAM).
+- Spec logs: `MONGODB_LOG_COMMAND`, `MONGODB_LOG_TOPOLOGY`, `MONGODB_LOG_CONNECTION`, `MONGODB_LOG_ALL`, `MONGODB_LOG_PATH`, `MONGODB_LOG_MAX_DOCUMENT_LENGTH`. CMAP subscribe. Official CMAP JSON and CLAM UTF run.
 
-**Not done yet (MongoDB 8.0). See [ROADMAP.md](ROADMAP.md) Phase 3.11–3.14 and [FIXES.md](FIXES.md).**
-- Unified SDAM still skipped: SDAM logging. `minPoolSize-error.json`, `hello-command-error.json`, `hello-network-error.json`, `serverMonitoringMode.json`, handshake backpressure files, `interruptInUse-pool-clear.json`, `find-shutdown-error.json`, `insert-shutdown-error.json`, `rediscover-quickly-after-step-down.json`, replica-set topology-lifecycle, and `auth: true` handshake / SDAM auth files now run. Replica set topologies are 3 members.
-- UTF ops still `SKIP_TEST`: search-index ops (Atlas). Client `bulkWrite` now runs.
-- snappy / zstd. TLS key-file password and OCSP flags are parsed and unused. Official CMAP JSON is not copied. CLAM is 1 of 23 files. Remaining official index-management JSON is Atlas Search (not copied).
+**Not done yet (MongoDB 8.0). See [ROADMAP.md](ROADMAP.md) Phase 3.12–3.14 and [FIXES.md](FIXES.md).**
+- UTF ops still `SKIP_TEST`: search-index ops (Atlas).
+- snappy / zstd. TLS key-file password and OCSP flags are parsed and unused. Remaining official index-management JSON is Atlas Search (not copied).
+- Load-balanced CSOT `killCursors` after a dead pin. Two mongos `serviceId`s from HAProxy for one UTF test.
 - CSFLE (`libmongocrypt`) is Phase 4. AWS / OIDC is Phase 5.
 
 **Out of scope**
@@ -650,12 +651,33 @@ sdam_subscription = client.subscribe_sdam { |event|
   end
 }
 
+# 3. Connection pool (CMAP) subscriber
+# Tracks pool create / ready / clear / close and checkout.
+
+cmap_subscription = client.subscribe_cmap { |event|
+  case event
+  when Mongo::Monitoring::CMAP::PoolClearedEvent
+    Log.info { "POOL.#{event.address} CLEARED interrupt=#{event.interrupt_in_use_connections}" }
+  when Mongo::Monitoring::CMAP::ConnectionCheckedOutEvent
+    Log.info { "POOL.#{event.address} CHECKED OUT id=#{event.connection_id}" }
+  when Mongo::Monitoring::CMAP::ConnectionClosedEvent
+    Log.info { "POOL.#{event.address} CLOSED id=#{event.connection_id} reason=#{event.reason}" }
+  end
+}
+
 # Make some queries…
 client["database_name"]["collection_name"].find({ hello: "world" })
 
 # …and eventually at some point, unsubscribe the loggers.
 client.unsubscribe_commands(cmd_subscription)
 client.unsubscribe_sdam(sdam_subscription)
+client.unsubscribe_cmap(cmap_subscription)
+```
+
+Optional spec logs (off unless you set env). `MONGODB_LOG_ALL=debug` turns every component on. Per component: `MONGODB_LOG_COMMAND`, `MONGODB_LOG_TOPOLOGY`, `MONGODB_LOG_CONNECTION` (`debug` is the usual value). `MONGODB_LOG_PATH` is `stdout`, `stderr`, or a file (default stderr). `MONGODB_LOG_MAX_DOCUMENT_LENGTH` truncates command and reply JSON (default 1000). `MONGODB_LOG_SERVER_SELECTION` is accepted; this driver does not emit those messages yet.
+
+```crystal
+# Example: MONGODB_LOG_COMMAND=debug MONGODB_LOG_PATH=stderr crystal run app.cr
 ```
 
 **Links**

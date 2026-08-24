@@ -32,11 +32,9 @@ class Mongo::Connection::Pool(T)
   @idle = Set(T).new
   # connections waiting to be stablished (they are not in *@idle* nor in *@total*)
   @inflight : Int32
-  # CMAP: paused until a monitor check marks the pool ready. Closed is terminal.
+  # CMAP paused: minPoolSize fill must not run. Checkout while paused raises
+  # PoolClearedError (does not mark the server Unknown).
   @paused : Bool = true
-  # After the first ready(), a later clear rejects checkout (CMAP). Before that,
-  # checkout may handshake an Unknown seed so insert does not wait out selection.
-  @ready_once : Bool = false
   @closed : Bool = false
   # One background fiber fills minPoolSize after ready.
   @populate_running : Bool = false
@@ -50,6 +48,13 @@ class Mongo::Connection::Pool(T)
   @service_counts = Hash(BSON::ObjectId, Int32).new
   # Checked-out purpose, keyed by connection_id (Connection is a struct).
   @in_use = Hash(Int64, InUse).new
+  # Per-pool CMAP connection ids start at 1.
+  @next_connection_id : Int64 = 1
+  # How many sockets may handshake at once.
+  @max_connecting : Int32
+
+  # CMAP ConnectionClosed events for sockets discarded during checkout (idle / stale).
+  @pending_closed = [] of {Int64, String}
 
   # Sync state
 
@@ -58,9 +63,10 @@ class Mongo::Connection::Pool(T)
   # global pool mutex
   @mutex : Sync::Mutex
 
+  # factory(connection_id, populate): populate is true for minPoolSize fill.
   def initialize(@initial_pool_size = 1, @max_pool_size = 0, @max_idle_pool_size = 1, @checkout_timeout = 5.0,
-                 @max_idle_time : Time::Span? = nil,
-                 &@factory : -> T)
+                 @max_idle_time : Time::Span? = nil, @max_connecting : Int32 = 2,
+                 &@factory : Int64, Bool -> T)
     @availability_channel = Channel(Nil).new
     @inflight = 0
     @mutex = Sync::Mutex.new
@@ -73,8 +79,8 @@ class Mongo::Connection::Pool(T)
     sync { @closed }
   end
 
-  # CMAP paused: minPoolSize fill must not run. Checkout after the first ready
-  # raises PoolClearedError. Checkout before that may still handshake.
+  # CMAP paused: minPoolSize fill must not run. Checkout while paused raises
+  # PoolClearedError and must not mark the server Unknown.
   def paused? : Bool
     sync { @paused }
   end
@@ -85,7 +91,6 @@ class Mongo::Connection::Pool(T)
       return false if @closed
       return false unless @paused
       @paused = false
-      @ready_once = true
       true
     end
   end
@@ -105,13 +110,32 @@ class Mongo::Connection::Pool(T)
     end
   end
 
-  # close all resources in the pool
-  def close : Nil
+  # Mark closed. Destroy idle sockets. In-use sockets stay until check-in or drain.
+  # Returns ids to emit ConnectionClosedEvent with reason poolClosed.
+  def close : Array(Int64)
+    destroyed = [] of Int64
     sync do
+      return destroyed if @closed
       @closed = true
       @paused = true
       @availability_channel.close
-      @total.each &.close
+      @idle.to_a.each do |conn|
+        destroyed << conn.connection_id
+        conn.close
+        remove(conn)
+      end
+    end
+    destroyed
+  end
+
+  # Client shutdown: close remaining in-use sockets after close().
+  def drain : Array(Int64)
+    destroyed = [] of Int64
+    sync do
+      @total.each do |conn|
+        destroyed << conn.connection_id
+        conn.close
+      end
       @total.clear
       @idle.clear
       @idle_since.clear
@@ -119,6 +143,7 @@ class Mongo::Connection::Pool(T)
       @service_generations.clear
       @service_counts.clear
     end
+    destroyed
   end
 
   record Stats,
@@ -169,6 +194,7 @@ class Mongo::Connection::Pool(T)
         if interrupt_in_use
           to_interrupt = checked_out_for_interrupt(cutoff, sid)
         end
+        close_stale_idle(sid)
       else
         emit = !@paused
         cutoff = @generation
@@ -178,6 +204,7 @@ class Mongo::Connection::Pool(T)
         if interrupt_in_use
           to_interrupt = checked_out_for_interrupt(cutoff, nil)
         end
+        close_stale_idle(nil)
       end
       # Wake waiters. They see the new generation (or a closed channel) and
       # raise PoolCleared instead of waiting for the dead socket.
@@ -190,25 +217,28 @@ class Mongo::Connection::Pool(T)
 
   def checkout(wait : Time::Span? = nil) : T
     res = sync do
-      raise Mongo::Error::PoolCleared.new("Connection pool was cleared") if @closed
-      # After a clear: retryable PoolClearedError. Must not mark the server Unknown.
-      # Before the first ready, handshake an Unknown seed (replica set insert).
-      raise Mongo::Error::PoolCleared.new("Connection pool was cleared") if reject_paused?
+      raise closed_error if @closed
+      raise paused_error if @paused
       start_gen = @generation
 
       resource = nil
 
       until resource
-        raise Mongo::Error::PoolCleared.new("Connection pool was cleared") if @closed
-        raise Mongo::Error::PoolCleared.new("Connection pool was cleared") if reject_paused?
+        raise closed_error if @closed
+        raise paused_error if @paused
         resource = if @idle.empty?
-                     if can_increase_pool?
+                     if can_create_connection?
+                       id = take_connection_id
                        @inflight += 1
                        begin
-                         created = unsync { @factory.call }
-                         if @closed || reject_paused?
+                         created = unsync { @factory.call(id, false) }
+                         if @closed
                            created.close
-                           raise Mongo::Error::PoolCleared.new("Connection pool was cleared")
+                           raise closed_error
+                         end
+                         if @paused
+                           created.close
+                           raise paused_error
                          end
                          created.generation = generation_for(created.service_id)
                          add_service_count(created.service_id)
@@ -216,18 +246,19 @@ class Mongo::Connection::Pool(T)
                          created
                        ensure
                          @inflight -= 1
+                         signal_available
                        end
                      else
                        # Full clear while waiting: CMAP waiters get PoolClearedError.
                        if @generation != start_gen
-                         raise Mongo::Error::PoolCleared.new("Connection pool was cleared")
+                         raise paused_error
                        end
                        timed_out = false
                        unsync { timed_out = !wait_for_available(wait) }
-                       raise Mongo::Error::PoolCleared.new("Connection pool was cleared") if @closed
-                       raise Mongo::Error::PoolCleared.new("Connection pool was cleared") if reject_paused?
+                       raise closed_error if @closed
+                       raise paused_error if @paused
                        if @generation != start_gen
-                         raise Mongo::Error::PoolCleared.new("Connection pool was cleared")
+                         raise paused_error
                        end
                        raise wait_queue_error if timed_out
                        pick_available
@@ -236,9 +267,16 @@ class Mongo::Connection::Pool(T)
                      pick_available
                    end
 
-        if resource && (idle_too_long?(resource) || stale_unlocked?(resource))
-          discard(resource)
-          resource = nil
+        if resource
+          reason = if stale_unlocked?(resource)
+                     "stale"
+                   elsif idle_too_long?(resource)
+                     "idle"
+                   end
+          if reason
+            discard(resource, reason)
+            resource = nil
+          end
         end
       end
 
@@ -274,14 +312,15 @@ class Mongo::Connection::Pool(T)
   # or `selected` will be a new resource and `is_candidate` == `false`
   def checkout_some(candidates : Enumerable(WeakRef(T))) : {T, Bool}
     sync do
-      raise Mongo::Error::PoolCleared.new("Connection pool was cleared") if @closed
-      raise Mongo::Error::PoolCleared.new("Connection pool was cleared") if reject_paused?
+      raise closed_error if @closed
+      raise paused_error if @paused
 
       candidates.each do |ref|
         resource = ref.value
         if resource && is_available?(resource)
           if idle_too_long?(resource) || stale_unlocked?(resource)
-            discard(resource)
+            reason = stale_unlocked?(resource) ? "stale" : "idle"
+            discard(resource, reason)
             next
           end
           delete_idle(resource)
@@ -371,7 +410,7 @@ class Mongo::Connection::Pool(T)
   end
 
   private def build_resource : T
-    resource = @factory.call
+    resource = @factory.call(take_connection_id, false)
     resource.generation = generation_for(resource.service_id)
     add_service_count(resource.service_id)
     @total << resource
@@ -393,7 +432,21 @@ class Mongo::Connection::Pool(T)
   end
 
   private def reject_paused? : Bool
-    @paused && @ready_once
+    @paused
+  end
+
+  private def closed_error : Mongo::Error::PoolClosed
+    Mongo::Error::PoolClosed.new("Attempted to check out a connection from closed connection pool")
+  end
+
+  private def paused_error : Mongo::Error::PoolCleared
+    Mongo::Error::PoolCleared.new("Connection pool was cleared")
+  end
+
+  private def take_connection_id : Int64
+    id = @next_connection_id
+    @next_connection_id += 1
+    id
   end
 
   # Checked-out sockets whose generation is at most cutoff (generation before
@@ -442,7 +495,7 @@ class Mongo::Connection::Pool(T)
       end
     end
     Mongo::Error::Connection.new(
-      "Timeout waiting for connection from the connection pool. maxPoolSize: #{@max_pool_size}, connections in use by cursors: #{cursors}, connections in use by transactions: #{txns}, connections in use by other operations: #{other}"
+      "Timed out while checking out a connection from connection pool. maxPoolSize: #{@max_pool_size}, connections in use by cursors: #{cursors}, connections in use by transactions: #{txns}, connections in use by other operations: #{other}"
     )
   end
 
@@ -484,7 +537,29 @@ class Mongo::Connection::Pool(T)
     end
   end
 
-  private def discard(resource : T)
+  # Checkout discarded idle / stale sockets. Client emits ConnectionClosedEvent.
+  def take_closed : Array({Int64, String})
+    sync do
+      return [] of {Int64, String} if @pending_closed.empty?
+      events = @pending_closed
+      @pending_closed = [] of {Int64, String}
+      events
+    end
+  end
+
+  # Available sockets become stale on clear. Close them now so minPoolSize fill
+  # can create new ones and so UTF sees ConnectionClosed without a checkout.
+  private def close_stale_idle(service_id : BSON::ObjectId?) : Nil
+    @idle.to_a.each do |conn|
+      next if service_id && conn.service_id != service_id
+      @pending_closed << {conn.connection_id, "stale"}
+      conn.close
+      remove(conn)
+    end
+  end
+
+  private def discard(resource : T, reason : String)
+    @pending_closed << {resource.connection_id, reason}
     resource.close
     remove(resource)
     signal_available
@@ -496,6 +571,7 @@ class Mongo::Connection::Pool(T)
     when @availability_channel.send nil
     else
     end
+  rescue Channel::ClosedError
   end
 
   private def populate_min(n : Int32, &on_error : Exception ->) : Nil
@@ -504,24 +580,25 @@ class Mongo::Connection::Pool(T)
       limit = @max_pool_size
     end
     loop do
-      started = sync do
-        if @closed || @paused || @total.size + @inflight >= limit || !can_increase_pool?
-          false
+      id = sync do
+        if @closed || @paused || @total.size + @inflight >= limit || !can_create_connection?
+          nil
         else
+          taken = take_connection_id
           @inflight += 1
-          true
+          taken
         end
       end
-      break unless started
+      break unless id
       created = nil.as(T?)
       begin
-        created = @factory.call
+        created = @factory.call(id, true)
       rescue error
         sync { @inflight -= 1 }
+        signal_available
         on_error.call(error)
         break
       end
-      keep = false
       sync do
         @inflight -= 1
         if created_conn = created
@@ -533,16 +610,16 @@ class Mongo::Connection::Pool(T)
             @total << created_conn
             @idle << created_conn
             mark_idle(created_conn)
-            keep = true
           end
         end
       end
-      signal_available if keep
+      signal_available
     end
   end
 
-  private def can_increase_pool?
-    @max_pool_size == 0 || @total.size + @inflight < @max_pool_size
+  private def can_create_connection? : Bool
+    under_max = @max_pool_size == 0 || @total.size + @inflight < @max_pool_size
+    under_max && @inflight < @max_connecting
   end
 
   private def can_increase_idle_pool

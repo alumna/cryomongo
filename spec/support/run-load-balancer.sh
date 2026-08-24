@@ -51,10 +51,17 @@ need_haproxy() {
   fi
 }
 
+remove_sock() {
+  # A leftover sock owned by root (prior sudo start) blocks bind.
+  local sock="${TMP}/haproxy.sock"
+  rm -f "$sock" 2>/dev/null || sudo rm -f "$sock" 2>/dev/null || true
+}
+
 start() {
   need_haproxy
   mkdir -p "$TMP"
   stop >/dev/null 2>&1 || true
+  remove_sock
 
   cat > "$CONF" <<EOF
 global
@@ -112,6 +119,7 @@ stop() {
     kill -USR1 "$(cat "$PIDFILE")" 2>/dev/null || true
     rm -f "$PIDFILE" "$CONF"
   fi
+  remove_sock
 }
 
 case "${1:-}" in

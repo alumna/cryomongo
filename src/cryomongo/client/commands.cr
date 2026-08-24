@@ -219,6 +219,9 @@ class Mongo::Client
     command_started = false
     command_name = command.name
     address = connection.server_description.address
+    database_name = ""
+    want_apm = @commands_observable.has_subscribers?
+    want_log = want_command_logs?
 
     deadline.try(&.check!)
     remaining = if (d = deadline) && !d.infinite?
@@ -293,35 +296,55 @@ class Mongo::Client
 
     # Send the command.
     connection.send(op_msg, command) { |message|
-      # Monitor by sending a CommandStartedEvent
-      if @commands_observable.has_subscribers?
+      if want_apm || want_log
         request_id = message.header.request_id.to_i64
-
         command_started = true
-        @commands_observable.broadcast(Monitoring::Commands::CommandStartedEvent.new(
-          command_name: command_name,
-          request_id: request_id,
-          operation_id: operation_id,
-          address: address,
-          command: op_msg.safe_payload(command),
-          database_name: op_msg.body["$db"].as(String),
-          service_id: connection.service_id
-        ))
+        payload = op_msg.safe_payload(command)
+        if db = op_msg.body["$db"]?.try(&.as?(String))
+          database_name = db
+        end
+        if want_apm
+          @commands_observable.broadcast(Monitoring::Commands::CommandStartedEvent.new(
+            command_name: command_name,
+            request_id: request_id,
+            operation_id: operation_id,
+            address: address,
+            command: payload,
+            database_name: database_name,
+            service_id: connection.service_id,
+            driver_connection_id: connection.connection_id,
+            server_connection_id: connection.server_connection_id
+          ))
+        end
+        log_command_started(
+          command_name, database_name, request_id, operation_id, address, payload,
+          connection.connection_id, connection.server_connection_id, connection.service_id
+        )
       end
     }
 
     # If the write is unacknowledged - early return.
     if unacknowledged
-      if @commands_observable.has_subscribers?
-        @commands_observable.broadcast(Monitoring::Commands::CommandSucceededEvent.new(
-          command_name: command_name,
-          request_id: request_id,
-          operation_id: operation_id,
-          address: address,
-          duration: duration_start.elapsed,
-          reply: BSON.new({ok: 1}),
-          service_id: connection.service_id
-        ))
+      if want_apm || want_log
+        reply = BSON.new({ok: 1})
+        duration = duration_start.elapsed
+        if want_apm
+          @commands_observable.broadcast(Monitoring::Commands::CommandSucceededEvent.new(
+            command_name: command_name,
+            request_id: request_id,
+            operation_id: operation_id,
+            address: address,
+            duration: duration,
+            reply: reply,
+            service_id: connection.service_id,
+            driver_connection_id: connection.connection_id,
+            server_connection_id: connection.server_connection_id
+          ))
+        end
+        log_command_succeeded(
+          command_name, database_name, request_id, operation_id, address, duration, reply,
+          connection.connection_id, connection.server_connection_id, connection.service_id
+        )
       end
 
       return nil
@@ -333,32 +356,51 @@ class Mongo::Client
       op_msg = message.contents.as(Messages::OpMsg)
       duration = duration_start.elapsed
       reply_error = op_msg.error?
-      # bulkWrite ok:1 plus writeConcernError is a success for APM. The caller drains the cursor, then raises at the end.
-      bulk_wce = command == Commands::BulkWrite && reply_error.is_a?(Error::WriteConcern)
+      # CLAM: ok:1 is CommandSucceeded even when writeErrors or writeConcernError is present.
+      # bulkWrite ok:1 plus writeConcernError is also a success for APM. The caller drains the cursor, then raises at the end.
+      command_ok = op_msg.valid?
 
       # Monitor.
-      if @commands_observable.has_subscribers?
-        if reply_error && !bulk_wce
-          @commands_observable.broadcast(Monitoring::Commands::CommandFailedEvent.new(
-            command_name: command_name,
-            request_id: message.header.response_to.to_i64,
-            operation_id: operation_id,
-            address: address,
-            duration: duration,
-            reply: op_msg.safe_payload(command),
-            failure: Monitoring::Redact.failure(command_name, reply_error, op_msg.body),
-            service_id: connection.service_id
-          ))
+      if want_apm || want_log
+        payload = op_msg.safe_payload(command)
+        if reply_error && !command_ok
+          failure = Monitoring::Redact.failure(command_name, reply_error, op_msg.body)
+          if want_apm
+            @commands_observable.broadcast(Monitoring::Commands::CommandFailedEvent.new(
+              command_name: command_name,
+              request_id: message.header.response_to.to_i64,
+              operation_id: operation_id,
+              address: address,
+              duration: duration,
+              reply: payload,
+              failure: failure,
+              service_id: connection.service_id,
+              driver_connection_id: connection.connection_id,
+              server_connection_id: connection.server_connection_id
+            ))
+          end
+          log_command_failed(
+            command_name, database_name, message.header.response_to.to_i64, operation_id, address, duration, failure,
+            connection.connection_id, connection.server_connection_id, connection.service_id
+          )
         else
-          @commands_observable.broadcast(Monitoring::Commands::CommandSucceededEvent.new(
-            command_name: command_name,
-            request_id: message.header.response_to.to_i64,
-            operation_id: operation_id,
-            address: address,
-            duration: duration,
-            reply: op_msg.safe_payload(command),
-            service_id: connection.service_id
-          ))
+          if want_apm
+            @commands_observable.broadcast(Monitoring::Commands::CommandSucceededEvent.new(
+              command_name: command_name,
+              request_id: message.header.response_to.to_i64,
+              operation_id: operation_id,
+              address: address,
+              duration: duration,
+              reply: payload,
+              service_id: connection.service_id,
+              driver_connection_id: connection.connection_id,
+              server_connection_id: connection.server_connection_id
+            ))
+          end
+          log_command_succeeded(
+            command_name, database_name, message.header.response_to.to_i64, operation_id, address, duration, payload,
+            connection.connection_id, connection.server_connection_id, connection.service_id
+          )
         end
       end
     end
@@ -426,17 +468,27 @@ class Mongo::Client
   rescue error
     started_name = command_name
     started_address = address
-    if command_started && started_name && started_address && @commands_observable.has_subscribers? && error.is_a?(NetworkError)
-      @commands_observable.broadcast(Monitoring::Commands::CommandFailedEvent.new(
-        command_name: started_name,
-        request_id: request_id || 0_i64,
-        operation_id: operation_id,
-        address: started_address,
-        duration: duration_start.try(&.elapsed) || Time::Span.zero,
-        reply: BSON.new,
-        failure: error,
-        service_id: connection.service_id
-      ))
+    if command_started && started_name && started_address && error.is_a?(NetworkError)
+      duration = duration_start.try(&.elapsed) || Time::Span.zero
+      failure = error
+      if want_apm
+        @commands_observable.broadcast(Monitoring::Commands::CommandFailedEvent.new(
+          command_name: started_name,
+          request_id: request_id || 0_i64,
+          operation_id: operation_id,
+          address: started_address,
+          duration: duration,
+          reply: BSON.new,
+          failure: failure,
+          service_id: connection.service_id,
+          driver_connection_id: connection.connection_id,
+          server_connection_id: connection.server_connection_id
+        ))
+      end
+      log_command_failed(
+        started_name, database_name || "", request_id || 0_i64, operation_id, started_address, duration, failure,
+        connection.connection_id, connection.server_connection_id, connection.service_id
+      )
     end
     if error.is_a?(NetworkError)
       # Mark the socket dead so checkin uses reason "error", not "stale".

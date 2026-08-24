@@ -653,4 +653,15 @@ class Mongo::SDAM::TopologyDescription
   def supports_cluster_time?
     !@type.unknown? && !@type.single?
   end
+
+  # UTF logging only checks that previousDescription / newDescription exist.
+  def to_s(io : IO) : Nil
+    io << "TopologyDescription type=" << @type
+    io << " servers=["
+    @servers.each_with_index do |server, i|
+      io << ", " if i > 0
+      io << server.address << '=' << server.type
+    end
+    io << ']'
+  end
 end

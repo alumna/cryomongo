@@ -89,7 +89,7 @@ Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CR
 
 ## Remaining work (MongoDB 8.0, toward production grade)
 
-Phases 1–3 are done. Local Phase **3.8** `crystal spec` is green (**785** examples). Push a PR so GitHub Docker confirms the matrix (replica set is **3** members). The driver is production-capable for core 8.0 (CRUD, sessions, transactions). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). The **3.x** sub-phases below close remaining 8.0 holes. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
+Phases 1–3 are done. Local Phase **3.11** `crystal spec` is **859** examples (802 after 3.10 plus 22 CLAM, 2 CMAP UTF, 33 cmap-format). Push a PR so GitHub Docker confirms the matrix (replica set is **3** members). The driver is production-capable for core 8.0 (CRUD, sessions, transactions). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). Remaining 8.0 holes are Phase **3.12–3.14**. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
 
 ### Out of scope until the user asks
 
@@ -110,7 +110,7 @@ Foundation for later CMAP / SDAM files. Create the pool when a monitor check fin
 - [x] Un-skip `minPoolSize-error.json` (standalone).
 - [x] Honest README: drop the lone BETA. Keep 0.x. Core CRUD / sessions / transactions on MongoDB 8.0.
 
-`pool-clear-min-pool-size-error.json` non-auth test runs (3.4). The auth test runs in 3.10 when the URI has credentials (standalone). After the first `poolReady`, checkout while paused raises `PoolClearedError` (3.5). Before that, checkout may still handshake an Unknown seed. Official CMAP JSON copy is 3.11.
+`pool-clear-min-pool-size-error.json` non-auth test runs (3.4). The auth test runs in 3.10 when the URI has credentials (standalone). After the first `poolReady`, checkout while paused raises `PoolClearedError` (3.5). Before that, checkout may still handshake an Unknown seed. Official CMAP JSON copy is 3.11 (done).
 
 GitHub Docker `replicaset` is **3** members (`scripts/docker-topology.sh`), same as local `rs0`. `replicaset-emit-topology-changed-before-close.json` runs (3.7).
 
@@ -185,9 +185,11 @@ CI creates user `bob` / `pwd123` on `admin` (no `--auth`). The URI has credentia
 
 ### Phase 3.11 — SDAM / CMAP logging and remaining official JSON
 
-- [ ] SDAM / CMAP log messages. Un-skip `logging-standalone.json`, `logging-replicaset.json`, `logging-sharded.json`, `logging-loadbalanced.json`.
-- [ ] CLAM UTF: match `reply` on succeeded / failed events. Copy the other 22 of 23 CLAM files as matching allows.
-- [ ] Copy official CMAP JSON (35 files, none copied) after 3.1 and 3.5 exist.
+- [x] SDAM / CMAP log messages. Un-skip `logging-standalone.json`, `logging-replicaset.json`, `logging-sharded.json`, `logging-loadbalanced.json`.
+- [x] CLAM UTF: match `reply` on succeeded / failed events. Copy the other 22 of 23 CLAM files as matching allows.
+- [x] Copy official CMAP JSON (33 cmap-format + 2 UTF) after 3.1 and 3.5 exist.
+
+Env: `MONGODB_LOG_COMMAND`, `MONGODB_LOG_TOPOLOGY`, `MONGODB_LOG_CONNECTION`, `MONGODB_LOG_ALL`, `MONGODB_LOG_PATH`, `MONGODB_LOG_MAX_DOCUMENT_LENGTH`. `serverSelection` is parsed and unused. Write errors with `ok: 1` emit CommandSucceeded. Client close emits `ServerClosedEvent` before the Unknown topology change.
 
 ### Phase 3.12 — URI, compression, sessions, IO, load-balancer leftovers
 

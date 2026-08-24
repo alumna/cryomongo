@@ -11,6 +11,7 @@ module Mongo::Unified
     property command_events = Hash(String, Array(Mongo::Monitoring::Commands::Event)).new
     property sdam_events = Hash(String, Array(Mongo::Monitoring::SDAM::Event)).new
     property cmap_events = Hash(String, Array(Mongo::Monitoring::CMAP::Event)).new
+    property log_messages = Hash(String, Array(Mongo::Logging::Message)).new
 
     def command_started_events
       command_events.transform_values { |events|

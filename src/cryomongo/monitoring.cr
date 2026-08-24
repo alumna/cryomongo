@@ -77,6 +77,10 @@ module Mongo::Monitoring
         getter operation_id : Int64?
         # Returns the server address.
         getter address : String
+        # Driver pool connection id (CMAP).
+        getter driver_connection_id : Int64?
+        # Server connectionId from hello. Nil until handshake finishes.
+        getter server_connection_id : Int64?
       end
     end
 
@@ -90,7 +94,7 @@ module Mongo::Monitoring
       getter service_id : BSON::ObjectId?
 
       # :nodoc:
-      def initialize(@command_name, @request_id, @address, @command, @database_name, @operation_id = nil, @service_id = nil)
+      def initialize(@command_name, @request_id, @address, @command, @database_name, @operation_id = nil, @service_id = nil, @driver_connection_id = nil, @server_connection_id = nil)
       end
     end
 
@@ -104,7 +108,7 @@ module Mongo::Monitoring
       getter service_id : BSON::ObjectId?
 
       # :nodoc:
-      def initialize(@command_name, @request_id, @address, @duration, @reply, @operation_id = nil, @service_id = nil)
+      def initialize(@command_name, @request_id, @address, @duration, @reply, @operation_id = nil, @service_id = nil, @driver_connection_id = nil, @server_connection_id = nil)
       end
     end
 
@@ -120,7 +124,7 @@ module Mongo::Monitoring
       getter service_id : BSON::ObjectId?
 
       # :nodoc:
-      def initialize(@command_name, @request_id, @address, @duration, @failure, @reply, @operation_id = nil, @service_id = nil)
+      def initialize(@command_name, @request_id, @address, @duration, @failure, @reply, @operation_id = nil, @service_id = nil, @driver_connection_id = nil, @server_connection_id = nil)
       end
     end
   end
