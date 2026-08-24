@@ -16,9 +16,28 @@ module Mongo::SDAM::Selector
     *,
     write : Bool = false,
     heartbeat_frequency : Time::Span = DEFAULT_HEARTBEAT,
+    deprioritized : Array(String)? = nil,
   ) : Array(ServerDescription)
     validate_max_staleness!(topology_type, servers, read_preference, heartbeat_frequency)
 
+    found = suitable_for(topology_type, servers, read_preference, write, heartbeat_frequency)
+    list = deprioritized
+    return found if list.nil? || list.empty?
+
+    # Spec: drop deprioritized addresses first, then select. If that list is
+    # empty, select again from the full list.
+    remaining = servers.reject { |server| list.includes?(server.address) }
+    filtered = suitable_for(topology_type, remaining, read_preference, write, heartbeat_frequency)
+    filtered.empty? ? found : filtered
+  end
+
+  private def suitable_for(
+    topology_type : TopologyDescription::TopologyType,
+    servers : Array(ServerDescription),
+    read_preference : ReadPreference,
+    write : Bool,
+    heartbeat_frequency : Time::Span,
+  ) : Array(ServerDescription)
     case topology_type
     when .unknown?
       [] of ServerDescription

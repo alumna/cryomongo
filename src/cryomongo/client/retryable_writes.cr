@@ -34,11 +34,12 @@ class Mongo::Client
     attempt = 0
     allowed_retries = 1
     original_error : Mongo::Error? = nil
+    deprioritized = nil.as(Array(String)?)
 
     loop do
       begin
         preferred = provided_server || session.server_description
-        server_description = live_retryable_write_server(preferred, command, args, read_preference, deadline)
+        server_description = live_retryable_write_server(preferred, command, args, read_preference, deadline, deprioritized)
         # Unknown: handshake rediscovers. Standalone: send once, no txnNumber.
         if !server_description.type.unknown? &&
            (!topology.supports_sessions? || !server_description.supports_retryable_writes?) &&
@@ -87,6 +88,10 @@ class Mongo::Client
 
         original_error = error
         session.unpin if error.transient_transaction? || error.unknown_transaction?
+        if overload && @options.enable_overload_retargeting && !session.is_transaction? && provided_server.nil?
+          session.unpin
+          deprioritized = [server_description.address]
+        end
         apply_overload_backoff(attempt, error) if overload
       rescue error : Mongo::Client::NetworkError
         wrapped = Error::Network.new(error)
@@ -111,8 +116,15 @@ class Mongo::Client
     args,
     read_preference : ReadPreference,
     deadline : Mongo::Deadline? = nil,
+    deprioritized : Array(String)? = nil,
   ) : SDAM::ServerDescription
-    if preferred
+    skip_preferred = false
+    if pref = preferred
+      if list = deprioritized
+        skip_preferred = list.includes?(pref.address)
+      end
+    end
+    if preferred && !skip_preferred
       live = topology.servers.find { |s| s.address == preferred.address }
       if live && !live.type.unknown? && live.supports_retryable_writes?
         return live
@@ -144,7 +156,7 @@ class Mongo::Client
         return found
       end
     end
-    server_selection(command, args, read_preference, deadline)
+    server_selection(command, args, read_preference, deadline, deprioritized)
   end
 
   private def apply_retryable_write_body(body, session, server_description)
@@ -175,10 +187,12 @@ class Mongo::Client
     attempt = 0
     allowed_retries = 0
     original_error : Mongo::Error? = nil
+    selected = nil.as(SDAM::ServerDescription?)
+    deprioritized = nil.as(Array(String)?)
 
     loop do
       begin
-        selected = provided_server || session.server_description || server_selection(command, args, read_preference, deadline)
+        selected = provided_server || session.server_description || server_selection(command, args, read_preference, deadline, deprioritized)
 
         if session.options.snapshot && selected.max_wire_version < 13
           raise Error::Client.new("Snapshot reads require MongoDB 5.0 or later")
@@ -222,6 +236,12 @@ class Mongo::Client
           raise error
         end
         original_error = error
+        if overload && @options.enable_overload_retargeting && !session.is_transaction? && provided_server.nil?
+          session.unpin
+          if addr = selected.try(&.address)
+            deprioritized = [addr]
+          end
+        end
         apply_overload_backoff(attempt, error) if overload
       end
     end

@@ -49,8 +49,8 @@ describe "SDAM Legacy Tests" do
 
       client.subscribe_sdam { |e| events << e }
 
-      # SDAM rules require handling ApplicationErrors mapped by CMAP pool generations.
-      # We mock generations locally.
+      # SDAM application errors share decide() with production. Pool generation
+      # is mocked here because this client has no real pools (no monitors).
       pool_generations = Hash(String, Int32).new
 
       test["phases"].as_a.each do |phase|
@@ -103,44 +103,51 @@ describe "SDAM Legacy Tests" do
                   Mongo::Error::Network.new("network error")
                 end
 
-          # Determine if error is stale based on generation or topologyVersion
-          is_stale = false
           current_gen = pool_generations.fetch(addr, 0)
-
+          stale = false
           if err_gen && err_gen < current_gen
-            is_stale = true
+            stale = true
           end
-
           if err.is_a?(Mongo::Error::Command) && err.topology_version
             if client.topology.is_stale_error_topology_version?(old_desc.topology_version, err.topology_version)
-              is_stale = true
+              stale = true
             end
           end
 
-          unless is_stale
-            if err.is_a?(Mongo::Error::Network)
-              if when_phase == "beforeHandshakeCompletes"
-                # SDAM Spec: MUST NOT change the server's description if network error during connection establishment
-              elsif error_type == "timeout" && when_phase == "afterHandshakeCompletes"
-                # SDAM Spec: MUST NOT mark the server Unknown on a timeout AFTER handshake
-              else
-                new_desc = Mongo::SDAM::ServerDescription.new(addr)
-                new_desc.error = err.message
-                new_desc.last_update_time = old_desc.last_update_time
-                client.topology.update(old_desc, new_desc)
-                pool_generations[addr] = current_gen + 1
-              end
-            elsif err.is_a?(Mongo::Error::Command) && err.state_change?
-              new_desc = Mongo::SDAM::ServerDescription.new(addr)
+          kind = case error_type
+                 when "timeout"
+                   Mongo::SDAM::ApplicationError::Kind::Timeout
+                 when "command"
+                   Mongo::SDAM::ApplicationError::Kind::Command
+                 else
+                   Mongo::SDAM::ApplicationError::Kind::Network
+                 end
+          error_phase = when_phase == "beforeHandshakeCompletes" ? Mongo::SDAM::ApplicationError::Phase::BeforeHandshake : Mongo::SDAM::ApplicationError::Phase::AfterHandshake
+          state_change = err.is_a?(Mongo::Error::Command) && err.state_change?
+          shutdown = err.is_a?(Mongo::Error::Command) && err.shutdown?
+          action = Mongo::SDAM::ApplicationError.decide(
+            kind,
+            error_phase,
+            stale: stale,
+            state_change: state_change,
+            shutdown: shutdown,
+            max_wire_version: old_desc.max_wire_version
+          )
+
+          unless action.ignore?
+            new_desc = Mongo::SDAM::ServerDescription.new(addr)
+            unless kind.network? || kind.timeout?
               new_desc.min_wire_version = old_desc.min_wire_version
               new_desc.max_wire_version = old_desc.max_wire_version
-              new_desc.error = err.message
-              new_desc.last_update_time = old_desc.last_update_time
+            end
+            new_desc.error = err.message
+            new_desc.last_update_time = old_desc.last_update_time
+            if err.is_a?(Mongo::Error::Command)
               new_desc.topology_version = err.topology_version
-              client.topology.update(old_desc, new_desc)
-              if err.shutdown? || old_desc.max_wire_version < 8
-                pool_generations[addr] = current_gen + 1
-              end
+            end
+            client.topology.update(old_desc, new_desc)
+            if action.mark_unknown_and_clear_pool?
+              pool_generations[addr] = current_gen + 1
             end
           end
         end

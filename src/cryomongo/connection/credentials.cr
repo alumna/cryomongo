@@ -4,4 +4,4 @@ record Mongo::Credentials,
   password : String? = nil,
   source : String = "",
   mechanism : String? = nil,
-  mechanism_properties : String? = nil
+  mechanism_properties : Hash(String, String) = {} of String => String

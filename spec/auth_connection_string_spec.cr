@@ -51,14 +51,8 @@ describe "Auth Connection String (Legacy)" do
               end
 
               if expected_props = cred_json["mechanism_properties"]?.try(&.as_h?)
-                actual_props_str = credentials.mechanism_properties || ""
-                actual_props = actual_props_str.split(',').reject(&.empty?).to_h do |pair|
-                  k, v = pair.split(':', 2)
-                  {k.upcase, v}
-                end
-
                 expected_props.each do |k, v|
-                  actual_props[k.upcase]?.should eq(v.as_s), "Failed on: #{description}"
+                  credentials.mechanism_properties[k.upcase]?.should eq(v.as_s), "Failed on: #{description}"
                 end
               end
             end

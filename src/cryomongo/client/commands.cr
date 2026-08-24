@@ -20,14 +20,16 @@ class Mongo::Client
   )
     # Create an implicit session only when the caller did not pass one.
     # The caller (bulk, change stream, cursor) owns ending a session it created.
+    # Fiber-local implicit sessions stay until the client closes or the fiber dies.
     # endSessions during pool close must not check out from the pool.
-    owns_session = session.nil?
+    owns_session = false
     if session.nil?
-      session = if command.is_a?(Commands::EndSessions)
-                  Session::ClientSession.new(self, pooled: false)
-                else
-                  Session::ClientSession.new(self)
-                end
+      if command.is_a?(Commands::EndSessions)
+        session = Session::ClientSession.new(self, pooled: false)
+        owns_session = true
+      else
+        session = implicit_session_for_fiber
+      end
     end
 
     # After commit the session stays pinned so commit can be retried on the
@@ -491,8 +493,19 @@ class Mongo::Client
       )
     end
     if error.is_a?(NetworkError)
-      # Mark the socket dead so checkin uses reason "error", not "stale".
-      connection.close
+      keep_pin = error.is_a?(IO::TimeoutError) &&
+                 !owns_connection &&
+                 @options.load_balanced &&
+                 connection.awaiting_reply? &&
+                 !connection.socket.closed?
+      if keep_pin
+        # Timeout with no reply bytes yet. Keep the pin so close() can drain
+        # the late getMore and send killCursors on the same socket.
+        connection.mark_pending_reply
+      else
+        # Mark the socket dead so checkin uses reason "error", not "stale".
+        connection.close
+      end
       Mongo::Log.error(exception: error) { "Network error" } unless server_description
       if connection.interrupted_by_clear?
         address = server_description.try(&.address) || connection.server_description.address
@@ -503,8 +516,9 @@ class Mongo::Client
       else
         # After handshake, a socket timeout is a slow operation, not a dead server.
         # closeConnection / reset still mark Unknown and clear the pool.
-        timeout_after_handshake = error.is_a?(IO::TimeoutError)
-        unless timeout_after_handshake
+        kind = error.is_a?(IO::TimeoutError) ? SDAM::ApplicationError::Kind::Timeout : SDAM::ApplicationError::Kind::Network
+        action = SDAM::ApplicationError.decide(kind, SDAM::ApplicationError::Phase::AfterHandshake, stale: false)
+        unless action.ignore? || keep_pin
           # After handshake, a non-timeout network error marks Unknown and
           # clears the pool. A stale-generation error is ignored.
           if @options.load_balanced
