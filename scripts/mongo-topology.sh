@@ -76,6 +76,63 @@ wait_port() {
   return 1
 }
 
+# Application URI user. Do not enable --auth. SASL still runs when the URI has
+# userinfo, so failCommand on saslContinue and auth: true UTF can run.
+TEST_USER="${TEST_USER:-bob}"
+TEST_PWD="${TEST_PWD:-pwd123}"
+TEST_AUTH_DB="${TEST_AUTH_DB:-admin}"
+
+create_test_user() {
+  local seed="${1:-27017}"
+  local primary_port
+  primary_port=$(mongosh --port "$seed" --quiet --eval '
+    const h = db.hello();
+    if (h.isWritablePrimary) { print("" + (h.me || "").split(":").pop()); quit(0); }
+    if (h.primary) { print("" + h.primary.split(":").pop()); quit(0); }
+    quit(1);
+  ')
+  mongosh --port "$primary_port" --quiet --eval "
+    try {
+      db.getSiblingDB('${TEST_AUTH_DB}').createUser({
+        user: '${TEST_USER}',
+        pwd: '${TEST_PWD}',
+        roles: [ { role: 'root', db: 'admin' } ]
+      });
+    } catch (e) {
+      const m = e.message || String(e);
+      if (m.indexOf('already exists') === -1) throw e;
+    }
+  "
+}
+
+write_uri_env() {
+  local topology="$1"
+  mkdir -p "$ROOT/tmp"
+  local uri
+  case "$topology" in
+    standalone)
+      uri="mongodb://${TEST_USER}:${TEST_PWD}@127.0.0.1:27017/?authSource=${TEST_AUTH_DB}"
+      ;;
+    replicaset)
+      uri="mongodb://${TEST_USER}:${TEST_PWD}@127.0.0.1:27017/?replicaSet=rs0&authSource=${TEST_AUTH_DB}"
+      ;;
+    sharded)
+      uri="mongodb://${TEST_USER}:${TEST_PWD}@127.0.0.1:27017,127.0.0.1:27016/?authSource=${TEST_AUTH_DB}"
+      ;;
+    load-balanced)
+      uri="mongodb://${TEST_USER}:${TEST_PWD}@127.0.0.1:8000/?loadBalanced=true&authSource=${TEST_AUTH_DB}"
+      ;;
+    *)
+      uri="mongodb://${TEST_USER}:${TEST_PWD}@127.0.0.1:27017/?authSource=${TEST_AUTH_DB}"
+      ;;
+  esac
+  cat > "$ROOT/tmp/mongo-uri.env" <<EOF
+export MONGODB_URI='${uri}'
+export TOPOLOGY='${topology}'
+EOF
+  echo "UTF with auth: source ${ROOT}/tmp/mongo-uri.env"
+}
+
 start_standalone() {
   stop_all
   # Sharded mongos can hold 27017 until the kernel releases the port.
@@ -85,6 +142,8 @@ start_standalone() {
     --pidfilepath "$DATA/mongod.pid" --logpath "$DATA/standalone.log" --fork \
     "${MONGOD_PARAMS[@]}"
   wait_port 27017
+  create_test_user 27017
+  write_uri_env standalone
   echo "standalone is ready on 27017"
 }
 
@@ -133,6 +192,8 @@ start_replicaset() {
   for port in 27017 27018 27019; do
     mongosh --port "$port" --quiet --eval 'db.adminCommand({setParameter: 1, minWaitForStreamingHelloMillis: 0})' >/dev/null || true
   done
+  create_test_user 27017
+  write_uri_env replicaset
   echo "replicaset is ready on 27017 (3 members: 27017, 27018, 27019)"
 }
 
@@ -203,12 +264,15 @@ start_sharded() {
   fi
   echo "sharded cluster is ready on 27017 and 27016"
   echo "load-balancer ports: 27050 (mongos 27017) and 27051 (mongos 27016)"
+  create_test_user 27017
+  write_uri_env sharded
 }
 
 start_load_balanced() {
   start_sharded
   "$ROOT/scripts/run-load-balancer.sh" start
-  echo "load-balanced UTF: source ${ROOT}/tmp/lb-uri.env"
+  write_uri_env load-balanced
+  echo "load-balanced UTF: source ${ROOT}/tmp/lb-uri.env and ${ROOT}/tmp/mongo-uri.env"
 }
 
 cmd="${1:-status}"

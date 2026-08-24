@@ -139,8 +139,11 @@ class Mongo::Client
     # Determine whether the request is acknowledged and prohibit some operations.
     acknowledged = acknowledged?(args, session)
 
-    # Session could be pinned to a specific mongos - if so use the same server description
-    server_description ||= session.server_description
+    # Session could be pinned to a specific mongos. A caller-supplied server
+    # (client bulkWrite pre-selects for batch size) must not pick the other mongos.
+    if pin = session.server_description
+      server_description = pin
+    end
 
     retryable_command = acknowledged && command.is_a?(Commands::Retryable) && command.retryable?(**args, session: session)
 

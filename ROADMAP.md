@@ -110,7 +110,7 @@ Foundation for later CMAP / SDAM files. Create the pool when a monitor check fin
 - [x] Un-skip `minPoolSize-error.json` (standalone).
 - [x] Honest README: drop the lone BETA. Keep 0.x. Core CRUD / sessions / transactions on MongoDB 8.0.
 
-`pool-clear-min-pool-size-error.json` non-auth test runs (3.4). The auth test stays skipped until 3.10. After the first `poolReady`, checkout while paused raises `PoolClearedError` (3.5). Before that, checkout may still handshake an Unknown seed. Official CMAP JSON copy is 3.11.
+`pool-clear-min-pool-size-error.json` non-auth test runs (3.4). The auth test runs in 3.10 when the URI has credentials (standalone). After the first `poolReady`, checkout while paused raises `PoolClearedError` (3.5). Before that, checkout may still handshake an Unknown seed. Official CMAP JSON copy is 3.11.
 
 GitHub Docker `replicaset` is **3** members (`scripts/docker-topology.sh`), same as local `rs0`. `replicaset-emit-topology-changed-before-close.json` runs (3.7).
 
@@ -173,15 +173,15 @@ The file needs a replica set with a secondary (`replSetStepDown`). Native and Do
 - [x] Client-level `bulkWrite` (MongoDB 8.0).
 - [x] Un-skip `crud/client-bulkWrite-*.json`, `retryable-writes/client-bulkWrite-*.json`, `transactions/client-bulkWrite.json`, `causal-consistency-clientBulkWrite.json`.
 
-### Phase 3.10 — Auth on CI, speculative auth, monitor auth
+### Phase 3.10 — Auth on CI, speculative auth (monitors stay unauthenticated)
 
-CI sets `auth: true` to not met. After users exist on mongod (not AWS / OIDC):
+CI creates user `bob` / `pwd123` on `admin` (no `--auth`). The URI has credentials so SASL runs:
 
-- [ ] Honor `auth: true` in `meets_requirements?`.
-- [ ] Speculative auth. Monitor sockets must authenticate.
-- [ ] Un-skip `retryable-reads/handshakeError.json` and `retryable-writes/handshakeError.json`.
-- [ ] Un-skip unified SDAM `auth-error.json`, `auth-misc-command-error.json`, `auth-network-error.json`, `auth-network-timeout-error.json`, `auth-shutdown-error.json`, `pool-clear-checkout-error.json`.
-- [ ] Live SCRAM / X509 / PLAIN prose (X509 needs TLS certs).
+- [x] Honor `auth: true` / `auth: false` in `meets_requirements?` from URI userinfo.
+- [x] Speculative auth on the first application hello. Monitor sockets must **not** authenticate (SDAM).
+- [x] Un-skip `retryable-reads/handshakeError.json` and `retryable-writes/handshakeError.json`.
+- [x] Un-skip unified SDAM `auth-error.json`, `auth-misc-command-error.json`, `auth-network-error.json`, `auth-network-timeout-error.json`, `auth-shutdown-error.json`, `pool-clear-checkout-error.json`.
+- [x] Live SCRAM prose. X509 / PLAIN stay pending unless `MONGODB_X509_URI` / `MONGODB_PLAIN_URI` is set.
 
 ### Phase 3.11 — SDAM / CMAP logging and remaining official JSON
 

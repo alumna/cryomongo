@@ -13,7 +13,7 @@ This is a fork of `elbywan/cryomongo`. The goal is to make the driver ready for 
 
 It is **0.x** pre-release. **Phase 1, Phase 2 and Phase 3** of [ROADMAP.md](ROADMAP.md) are done. Core CRUD, sessions and transactions work on MongoDB 8.0. **1.0** waits on client-side encryption (Phase 4). Cloud auth (Phase 5: AWS / OIDC) for post 1.0.
 
-The driver is ready for **core CRUD, sessions, and transactions** on MongoDB 8.0. Remaining 8.0 work is [ROADMAP.md](ROADMAP.md) Phase 3.10–3.14.
+The driver is ready for **core CRUD, sessions, and transactions** on MongoDB 8.0. Remaining 8.0 work is [ROADMAP.md](ROADMAP.md) Phase 3.11–3.14.
 
 What is already in place:
 
@@ -43,11 +43,11 @@ The driver is **0.x**. It is ready for core CRUD, sessions, and transactions on 
 - CI matrix: standalone, replica set, sharded, and load-balanced. Spec jobs resize the default execution context.
 - zlib OP_COMPRESSED (`compressors=zlib`). Pool map lock is not nested with handshake I/O.
 - Unified `pool-cleared-error.json`. Socket timeouts after handshake do not mark the server Unknown.
+- CI and local topologies create user `bob` / `pwd123` on `admin` (no `--auth`). `auth: true` UTF runs. Speculative auth is on the first application hello. Monitor sockets do not authenticate (SDAM).
 
-**Not done yet (MongoDB 8.0). See [ROADMAP.md](ROADMAP.md) Phase 3.10–3.14 and [FIXES.md](FIXES.md).**
-- Unified SDAM still skipped: SDAM logging. `minPoolSize-error.json`, `hello-command-error.json`, `hello-network-error.json`, `serverMonitoringMode.json`, handshake backpressure files, `interruptInUse-pool-clear.json`, `find-shutdown-error.json`, `insert-shutdown-error.json`, `rediscover-quickly-after-step-down.json`, and replica-set topology-lifecycle now run. Replica set topologies are 3 members.
+**Not done yet (MongoDB 8.0). See [ROADMAP.md](ROADMAP.md) Phase 3.11–3.14 and [FIXES.md](FIXES.md).**
+- Unified SDAM still skipped: SDAM logging. `minPoolSize-error.json`, `hello-command-error.json`, `hello-network-error.json`, `serverMonitoringMode.json`, handshake backpressure files, `interruptInUse-pool-clear.json`, `find-shutdown-error.json`, `insert-shutdown-error.json`, `rediscover-quickly-after-step-down.json`, replica-set topology-lifecycle, and `auth: true` handshake / SDAM auth files now run. Replica set topologies are 3 members.
 - UTF ops still `SKIP_TEST`: search-index ops (Atlas). Client `bulkWrite` now runs.
-- No users on CI, so `auth: true` UTF does not run (handshake-error files, unified SDAM auth-error files). Speculative auth and monitor auth are missing.
 - snappy / zstd. TLS key-file password and OCSP flags are parsed and unused. Official CMAP JSON is not copied. CLAM is 1 of 23 files. Remaining official index-management JSON is Atlas Search (not copied).
 - CSFLE (`libmongocrypt`) is Phase 4. AWS / OIDC is Phase 5.
 

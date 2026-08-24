@@ -52,6 +52,35 @@ wait_running() {
   return 1
 }
 
+# Application URI user. Do not enable --auth. SASL still runs when the URI has
+# userinfo, so failCommand on saslContinue and auth: true UTF can run.
+TEST_USER="${TEST_USER:-bob}"
+TEST_PWD="${TEST_PWD:-pwd123}"
+TEST_AUTH_DB="${TEST_AUTH_DB:-admin}"
+
+create_test_user() {
+  local name="${1:-mongo}"
+  local extra=()
+  if [ -n "${2:-}" ]; then
+    extra=(--port "$2")
+  fi
+  docker exec "$name" mongosh "${extra[@]}" --quiet --eval "
+    try {
+      db.getSiblingDB('${TEST_AUTH_DB}').createUser({
+        user: '${TEST_USER}',
+        pwd: '${TEST_PWD}',
+        roles: [ { role: 'root', db: 'admin' } ]
+      });
+    } catch (e) {
+      const m = e.message || String(e);
+      if (m.indexOf('already exists') === -1) {
+        print('createUser failed: ' + m);
+        throw e;
+      }
+    }
+  "
+}
+
 wait_primary() {
   local name="$1" port="$2"
   for _ in $(seq 1 40); do
@@ -68,12 +97,41 @@ wait_primary() {
 wait_rs_members() {
   local name="$1"
   for _ in $(seq 1 40); do
-    if docker exec "$name" mongosh --quiet --eval 'quit((rs.status().members || []).filter(m => m.stateStr === "PRIMARY" || m.stateStr === "SECONDARY").length >= 3 ? 0 : 1)' >/dev/null 2>&1; then
+    # print/grep: mongosh quit() does not always set the process exit code.
+    if docker exec "$name" mongosh --quiet --eval '
+      const s = rs.status();
+      if (!s.ok) { print("no"); }
+      else {
+        const members = s.members || [];
+        const up = members.filter(m => m.stateStr === "PRIMARY" || m.stateStr === "SECONDARY").length;
+        const hasPrimary = members.some(m => m.stateStr === "PRIMARY");
+        print(up >= 3 && hasPrimary ? "yes" : "no");
+      }
+    ' 2>/dev/null | grep -qx 'yes'; then
       return 0
     fi
     sleep 1
   done
   echo "$name replica set members are not all up" >&2
+  dump_logs "$name"
+  return 1
+}
+
+# 27017 is often a secondary. Do not use mongosh quit() under set -e: a missing
+# hello.primary exits 1 with no log, which is what GitHub replica set CI hit.
+wait_any_primary() {
+  local name="$1"
+  local port
+  for _ in $(seq 1 40); do
+    for port in 27017 27018 27019; do
+      if docker exec "$name" mongosh --port "$port" --quiet --eval 'print(db.runCommand({hello:1}).isWritablePrimary === true ? "PRIMARY" : "OTHER")' 2>/dev/null | grep -qx 'PRIMARY'; then
+        echo "$port"
+        return 0
+      fi
+    done
+    sleep 1
+  done
+  echo "$name has no writable primary" >&2
   dump_logs "$name"
   return 1
 }
@@ -87,6 +145,7 @@ start_standalone() {
   stop_all
   docker run --name mongo -d -p 27017:27017 --tmpfs /data/db "$IMAGE" $MONGOD_PARAMS
   wait_running mongo
+  create_test_user mongo
   echo "standalone is ready on 27017"
 }
 
@@ -106,8 +165,13 @@ start_replicaset() {
   wait_running mongo 27018
   wait_running mongo 27019
   docker exec mongo mongosh --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"},{_id:1,host:"127.0.0.1:27018"},{_id:2,host:"127.0.0.1:27019"}]})'
+  echo "waiting for replica set members and a writable primary..." >&2
   wait_rs_members mongo
-  echo "replicaset is ready on 27017 (3 members: 27017, 27018, 27019)"
+  local primary_port
+  primary_port=$(wait_any_primary mongo)
+  echo "creating test user on primary port ${primary_port}" >&2
+  create_test_user mongo "$primary_port"
+  echo "replicaset is ready on 27017 (3 members: 27017, 27018, 27019; primary ${primary_port})"
 }
 
 # $1 = empty or "lb". lb maps PROXY v2 ports and sets loadBalancerPort.
@@ -144,6 +208,7 @@ start_sharded() {
   docker run -d --name mongos2 --network mongo-test $mongos2_ports "$IMAGE" \
     mongos --configdb cfg/cfg:27019 --bind_ip_all $MONGOS_PARAMS $mongos2_lb
   wait_running mongos2
+  create_test_user mongos
   echo "sharded cluster is ready on 27017 and 27016"
   if [ "$lb" = "lb" ]; then
     echo "load-balancer ports: 27050 (mongos 27017) and 27051 (mongos 27016)"
