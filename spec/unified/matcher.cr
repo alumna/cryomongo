@@ -13,9 +13,9 @@ module Mongo::Unified::Matcher
     end
   end
 
-  def matches?(expected : JSON::Any, actual : JSON::Any, registry : Registry? = nil) : Bool
+  def matches?(expected : JSON::Any, actual : JSON::Any, registry : Registry? = nil, extra_keys : Bool = true) : Bool
     if (h = expected.as_h?) && special?(h)
-      return match_special?(h, actual, registry)
+      return match_special?(h, actual, registry, extra_keys)
     end
 
     if (en = as_number(expected)) && (an = as_number(actual))
@@ -39,7 +39,7 @@ module Mongo::Unified::Matcher
         next if key == "$$unsetOrMatches" # handled in special?
         act_val = actual_h[key]?
         if exp_val.as_h? && special?(exp_val.as_h) && exp_val.as_h.has_key?("$$exists")
-          return false unless match_special?(exp_val.as_h, act_val || JSON::Any.new(nil))
+          return false unless match_special?(exp_val.as_h, act_val || JSON::Any.new(nil), registry, extra_keys)
         elsif act_val.nil?
           # Extra expected key: allow if $$unsetOrMatches wraps it
           if (inner = exp_val.as_h?) && inner.has_key?("$$unsetOrMatches")
@@ -47,7 +47,12 @@ module Mongo::Unified::Matcher
           end
           return false
         else
-          return false unless matches?(exp_val, act_val, registry)
+          return false unless matches?(exp_val, act_val, registry, extra_keys)
+        end
+      end
+      unless extra_keys
+        actual_h.each_key do |key|
+          return false unless expected_h.has_key?(key)
         end
       end
       true
@@ -55,7 +60,7 @@ module Mongo::Unified::Matcher
       return false unless actual_a = actual.as_a?
       return false unless expected_a.size == actual_a.size
       expected_a.each_with_index do |exp_el, i|
-        return false unless matches?(exp_el, actual_a[i], registry)
+        return false unless matches?(exp_el, actual_a[i], registry, extra_keys)
       end
       true
     else
@@ -85,7 +90,7 @@ module Mongo::Unified::Matcher
     h.size == 1 && h.keys.first.starts_with?("$$")
   end
 
-  private def match_special?(h : Hash(String, JSON::Any), actual : JSON::Any, registry : Registry? = nil) : Bool
+  private def match_special?(h : Hash(String, JSON::Any), actual : JSON::Any, registry : Registry? = nil, extra_keys : Bool = true) : Bool
     op = h.keys.first
     operand = h[op]
     case op
@@ -97,7 +102,7 @@ module Mongo::Unified::Matcher
       types = operand.as_a? || [operand]
       types.any? { |t| type_matches?(t.as_s, actual) }
     when "$$unsetOrMatches"
-      actual.raw.nil? || matches?(operand, actual, registry)
+      actual.raw.nil? || matches?(operand, actual, registry, extra_keys)
     when "$$matchesHexBytes"
       actual_s = actual.as_s?
       expected_s = operand.as_s?
@@ -106,12 +111,12 @@ module Mongo::Unified::Matcher
       return false unless registry
       session = registry.sessions[operand.as_s]?
       return false unless session
-      matches?(json_from(session.session_id.to_bson), actual, registry)
+      matches?(json_from(session.session_id.to_bson), actual, registry, extra_keys)
     when "$$matchesEntity"
       return false unless registry
       entity = registry.entities[operand.as_s]?
       return false unless entity
-      matches?(json_from(entity), actual, registry)
+      matches?(json_from(entity), actual, registry, extra_keys)
     when "$$lte"
       numeric_compare(actual, operand) { |a, b| a <= b }
     when "$$gte"
@@ -120,10 +125,19 @@ module Mongo::Unified::Matcher
       numeric_compare(actual, operand) { |a, b| a < b }
     when "$$gt"
       numeric_compare(actual, operand) { |a, b| a > b }
+    when "$$matchAsDocument"
+      str = actual.as_s?
+      return false unless str
+      parsed = JSON.parse(str)
+      matches?(operand, parsed, registry, false)
+    when "$$matchAsRoot"
+      matches?(operand, actual, registry, true)
     else
       # Unknown operator: fail closed so we do not silently pass.
       false
     end
+  rescue JSON::ParseException
+    false
   end
 
   private def numeric_compare(actual : JSON::Any, operand : JSON::Any, &) : Bool

@@ -12,6 +12,7 @@ require "./uri"
 require "./handshake"
 require "./backoff"
 require "./monitoring"
+require "./logging"
 require "./client/*"
 
 # The client which provides access to a MongoDB server, replica set, or sharded cluster.
@@ -38,6 +39,8 @@ class Mongo::Client
   # :nodoc:
   getter session_pool : Session::Pool = Session::Pool.new
   # :nodoc:
+  getter log_sink : Logging::Sink
+  # :nodoc:
   protected getter min_heartbeat_frequency : Time::Span = 500.milliseconds
 
   @monitoring_enabled : Bool
@@ -61,11 +64,15 @@ class Mongo::Client
   @commands_observable = Monitoring::Observable(Monitoring::Commands::Event).new
   @sdam_observable = Monitoring::Observable(Monitoring::SDAM::Event).new
   @cmap_observable = Monitoring::Observable(Monitoring::CMAP::Event).new
+  @log_sink = Logging::Sink.new
   # UTF subscribes before monitors run. Constructor events wait here until then.
   @pending_sdam_events = [] of Monitoring::SDAM::Event
   @defer_sdam_events = false
   @handshake_extra = [] of Handshake::DriverInfo
   @handshake_client : BSON? = nil
+  # Handshakes in progress. Pool clear with interruptInUse closes these too.
+  @pending_setup = [] of Mongo::Connection
+  @pending_setup_lock = Sync::Mutex.new
 
   # The default auth database is optionally provided as a part of the connection string uri.
   #
@@ -186,8 +193,7 @@ class Mongo::Client
       pairs
     }
     pools_to_close.each do |address, pool|
-      pool.close
-      emit_cmap_event(Monitoring::CMAP::PoolClosedEvent.new(address))
+      emit_pool_closed(address, pool)
     rescue e
       Log.warn { "Error while trying to close connection pool. #{e}" }
     end
@@ -215,9 +221,15 @@ class Mongo::Client
       wg.wait
     end
 
-    # Spec: topology is Unknown before TopologyClosedEvent (last SDAM event).
-    if (topo = @topology) && (previous = topo.close_to_unknown)
-      emit_sdam_event(Monitoring::SDAM::TopologyDescriptionChangedEvent.new(self.object_id, previous, topo.clone))
+    # Spec: ServerClosedEvent when each monitor stops, then Unknown topology,
+    # then TopologyClosedEvent (last SDAM event).
+    if topo = @topology
+      topo.servers.dup.each do |server|
+        emit_sdam_event(Monitoring::SDAM::ServerClosedEvent.new(self.object_id, server.address))
+      end
+      if previous = topo.close_to_unknown
+        emit_sdam_event(Monitoring::SDAM::TopologyDescriptionChangedEvent.new(self.object_id, previous, topo.clone))
+      end
     end
     emit_sdam_event(Monitoring::SDAM::TopologyClosedEvent.new(self.object_id))
   end
@@ -266,28 +278,40 @@ class Mongo::Client
 
   protected def emit_sdam_event(event : Monitoring::SDAM::Event)
     if @defer_sdam_events
+      # UTF subscribes after Client.new. Log when the queue is flushed.
       @pending_sdam_events << event
     else
+      log_sdam(event)
       @sdam_observable.broadcast(event)
     end
   end
 
   # Monitor hello events. Skip the event object (and hello reply BSON) when nobody is listening.
   # :nodoc:
-  def emit_heartbeat_started(address : String, awaited : Bool) : Nil
-    return unless @sdam_observable.has_subscribers?
+  def want_heartbeat? : Bool
+    @sdam_observable.has_subscribers? || Logging.want?(@log_sink, Logging::Component::Topology, Logging::Severity::Debug)
+  end
+
+  def emit_heartbeat_started(address : String, awaited : Bool, driver_connection_id : Int64? = nil, server_connection_id : Int64? = nil) : Nil
+    return unless want_heartbeat?
+    log_heartbeat_started(address, awaited, driver_connection_id, server_connection_id)
+    return unless @sdam_observable.has_subscribers? || @defer_sdam_events
     emit_sdam_event(Monitoring::SDAM::ServerHeartbeatStartedEvent.new(object_id, address, awaited))
   end
 
   # :nodoc:
-  def emit_heartbeat_succeeded(address : String, duration : Time::Span, reply : BSON, awaited : Bool) : Nil
-    return unless @sdam_observable.has_subscribers?
+  def emit_heartbeat_succeeded(address : String, duration : Time::Span, reply : BSON, awaited : Bool, driver_connection_id : Int64? = nil, server_connection_id : Int64? = nil) : Nil
+    return unless want_heartbeat?
+    log_heartbeat_succeeded(address, duration, reply, awaited, driver_connection_id, server_connection_id)
+    return unless @sdam_observable.has_subscribers? || @defer_sdam_events
     emit_sdam_event(Monitoring::SDAM::ServerHeartbeatSucceededEvent.new(object_id, address, duration, reply, awaited))
   end
 
   # :nodoc:
-  def emit_heartbeat_failed(address : String, duration : Time::Span, failure : Exception, awaited : Bool) : Nil
-    return unless @sdam_observable.has_subscribers?
+  def emit_heartbeat_failed(address : String, duration : Time::Span, failure : Exception, awaited : Bool, driver_connection_id : Int64? = nil, server_connection_id : Int64? = nil) : Nil
+    return unless want_heartbeat?
+    log_heartbeat_failed(address, duration, failure, awaited, driver_connection_id, server_connection_id)
+    return unless @sdam_observable.has_subscribers? || @defer_sdam_events
     emit_sdam_event(Monitoring::SDAM::ServerHeartbeatFailedEvent.new(object_id, address, duration, failure, awaited))
   end
 
@@ -296,7 +320,10 @@ class Mongo::Client
   def start_sdam_monitoring : Nil
     return if @monitoring_enabled
     @monitoring_enabled = true
-    @pending_sdam_events.each { |event| @sdam_observable.broadcast(event) }
+    @pending_sdam_events.each do |event|
+      log_sdam(event)
+      @sdam_observable.broadcast(event)
+    end
     @pending_sdam_events.clear
     start_monitoring
   end
@@ -458,8 +485,9 @@ class Mongo::Client
     end
     pool = pool_at(server_description.address) || create_pool(server_description)
 
+    started_at = Time.instant
     emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutStartedEvent.new(server_description.address))
-    checkout_from_pool(pool, server_description, wait)
+    checkout_from_pool(pool, server_description, wait, started_at)
   end
 
   # Handshake I/O can still see leftover failCommand closeConnection (same appName
@@ -474,6 +502,7 @@ class Mongo::Client
     pool : Mongo::Connection::Pool(Mongo::Connection),
     server_description : SDAM::ServerDescription,
     wait : Time::Span?,
+    started_at : Time::Instant,
   ) : Mongo::Connection
     deadline = if wait
                  Time.instant + wait
@@ -484,24 +513,27 @@ class Mongo::Client
     loop do
       leftover = deadline - Time.instant
       if leftover <= Time::Span.zero
-        emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
-        raise last_network || Mongo::Error::Connection.new("Timed out while checking out a connection")
+        fail_checkout(server_description.address, "connectionError", started_at, last_network)
+        raise last_network || Mongo::Error::Connection.new("Timed out while checking out a connection from connection pool")
       end
       begin
-        conn = pool.checkout(wait)
-        emit_cmap_event(Monitoring::CMAP::ConnectionCheckedOutEvent.new(server_description.address, conn.connection_id))
+        conn = checkout_and_emit_discards(pool, server_description, wait)
+        emit_cmap_event(Monitoring::CMAP::ConnectionCheckedOutEvent.new(server_description.address, conn.connection_id, Time.instant - started_at))
         return conn
+      rescue error : Mongo::Error::PoolClosed
+        fail_checkout(server_description.address, "poolClosed", started_at, error)
+        raise error
       rescue error : Mongo::Error::PoolCleared
         # Closed is terminal. Paused: wait for the monitor to mark ready (first
         # hello, or after a clear). Do not mark the server Unknown.
         if pool.closed? || @closing.get
-          emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+          fail_checkout(server_description.address, "poolClosed", started_at, error)
           raise error
         end
         last_network = error
         leftover_wait = deadline - Time.instant
         if leftover_wait <= Time::Span.zero
-          emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+          fail_checkout(server_description.address, "connectionError", started_at, error)
           raise error
         end
         # Single can select Unknown at once, so selection does not scan.
@@ -513,16 +545,16 @@ class Mongo::Client
         when timeout pause_wait
         end
       rescue error : Mongo::Error::Connection
-        emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "timeout"))
+        fail_checkout(server_description.address, "timeout", started_at, error)
         raise error
       rescue error : Mongo::Error::Network
-        fail_known_handshake_overload(error, server_description)
+        fail_known_handshake_overload(error, server_description, started_at)
         # Hello TCP/hello network on Unknown is SystemOverloadedError and retries
         # leftover failCommand closeConnection (Phase 3.2). Auth after hello is
         # not labeled. Fail checkout so retryable reads/writes start a new
         # checkout (handshakeError expects another connectionCheckOutStartedEvent).
         unless error.retryable_overload?
-          emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+          fail_checkout(server_description.address, "connectionError", started_at, error)
           raise error
         end
         last_network = error
@@ -530,30 +562,52 @@ class Mongo::Client
       rescue error : NetworkError
         wrapped = labeled_handshake_network_error(error)
         unless wrapped.is_a?(Mongo::Error::Network)
-          emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+          fail_checkout(server_description.address, "connectionError", started_at, wrapped)
           raise wrapped
         end
-        fail_known_handshake_overload(wrapped, server_description)
+        fail_known_handshake_overload(wrapped, server_description, started_at)
         unless wrapped.retryable_overload?
-          emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+          fail_checkout(server_description.address, "connectionError", started_at, wrapped)
           raise wrapped
         end
         last_network = wrapped
         Fiber.yield
       rescue error
-        emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+        fail_checkout(server_description.address, "connectionError", started_at, error)
         raise error
       end
     end
   end
 
+  private def fail_checkout(address : String, reason : String, started_at : Time::Instant, error : Exception? = nil) : Nil
+    emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(address, reason, Time.instant - started_at, error))
+  end
+
+  private def checkout_and_emit_discards(
+    pool : Mongo::Connection::Pool(Mongo::Connection),
+    server_description : SDAM::ServerDescription,
+    wait : Time::Span?,
+  ) : Mongo::Connection
+    begin
+      pool.checkout(wait)
+    ensure
+      emit_pool_discards(pool, server_description.address)
+    end
+  end
+
+  private def emit_pool_discards(pool : Mongo::Connection::Pool(Mongo::Connection), address : String) : Nil
+    pool.take_closed.each do |connection_id, reason|
+      emit_cmap_event(Monitoring::CMAP::ConnectionClosedEvent.new(address, connection_id, reason))
+    end
+  end
+
   # Handshake network on a known server is backpressure: fail checkout.
   # Unknown still retries leftover failCommand closeConnection (Phase 3.2).
-  private def fail_known_handshake_overload(error : Mongo::Error::Network, server_description : SDAM::ServerDescription) : Nil
+  private def fail_known_handshake_overload(error : Mongo::Error::Network, server_description : SDAM::ServerDescription, started_at : Time::Instant) : Nil
     return unless error.retryable_overload?
     live = topology.servers.find { |s| s.address == server_description.address } || server_description
     return if live.type.unknown?
-    emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+    fail_checkout(server_description.address, "connectionError", started_at, error)
     raise error
   end
 
@@ -576,16 +630,17 @@ class Mongo::Client
           max_pool_size: @options.max_pool_size,
           max_idle_pool_size: @options.max_pool_size,
           checkout_timeout: @options.wait_queue_timeout.try(&.total_seconds) || 5.0,
-          max_idle_time: @options.max_idle_time
-        ) do
-          establish_connection(server_description)
+          max_idle_time: @options.max_idle_time,
+          max_connecting: @options.max_connecting
+        ) do |connection_id, populate|
+          establish_connection(server_description, connection_id, populate: populate)
         end
         h[address] = new_pool
         new_pool
       end
     end
     if created
-      emit_cmap_event(Monitoring::CMAP::PoolCreatedEvent.new(address))
+      emit_cmap_event(Monitoring::CMAP::PoolCreatedEvent.new(address, cmap_pool_option_values))
     end
     pool
   end
@@ -621,13 +676,15 @@ class Mongo::Client
   # Handshake plus auth. Created is emitted before hello. Ready is emitted after auth.
   # Hello network / timeout errors get backpressure labels and do not clear the pool.
   # Auth errors in load-balanced mode clear that serviceId. Auth does not get those labels.
-  private def establish_connection(server_description : SDAM::ServerDescription) : Mongo::Connection
+  private def establish_connection(server_description : SDAM::ServerDescription, connection_id : Int64, *, populate : Bool = false) : Mongo::Connection
     connection = nil.as(Mongo::Connection?)
+    created_at = Time.instant
     begin
-      opened = Mongo::Connection.new(server_description, @credentials, @options, is_monitor: false)
+      opened = Mongo::Connection.new(server_description, @credentials, @options, is_monitor: false, connection_id: connection_id)
       connection = opened
       address = server_description.address
       emit_cmap_event(Monitoring::CMAP::ConnectionCreatedEvent.new(address, opened.connection_id))
+      track_setup(opened)
       legacy = @options.server_api.nil? && !@options.load_balanced
       result, round_trip_time = opened.handshake(
         send_metadata: true,
@@ -638,13 +695,15 @@ class Mongo::Client
       )
       # Connection is a class: copy hello fields that handshake set on this instance.
       opened.service_id = result.serviceId
+      opened.server_connection_id = result.connection_id.try(&.to_i64)
       opened.handshake_complete = true
       begin
         opened.authenticate
       rescue error
-        fail_setup_connection(server_description, opened, error, handshake_complete: true)
+        fail_setup_connection(server_description, opened, error, handshake_complete: true, populate: populate)
       end
-      emit_cmap_event(Monitoring::CMAP::ConnectionReadyEvent.new(address, opened.connection_id))
+      emit_cmap_event(Monitoring::CMAP::ConnectionReadyEvent.new(address, opened.connection_id, Time.instant - created_at))
+      untrack_setup(opened)
       old_rtt = server_description.type.unknown? ? nil : server_description.round_trip_time
       new_rtt = Connection.average_round_trip_time(round_trip_time, old_rtt)
       new_description = SDAM::ServerDescription.new(address, result, new_rtt)
@@ -655,14 +714,15 @@ class Mongo::Client
       opened
     rescue error
       if conn = connection
+        untrack_setup(conn)
         raise error if conn.handshake_complete
-        fail_setup_connection(server_description, conn, error, handshake_complete: false)
+        fail_setup_connection(server_description, conn, error, handshake_complete: false, populate: populate)
       end
       raise labeled_handshake_network_error(error)
     end
   end
 
-  private def fail_setup_connection(server_description : SDAM::ServerDescription, connection : Mongo::Connection, error : Exception, handshake_complete : Bool) : NoReturn
+  private def fail_setup_connection(server_description : SDAM::ServerDescription, connection : Mongo::Connection, error : Exception, handshake_complete : Bool, *, populate : Bool = false) : NoReturn
     # Auth after hello: mark Unknown and clear the pool (SDAM). Load-balanced:
     # clear that serviceId only, do not mark Unknown. Do not add backpressure labels.
     if handshake_complete
@@ -674,8 +734,15 @@ class Mongo::Client
         network = error.is_a?(IO::Error) || error.is_a?(Socket::Error) || error.is_a?(Mongo::Error::Network)
         handle_application_error(server_description, connection, error, network: network, shutdown: true)
       end
+    elsif populate && error.is_a?(Mongo::Error::Command) && error.state_change?
+      # Hello 91 during minPoolSize fill: PoolCleared before ConnectionClosed.
+      # cmap-format clients have no monitors and may already be Unknown, so SDAM
+      # apply can skip the clear. Always pause the pool here.
+      # Checkout hello errors before handshake completes are ignored (LB SDAM).
+      apply_state_change_error(server_description, error, connection)
+      clear_pool(server_description)
     end
-    emit_cmap_event(Monitoring::CMAP::ConnectionClosedEvent.new(server_description.address, connection.connection_id, "error"))
+    emit_cmap_event(Monitoring::CMAP::ConnectionClosedEvent.new(server_description.address, connection.connection_id, "error", error))
     connection.close
     unless handshake_complete
       raise labeled_handshake_network_error(error)
@@ -842,9 +909,18 @@ class Mongo::Client
     end
     if pool_to_close
       emit_cmap_event(Monitoring::CMAP::PoolClearedEvent.new(server_description.address))
-      pool_to_close.close
-      emit_cmap_event(Monitoring::CMAP::PoolClosedEvent.new(server_description.address))
+      emit_pool_closed(server_description.address, pool_to_close)
     end
+  end
+
+  private def emit_pool_closed(address : String, pool : Mongo::Connection::Pool(Mongo::Connection)) : Nil
+    pool.close.each do |connection_id|
+      emit_cmap_event(Monitoring::CMAP::ConnectionClosedEvent.new(address, connection_id, "poolClosed"))
+    end
+    pool.drain.each do |connection_id|
+      emit_cmap_event(Monitoring::CMAP::ConnectionClosedEvent.new(address, connection_id, "poolClosed"))
+    end
+    emit_cmap_event(Monitoring::CMAP::PoolClosedEvent.new(address))
   end
 
   # Network / shutdown error: bump generation, wake waiters, keep the pool.
@@ -860,7 +936,24 @@ class Mongo::Client
         interrupt_in_use_connections: interrupt_in_use
       ))
     end
+    emit_pool_discards(pool, server_description.address)
     to_interrupt.each(&.interrupt_in_use)
+    interrupt_pending_setup if interrupt_in_use
+  end
+
+  private def track_setup(connection : Mongo::Connection) : Nil
+    @pending_setup_lock.synchronize { @pending_setup << connection }
+  end
+
+  private def untrack_setup(connection : Mongo::Connection) : Nil
+    @pending_setup_lock.synchronize do
+      @pending_setup.reject! { |c| c.connection_id == connection.connection_id }
+    end
+  end
+
+  private def interrupt_pending_setup : Nil
+    pending = @pending_setup_lock.synchronize { @pending_setup.dup }
+    pending.each(&.interrupt_in_use)
   end
 
   # Load-balanced: increment generation for one serviceId. Other mongos sockets stay.
@@ -871,10 +964,12 @@ class Mongo::Client
     if emit
       emit_cmap_event(Monitoring::CMAP::PoolClearedEvent.new(server_description.address, service_id))
     end
+    emit_pool_discards(pool, server_description.address)
     to_interrupt.each(&.interrupt_in_use)
   end
 
   protected def emit_cmap_event(event : Monitoring::CMAP::Event)
+    log_cmap(event)
     @cmap_observable.broadcast(event) if @cmap_observable.has_subscribers?
   end
 
@@ -933,4 +1028,94 @@ class Mongo::Client
 
     !unacknowledged
   end
+
+  # CMAP PoolCreatedEvent.options: only values the user set on the URI.
+  private def cmap_pool_option_values : Hash(String, Int64)
+    values = Hash(String, Int64).new
+    raw = @options.raw
+    if max_idle_time = @options.max_idle_time
+      values["maxIdleTimeMS"] = max_idle_time.total_milliseconds.to_i64
+    end
+    if raw.has_key?("maxpoolsize")
+      values["maxPoolSize"] = @options.max_pool_size.to_i64
+    end
+    if raw.has_key?("minpoolsize")
+      values["minPoolSize"] = @options.min_pool_size.to_i64
+    end
+    if raw.has_key?("maxconnecting")
+      values["maxConnecting"] = @options.max_connecting.to_i64
+    end
+    if wait_queue_timeout = @options.wait_queue_timeout
+      values["waitQueueTimeoutMS"] = wait_queue_timeout.total_milliseconds.to_i64
+    end
+    values
+  end
+
+  # CMAP unit tests: checkout without waiting for a paused pool (spec checkout).
+  # :nodoc:
+  def cmap_checkout(server_description : SDAM::ServerDescription, wait : Time::Span? = nil) : Mongo::Connection
+    pool = pool_at(server_description.address) || create_pool(server_description)
+    started_at = Time.instant
+    emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutStartedEvent.new(server_description.address))
+    begin
+      conn = checkout_and_emit_discards(pool, server_description, wait)
+      emit_cmap_event(Monitoring::CMAP::ConnectionCheckedOutEvent.new(server_description.address, conn.connection_id, Time.instant - started_at))
+      conn
+    rescue error : Mongo::Error::PoolClosed
+      fail_checkout(server_description.address, "poolClosed", started_at, error)
+      raise error
+    rescue error : Mongo::Error::PoolCleared
+      fail_checkout(server_description.address, "connectionError", started_at, error)
+      raise error
+    rescue error : Mongo::Error::Connection
+      fail_checkout(server_description.address, "timeout", started_at, error)
+      raise error
+    rescue error
+      fail_checkout(server_description.address, "connectionError", started_at, error)
+      raise error
+    end
+  end
+
+  # :nodoc:
+  def cmap_checkin(connection : Mongo::Connection) : Nil
+    release_connection(connection)
+  end
+
+  # :nodoc:
+  def cmap_clear(server_description : SDAM::ServerDescription, interrupt_in_use : Bool = false) : Nil
+    clear_pool(server_description, interrupt_in_use: interrupt_in_use)
+  end
+
+  # :nodoc:
+  def cmap_close_pool(server_description : SDAM::ServerDescription) : Nil
+    pool = pool_at(server_description.address)
+    return unless pool
+    pool.close.each do |connection_id|
+      emit_cmap_event(Monitoring::CMAP::ConnectionClosedEvent.new(server_description.address, connection_id, "poolClosed"))
+    end
+    emit_cmap_event(Monitoring::CMAP::PoolClosedEvent.new(server_description.address))
+  end
+
+  # :nodoc:
+  def cmap_ready(server_description : SDAM::ServerDescription) : Nil
+    pool = create_pool(server_description)
+    return unless pool.mark_ready
+    emit_cmap_event(Monitoring::CMAP::PoolReadyEvent.new(server_description.address))
+    return if @options.load_balanced
+    address = server_description.address
+    pool.start_min_size(@options.min_pool_size) do |error|
+      handle_populate_error(address, error)
+    end
+  end
+
+  # :nodoc:
+  def cmap_create_paused_pool(server_description : SDAM::ServerDescription) : Nil
+    create_pool(server_description)
+  end
+
+  # :nodoc:
+  def cmap_seed : SDAM::ServerDescription
+    topology.servers.first? || SDAM::ServerDescription.new("127.0.0.1:27017")
+  end
 end
+

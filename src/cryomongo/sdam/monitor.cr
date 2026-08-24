@@ -229,11 +229,12 @@ module Mongo::SDAM
     # Handshake is the first check. Started fires before the socket is opened.
     private def setup_connection : {Commands::Hello::Result, Time::Span}
       address = @server_description.address
-      @client.emit_heartbeat_started(address, false)
+      driver_id = Mongo::Connection.next_id
+      @client.emit_heartbeat_started(address, false, driver_id, nil)
       started_at = Time.instant
       conn : Mongo::Connection? = nil
       begin
-        opened = Mongo::Connection.new(@server_description, @credentials, @client.options, is_monitor: true)
+        opened = Mongo::Connection.new(@server_description, @credentials, @client.options, is_monitor: true, connection_id: driver_id)
         conn = opened
         @socket_lock.synchronize { @connection = opened }
         legacy = @client.options.server_api.nil? && !@client.options.load_balanced
@@ -244,12 +245,14 @@ module Mongo::SDAM
           client_metadata: @client.handshake_client_document,
           load_balanced: @client.options.load_balanced == true
         )
-        # awaited false: duration is the hello RTT, not TCP connect time.
-        @client.emit_heartbeat_succeeded(address, rtt, result.to_bson, false)
+        opened.server_connection_id = result.connection_id.try(&.to_i64)
+        if @client.want_heartbeat?
+          @client.emit_heartbeat_succeeded(address, rtt, result.to_bson, false, driver_id, opened.server_connection_id)
+        end
         {result, rtt}
       rescue error
         close_monitor_conn(conn) if conn
-        @client.emit_heartbeat_failed(address, started_at.elapsed, error, false)
+        @client.emit_heartbeat_failed(address, started_at.elapsed, error, false, driver_id, conn.try(&.server_connection_id))
         raise error
       end
     end
@@ -257,14 +260,23 @@ module Mongo::SDAM
     # Existing monitor socket: started immediately before send or exhaust read.
     private def heartbeat(awaited : Bool, &) : {Commands::Hello::Result, Time::Span}
       address = @server_description.address
-      @client.emit_heartbeat_started(address, awaited)
+      conn = @socket_lock.synchronize { @connection }
+      driver_id = conn.try(&.connection_id)
+      server_id = conn.try(&.server_connection_id)
+      @client.emit_heartbeat_started(address, awaited, driver_id, server_id)
       started_at = Time.instant
       begin
         result, rtt = yield
-        @client.emit_heartbeat_succeeded(address, rtt, result.to_bson, awaited)
+        if conn
+          conn.server_connection_id = result.connection_id.try(&.to_i64) || conn.server_connection_id
+          server_id = conn.server_connection_id
+        end
+        if @client.want_heartbeat?
+          @client.emit_heartbeat_succeeded(address, rtt, result.to_bson, awaited, driver_id, server_id)
+        end
         {result, rtt}
       rescue error
-        @client.emit_heartbeat_failed(address, started_at.elapsed, error, awaited)
+        @client.emit_heartbeat_failed(address, started_at.elapsed, error, awaited, driver_id, server_id)
         raise error
       end
     end

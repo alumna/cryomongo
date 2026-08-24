@@ -52,8 +52,9 @@ module Mongo::Unified
       # Concurrent shutdown stale-generation ignore is 3.6. UTF topology helpers
       # (waitForPrimaryChange / recordTopologyDescription / assertTopologyType)
       # are 3.7. pool-clear-min-pool-size-error auth test runs in 3.10 (URI userinfo).
+      # SDAM / CMAP / CLAM logging and official CMAP JSON are 3.11 (done).
       basename = File.basename(file_path)
-      if basename.in?(SKIP_FILES) || file_path.includes?("/logging-")
+      if basename.in?(SKIP_FILES)
         @skip_reason = "hardcoded skip"
       end
     end
@@ -157,6 +158,7 @@ module Mongo::Unified
       end
 
       # Shared client is created only when we may actually talk to the server.
+      Mongo::Logging::Config.max_document_length = 10000
       @internal_client = Runner.shared_client
       detect_deployment
 
@@ -192,6 +194,11 @@ module Mongo::Unified
            test.description == "Tailable cursor awaitData iteration timeoutMS is refreshed for getMore - failure"
           skipped += 1
           Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "official blockTimeMS is less than timeoutMS", duration_ms: Timing.elapsed_ms(test_started))
+          next
+        end
+        if test.description.includes?("waitQueueSize") || test.description.includes?("waitQueueMultiple")
+          skipped += 1
+          Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "waitQueueSize / waitQueueMultiple are not implemented", duration_ms: Timing.elapsed_ms(test_started))
           next
         end
         # After a timed-out getMore the load-balanced pin is dead. killCursors
@@ -235,12 +242,14 @@ module Mongo::Unified
           @registry.command_events.each_value(&.clear)
           @registry.cmap_events.each_value(&.clear)
           @registry.sdam_events.each_value(&.clear)
+          @registry.log_messages.each_value(&.clear)
 
           test.operations.each do |op|
             Dispatcher.execute(op, @registry, client, self)
           end
           verify_outcome(test.outcome)
           verify_events(test.expectEvents)
+          verify_log_messages(test.expectLogMessages)
           executed += 1
         rescue e : Skip
           test_aborted = true
@@ -515,6 +524,7 @@ module Mongo::Unified
             @registry.command_events[client_id] = [] of Mongo::Monitoring::Commands::Event
             @registry.sdam_events[client_id] = [] of Mongo::Monitoring::SDAM::Event
             @registry.cmap_events[client_id] = [] of Mongo::Monitoring::CMAP::Event
+            @registry.log_messages[client_id] = [] of Mongo::Logging::Message
             ignored = req.ignoreCommandMonitoringEvents.try(&.map(&.downcase)) || [] of String
             @registry.ignored_command_events[client_id] = ignored
             observed = req.observeEvents || [] of String
@@ -591,6 +601,17 @@ module Mongo::Unified
                              end
                 next unless observed.includes?(event_type)
                 @registry.cmap_events[client_id] << event
+              end
+            end
+
+            if logs = req.observeLogMessages
+              logs.each do |component_name, level_name|
+                component = Mongo::Logging::Component.parse_spec(component_name)
+                severity = Mongo::Logging::Severity.parse_spec(level_name)
+                next unless component && severity
+                client.log_sink.subscribe(component, severity) do |msg|
+                  @registry.log_messages[client_id] << msg
+                end
               end
             end
 
@@ -857,6 +878,12 @@ module Mongo::Unified
               end
             end
             check_has_service_id!(expected_started, actual, index)
+            check_has_server_connection_id!(expected_started, actual, index)
+            if db_name = expected_started["databaseName"]?
+              unless db_name.as_s == actual.database_name
+                raise Exception.new("TEST_FAILED: event #{index} databaseName expected #{db_name.as_s}, got #{actual.database_name}")
+              end
+            end
             if command = expected_started["command"]?
               actual_command = JSON.parse(actual.command.to_canonical_extjson)
               unless Matcher.matches?(command, actual_command, @registry)
@@ -873,6 +900,13 @@ module Mongo::Unified
               end
             end
             check_has_service_id!(expected_succeeded, actual, index)
+            check_has_server_connection_id!(expected_succeeded, actual, index)
+            if reply = expected_succeeded["reply"]?
+              actual_reply = JSON.parse(actual.reply.to_canonical_extjson)
+              unless Matcher.matches?(reply, actual_reply, @registry)
+                raise Exception.new("TEST_FAILED: event #{index} reply mismatch: expected #{reply.inspect}, got #{actual_reply.inspect}")
+              end
+            end
           elsif expected_failed = expected["commandFailedEvent"]?
             unless actual.is_a?(Mongo::Monitoring::Commands::CommandFailedEvent)
               raise Exception.new("TEST_FAILED: event #{index} expected commandFailedEvent, got #{actual.class}")
@@ -883,8 +917,29 @@ module Mongo::Unified
               end
             end
             check_has_service_id!(expected_failed, actual, index)
+            check_has_server_connection_id!(expected_failed, actual, index)
+            if reply = expected_failed["reply"]?
+              actual_reply = JSON.parse(actual.reply.to_canonical_extjson)
+              unless Matcher.matches?(reply, actual_reply, @registry)
+                raise Exception.new("TEST_FAILED: event #{index} failed reply mismatch: expected #{reply.inspect}, got #{actual_reply.inspect}")
+              end
+            end
           end
         end
+      end
+    end
+
+    private def check_has_server_connection_id!(expected : JSON::Any, actual, index : Int32) : Nil
+      return unless expected["hasServerConnectionId"]?
+      want = expected["hasServerConnectionId"].as_bool
+      has = false
+      if actual.responds_to?(:server_connection_id)
+        if id = actual.server_connection_id
+          has = id > 0
+        end
+      end
+      unless has == want
+        raise Exception.new("TEST_FAILED: event #{index} hasServerConnectionId expected #{want}, got #{has}")
       end
     end
 
@@ -1060,6 +1115,65 @@ module Mongo::Unified
       end
     rescue
       nil
+    end
+
+    private def verify_log_messages(expected : JSON::Any?) : Nil
+      return unless expected
+      expected.as_a.each do |group|
+        client_id = group["client"].as_s
+        ignore_extra = group["ignoreExtraMessages"]?.try(&.as_bool) || false
+        ignore = group["ignoreMessages"]?.try(&.as_a) || [] of JSON::Any
+        wanted = group["messages"].as_a
+        actual = (@registry.log_messages[client_id]? || [] of Mongo::Logging::Message).dup
+        actual.reject! { |msg| ignore.any? { |pattern| Matcher.matches?(pattern, log_message_json(msg), @registry) } }
+
+        wanted.each_with_index do |expected_msg, index|
+          if index >= actual.size
+            names = actual.map { |m| m.data["message"]?.try(&.as_s) || m.component.spec_name }
+            raise Exception.new("TEST_FAILED: expected at least #{wanted.size} log messages for #{client_id}, got #{actual.size}: #{names}")
+          end
+          unless log_message_matches?(expected_msg, actual[index])
+            raise Exception.new("TEST_FAILED: log message #{index} for #{client_id} expected #{expected_msg.inspect}, got #{log_message_json(actual[index]).inspect}")
+          end
+        end
+        unless ignore_extra || actual.size == wanted.size
+          names = actual.map { |m| m.data["message"]?.try(&.as_s) || m.component.spec_name }
+          raise Exception.new("TEST_FAILED: expected #{wanted.size} log messages for #{client_id}, got #{actual.size}: #{names}")
+        end
+      end
+    end
+
+    private def log_message_json(msg : Mongo::Logging::Message) : JSON::Any
+      JSON::Any.new({
+        "level"     => JSON::Any.new(msg.severity.spec_name),
+        "component" => JSON::Any.new(msg.component.spec_name),
+        "data"      => JSON::Any.new(msg.data),
+      } of String => JSON::Any)
+    end
+
+    private def log_message_matches?(expected : JSON::Any, actual : Mongo::Logging::Message) : Bool
+      if level = expected["level"]?.try(&.as_s?)
+        return false unless level == actual.severity.spec_name
+      end
+      if component = expected["component"]?.try(&.as_s?)
+        return false unless component == actual.component.spec_name
+      end
+      if data = expected["data"]?
+        return false unless Matcher.matches?(data, JSON::Any.new(actual.data), @registry)
+      end
+      if expected["failureIsRedacted"]?
+        want_redacted = expected["failureIsRedacted"].as_bool
+        failure = actual.data["failure"]?
+        return false unless failure
+        text = failure.as_s? || failure.to_json
+        if want_redacted
+          text == "REDACTED" || text == "{}" || text.empty?
+        else
+          !text.empty? && text != "REDACTED"
+        end
+      else
+        true
+      end
     end
   end
 end

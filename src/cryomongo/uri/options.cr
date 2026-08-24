@@ -33,6 +33,8 @@ struct Mongo::Options
   getter max_idle_time : Time::Span? = nil
   # The maximum number of clients or connections able to be created by a pool at a given time
   getter max_pool_size : Int32 = 100
+  # How many sockets may handshake at once. Spec default is 2.
+  getter max_connecting : Int32 = 2
   # The maximum replication lag, in wall clock time, that a secondary can suffer and still be eligible for server selection
   getter max_staleness_seconds : Int32? = nil
   # The minimum number of connections in a pool. Spec default is 0.

@@ -14,6 +14,8 @@ class Mongo::Connection
   getter connection_id : Int64
   getter compressor_id : Compression::Id? = nil
   property service_id : BSON::ObjectId? = nil
+  # Server hello connectionId. Used in command and heartbeat logs.
+  property server_connection_id : Int64? = nil
   # Pool generation at handshake. A later clear with a higher value makes this socket stale.
   property generation : Int32 = 0
   # True after hello succeeds. Handshake errors before this must not clear the pool.
@@ -34,7 +36,11 @@ class Mongo::Connection
   # Awaitable hello with exhaustAllowed: the server sends more replies on this socket.
   @more_to_come = false
 
-  def initialize(@server_description : SDAM::ServerDescription, @credentials : Mongo::Credentials, @options : Mongo::Options, is_monitor : Bool = false)
+  def self.next_id : Int64
+    @@next_connection_id.add(1)
+  end
+
+  def initialize(@server_description : SDAM::ServerDescription, @credentials : Mongo::Credentials, @options : Mongo::Options, is_monitor : Bool = false, connection_id : Int64? = nil)
     @monitor = is_monitor
     tls_hostname = nil.as(String?)
     if @server_description.address.ends_with? ".sock"
@@ -100,7 +106,7 @@ class Mongo::Connection
     end
 
     @socket = socket
-    @connection_id = @@next_connection_id.add(1)
+    @connection_id = connection_id || @@next_connection_id.add(1)
     @opcode_buf = IO::Memory.new(4096)
     @compressed_buf = IO::Memory.new(4096)
   end
