@@ -20,9 +20,6 @@ struct Mongo::Messages::OpReply < Mongo::Messages::Part
   getter starting_from : Int32
   getter number_returned : Int32
   getter documents : Array(BSON)
-  # Keeps the receive buffer alive so BSON.view slices stay valid.
-  @[Field(ignore: true)]
-  @payload_bytes : Bytes? = nil
 
   def initialize(
     @response_flags,
@@ -46,19 +43,30 @@ struct Mongo::Messages::OpReply < Mongo::Messages::Part
   end
 
   def initialize(msg_bytes : Bytes, header : Messages::Header, used : Int32 = msg_bytes.size)
-    @payload_bytes = msg_bytes
-    view_bytes = msg_bytes[0, used]
-    msg_view = IO::Memory.new(view_bytes, writable: false)
+    begin
+      view_bytes = msg_bytes[0, used]
+      msg_view = IO::Memory.new(view_bytes, writable: false)
 
-    @response_flags = ResponseFlags.from_value(msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian))
-    @cursor_id = msg_view.read_bytes(Int64, IO::ByteFormat::LittleEndian)
-    @starting_from = msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian)
-    @number_returned = msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian)
+      @response_flags = ResponseFlags.from_value(msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian))
+      @cursor_id = msg_view.read_bytes(Int64, IO::ByteFormat::LittleEndian)
+      @starting_from = msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian)
+      @number_returned = msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian)
 
-    @documents = [] of BSON
+      @documents = [] of BSON
 
-    while msg_view.pos < used
-      @documents << Messages.read_bson_view(view_bytes, msg_view)
+      while msg_view.pos < used
+        @documents << Messages.read_bson_view(view_bytes, msg_view)
+      end
+      own_payload
+    ensure
+      Messages::BufferPool.checkin(msg_bytes)
     end
+  end
+
+  # Copy BSON out of the receive buffer so the Channel pool can take it back.
+  private def own_payload : Nil
+    owned = Array(BSON).new(@documents.size)
+    @documents.each { |doc| owned << BSON.new(doc.data) }
+    @documents = owned
   end
 end

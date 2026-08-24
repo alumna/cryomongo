@@ -1,5 +1,5 @@
 class Mongo::Client
-  private def server_selection(command, args, read_preference : ReadPreference, deadline : Mongo::Deadline? = nil) : SDAM::ServerDescription
+  private def server_selection(command, args, read_preference : ReadPreference, deadline : Mongo::Deadline? = nil, deprioritized : Array(String)? = nil) : SDAM::ServerDescription
     # See: https://github.com/mongodb/specifications/blob/master/source/server-selection/server-selection.rst#multi-threaded-or-asynchronous-server-selection
     # Use a monotonic clock. Wall time can jump and would shorten or stretch the wait.
     selection_start = Time.instant
@@ -22,7 +22,7 @@ class Mongo::Client
 
       # Find suitable servers by topology type and operation type.
       # Then pick one at random from those within the latency window.
-      suitable_servers = find_suitable_servers(command, args, read_preference)
+      suitable_servers = find_suitable_servers(command, args, read_preference, deprioritized)
       selected_server = SDAM::Selector.pick(suitable_servers, @options.local_threshold)
       return selected_server if selected_server
 
@@ -33,7 +33,7 @@ class Mongo::Client
       }
 
       # The monitor may have already published. Recheck before sleeping.
-      suitable_servers = find_suitable_servers(command, args, read_preference)
+      suitable_servers = find_suitable_servers(command, args, read_preference, deprioritized)
       selected_server = SDAM::Selector.pick(suitable_servers, @options.local_threshold)
       return selected_server if selected_server
 
@@ -68,14 +68,15 @@ class Mongo::Client
     end
   end
 
-  private def find_suitable_servers(command, args, read_preference : ReadPreference) : Array(SDAM::ServerDescription)
+  private def find_suitable_servers(command, args, read_preference : ReadPreference, deprioritized : Array(String)? = nil) : Array(SDAM::ServerDescription)
     write = WithReadPreference.must_use_primary_command?(command, args)
     SDAM::Selector.suitable_servers(
       topology.type,
       topology.servers,
       read_preference,
       write: write,
-      heartbeat_frequency: @options.heartbeat_frequency
+      heartbeat_frequency: @options.heartbeat_frequency,
+      deprioritized: deprioritized
     )
   end
 end

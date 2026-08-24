@@ -1,6 +1,7 @@
 require "openssl"
 require "./credentials"
 require "./auth"
+require "./tls"
 require "../compression"
 
 # :nodoc:
@@ -35,6 +36,11 @@ class Mongo::Connection
   @cleared_by_interrupt = Atomic(Bool).new(false)
   # Awaitable hello with exhaustAllowed: the server sends more replies on this socket.
   @more_to_come = false
+  # True after a successful send until receive returns. A timeout with this set
+  # means the reply has not started; load-balanced killCursors can drain it.
+  @awaiting_reply = false
+  # Receive timed out with no frame bytes. The next send drains the late reply.
+  @pending_reply = false
 
   def self.next_id : Int64
     @@next_connection_id.add(1)
@@ -79,17 +85,7 @@ class Mongo::Connection
     socket = raw.as(IO)
     if @options.ssl || @options.tls
       context = OpenSSL::SSL::Context::Client.new
-      if tls_ca_file = @options.tls_ca_file
-        context.ca_certificates = tls_ca_file
-      end
-      if tls_certificate_key_file = @options.tls_certificate_key_file
-        context.certificate_chain = tls_certificate_key_file
-        context.private_key = tls_certificate_key_file
-      end
-
-      if @options.tls_insecure || @options.tls_allow_invalid_certificates
-        context.verify_mode = OpenSSL::SSL::VerifyMode::NONE
-      end
+      Mongo::TLS.configure(context, @options)
       context.add_options(OpenSSL::SSL::Options::ALL)
       context.add_options(OpenSSL::SSL::Options.flags(
         NO_SSL_V2,
@@ -406,6 +402,7 @@ class Mongo::Connection
   end
 
   def send(op_msg : Messages::OpMsg, command = nil, log = true, &block)
+    drain_pending_reply
     message = Messages::Message.new(op_msg)
 
     Log.debug {
@@ -434,6 +431,7 @@ class Mongo::Connection
     else
       message.to_io(socket)
     end
+    @awaiting_reply = true
   end
 
   def send(op_msg : Messages::OpMsg, command = nil, log = true)
@@ -462,6 +460,8 @@ class Mongo::Connection
       } if log
 
       unless more_to_come
+        @awaiting_reply = false
+        @pending_reply = false
         yield message
         return op_msg
       end
@@ -473,9 +473,33 @@ class Mongo::Connection
   end
 
   def close
+    @awaiting_reply = false
+    @pending_reply = false
     inner = @socket
     inner.close unless inner.closed?
   rescue
+  end
+
+  def awaiting_reply? : Bool
+    @awaiting_reply
+  end
+
+  def mark_pending_reply : Nil
+    @pending_reply = true
+    @awaiting_reply = false
+  end
+
+  # Read and drop a late reply after a socket timeout so the next command can
+  # use this pin (load-balanced killCursors).
+  def drain_pending_reply : Nil
+    return unless @pending_reply
+    @pending_reply = false
+    begin
+      receive(log: false)
+    rescue error
+      close
+      raise error
+    end
   end
 
   private def compress_command?(command) : Bool

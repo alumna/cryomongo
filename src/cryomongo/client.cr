@@ -73,6 +73,8 @@ class Mongo::Client
   # Handshakes in progress. Pool clear with interruptInUse closes these too.
   @pending_setup = [] of Mongo::Connection
   @pending_setup_lock = Sync::Mutex.new
+  @fiber_sessions = {} of Fiber => Session::ClientSession
+  @fiber_sessions_lock = Sync::Mutex.new
 
   # The default auth database is optionally provided as a part of the connection string uri.
   #
@@ -181,7 +183,9 @@ class Mongo::Client
     @srv_poller.try(&.close)
 
     # End sessions while pools are still open. EndSessions needs a socket.
+    # Return fiber sessions first so endSessions can include them.
     begin
+      end_fiber_implicit_sessions
       @session_pool.close(self)
     rescue e
       Log.warn { "Error while trying to close session pool. #{e}" }

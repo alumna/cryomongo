@@ -13,13 +13,13 @@ jobs:
       matrix:
         include:
           - topology: standalone
-            uri: mongodb://bob:pwd123@localhost:27017/?authSource=admin&compressors=zlib
+            uri: mongodb://bob:pwd123@localhost:27017/?authSource=admin&compressors=zlib,snappy,zstd
           - topology: replicaset
-            uri: mongodb://bob:pwd123@127.0.0.1:27017/?replicaSet=rs0&authSource=admin&compressors=zlib
+            uri: mongodb://bob:pwd123@127.0.0.1:27017/?replicaSet=rs0&authSource=admin&compressors=zlib,snappy,zstd
           - topology: sharded
-            uri: mongodb://bob:pwd123@localhost:27017,localhost:27016/?authSource=admin&compressors=zlib
+            uri: mongodb://bob:pwd123@localhost:27017,localhost:27016/?authSource=admin&compressors=zlib,snappy,zstd
           - topology: load-balanced
-            uri: mongodb://bob:pwd123@127.0.0.1:8000/?loadBalanced=true&authSource=admin&compressors=zlib
+            uri: mongodb://bob:pwd123@127.0.0.1:8000/?loadBalanced=true&authSource=admin&compressors=zlib,snappy,zstd
     runs-on: ubuntu-24.04
     name: MongoDB 8.0 ${{ matrix.topology }}
     steps:
@@ -43,16 +43,20 @@ jobs:
           crystal: latest
 
       - name: Install dependencies
-        run: shards install
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libzstd-dev
+          shards install
 
       - name: Run Specs
         env:
           TOPOLOGY: ${{ matrix.topology }}
           MONGODB_URI: ${{ matrix.uri }}
-          SINGLE_MONGOS_LB_URI: mongodb://bob:pwd123@127.0.0.1:8000/?loadBalanced=true&authSource=admin&compressors=zlib
-          MULTI_MONGOS_LB_URI: mongodb://bob:pwd123@127.0.0.1:8001/?loadBalanced=true&authSource=admin&compressors=zlib
+          SINGLE_MONGOS_LB_URI: mongodb://bob:pwd123@127.0.0.1:8000/?loadBalanced=true&authSource=admin&compressors=zlib,snappy,zstd
+          MULTI_MONGOS_LB_URI: mongodb://bob:pwd123@127.0.0.1:8001/?loadBalanced=true&authSource=admin&compressors=zlib,snappy,zstd
           UTF_TIMING_LOG: tmp/utf-timing.log
           CRYSTAL_WORKERS: "2"
+          UTF_RUN_TWO_MONGOS: "1"
         run: |
           mkdir -p tmp
           crystal spec -Dpreview_mt -Dexecution_context

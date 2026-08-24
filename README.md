@@ -13,21 +13,21 @@ This is a fork of `elbywan/cryomongo`. The goal is to make the driver ready for 
 
 It is **0.x** pre-release. **Phase 1, Phase 2 and Phase 3** of [ROADMAP.md](ROADMAP.md) are done. Core CRUD, sessions and transactions work on MongoDB 8.0. **1.0** waits on client-side encryption (Phase 4). Cloud auth (Phase 5: AWS / OIDC) for post 1.0.
 
-The driver is ready for **core CRUD, sessions, and transactions** on MongoDB 8.0. Remaining 8.0 work is [ROADMAP.md](ROADMAP.md) Phase 3.12–3.14.
+The driver is ready for **core CRUD, sessions, and transactions** on MongoDB 8.0. Remaining 8.0 work is [ROADMAP.md](ROADMAP.md) Phase 3.13–3.14.
 
 What is already in place:
 
 * **MongoDB 8.0:** `hello`, sessions, transactions, retryable reads and writes, Versioned API, and a Unified Test Format (UTF) runner.
 * **Crystal 1.21:** `Sync::Mutex`, `Time.instant`, no `spawn(same_thread:)`. Execution contexts are on by default. Spec CI resizes the default context.
-* **BSON:** `alumna/bson.cr` 0.8.1. Commands use `BSON.build` / `append`. Receive uses `BSON.view`. Dates decode as `BSON::DateTime` (model fields of type `Time` still convert). Vector / ExtJSON are not on the hot path.
+* **BSON:** `alumna/bson.cr` 0.8.1. Commands use `BSON.build` / `append`. Receive uses `BSON.view`, then copies the document so the OP_MSG buffer can return to the pool. Dates decode as `BSON::DateTime` (model fields of type `Time` still convert). Vector / ExtJSON are not on the hot path.
 * **Auth:** SCRAM-SHA-1, SCRAM-SHA-256 (SASLprep on the password), X509, and PLAIN.
-* **Compression:** zlib via URI `compressors=zlib`. snappy and zstd are not wired yet.
+* **Compression:** zlib, snappy, and zstd via URI `compressors`. The driver uses the first name that the server also has. zstd needs libzstd (`libzstd-dev` on Debian/Ubuntu).
 
 The UTF runner is **clear**: unknown operations become Crystal `pending`, they do not fake a pass. Files that are still skipped because a feature is missing (not AWS / OIDC / MongoDB 8.1+) are listed in [ROADMAP.md](ROADMAP.md) and [FIXES.md](FIXES.md).
 
 ### Where the work stands
 
-The driver is **0.x**. It is ready for core CRUD, sessions, and transactions on standalone, replica set, and sharded MongoDB 8.0. Its is not **1.0** yet, which waits on CSFLE.
+The driver is **0.x**. It is ready for core CRUD, sessions, and transactions on standalone, replica set, and sharded MongoDB 8.0. It is not **1.0** yet, which waits on CSFLE.
 
 **Done enough to build apps (Phase 1, Phase 2, and Phase 3)**
 - CRUD helpers, bulk, client `bulkWrite` (MongoDB 8.0), aggregation, mapReduce, legacy `count`. `let` on find / aggregate / updates / deletes / findOneAnd* / collection bulkWrite.
@@ -41,15 +41,15 @@ The driver is **0.x**. It is ready for core CRUD, sessions, and transactions on 
 - CSOT `timeoutMS`: remaining time becomes `maxTimeMS`. Code 50 is `Error::Timeout`. Collection / database / operation `timeoutMS`, `timeoutMode`, GridFS lifetime, tailable / change-stream iteration. `run_command` / `run_cursor_command`. Official CSOT UTF is 28 files.
 - Load-balancer pin, `serviceId` on command and pool-cleared events, wait-queue cursor/txn counts, pool clear per `serviceId`. Retryable reads/writes after `failCommand` / `closeConnection`. GitHub load-balanced runs full `crystal spec`.
 - CI matrix: standalone, replica set, sharded, and load-balanced. Spec jobs resize the default execution context.
-- zlib OP_COMPRESSED (`compressors=zlib`). Pool map lock is not nested with handshake I/O.
+- zlib / snappy / zstd OP_COMPRESSED (`compressors=zlib,snappy,zstd`). Pool map lock is not nested with handshake I/O. Idle sockets are LIFO.
 - Unified `pool-cleared-error.json`. Socket timeouts after handshake do not mark the server Unknown.
 - CI and local topologies create user `bob` / `pwd123` on `admin` (no `--auth`). `auth: true` UTF runs. Speculative auth is on the first application hello. Monitor sockets do not authenticate (SDAM).
 - Spec logs: `MONGODB_LOG_COMMAND`, `MONGODB_LOG_TOPOLOGY`, `MONGODB_LOG_CONNECTION`, `MONGODB_LOG_ALL`, `MONGODB_LOG_PATH`, `MONGODB_LOG_MAX_DOCUMENT_LENGTH`. CMAP subscribe. Official CMAP JSON and CLAM UTF run.
+- TLS `tlsCertificateKeyFilePassword`. Stapled OCSP is requested unless `tlsDisableCertificateRevocationCheck` is true. This driver does not contact OCSP HTTP endpoints.
+- One implicit session per fiber. `enableOverloadRetargeting` deprioritizes the last server on an overload retry.
 
-**Not done yet (MongoDB 8.0). See [ROADMAP.md](ROADMAP.md) Phase 3.12–3.14 and [FIXES.md](FIXES.md).**
-- UTF ops still `SKIP_TEST`: search-index ops (Atlas).
-- snappy / zstd. TLS key-file password and OCSP flags are parsed and unused. Remaining official index-management JSON is Atlas Search (not copied).
-- Load-balanced CSOT `killCursors` after a dead pin. Two mongos `serviceId`s from HAProxy for one UTF test.
+**Not done yet (MongoDB 8.0). See [ROADMAP.md](ROADMAP.md) Phase 3.13–3.14 and [FIXES.md](FIXES.md).**
+- UTF ops still `SKIP_TEST`: search-index ops (Atlas). Remaining official index-management JSON is Atlas Search (not copied).
 - CSFLE (`libmongocrypt`) is Phase 4. AWS / OIDC is Phase 5.
 
 **Out of scope**
@@ -57,7 +57,7 @@ The driver is **0.x**. It is ready for core CRUD, sessions, and transactions on 
 - MongoDB newer than 8.0 (example: change-stream `nsType` needs 8.1).
 - Atlas Search.
 
-#### Cryomongo is a MongoDB driver written in pure Crystal (no C library).
+#### Cryomongo is a MongoDB driver written in Crystal (no mongo-c-driver). zstd wire compression links libzstd.
 
 *Works with MongoDB 8.0+. Tested against 8.0.*
 
@@ -74,6 +74,8 @@ dependencies:
 ```
 
 2. Run `shards install`
+
+zstd wire compression links **libzstd**. On Debian/Ubuntu: `sudo apt-get install libzstd-dev`. snappy is pure Crystal. zlib is in the Crystal stdlib. GitHub spec CI installs `libzstd-dev` before `shards install`.
 
 ## Usage
 
@@ -179,7 +181,7 @@ puts cursor.of(User).to_a.to_pretty_json
 - **[Tailable and Awaitable cursors](https://docs.mongodb.com/manual/core/tailable-cursors/index.html)**
 - **[Collation](https://docs.mongodb.com/manual/reference/collation/index.html)**
 - **Standalone, [Sharded](https://docs.mongodb.com/manual/sharding/) or [ReplicaSet](https://docs.mongodb.com/manual/replication/) topologies**
-- **[Wire compression](https://github.com/mongodb/specifications/blob/master/source/compression/OP_COMPRESSED.md)** — zlib (`compressors=zlib`)
+- **[Wire compression](https://github.com/mongodb/specifications/blob/master/source/compression/OP_COMPRESSED.md)** — zlib, snappy, zstd (`compressors=zlib,snappy,zstd`)
 - **[Command monitoring](https://github.com/mongodb/specifications/blob/master/source/command-monitoring/command-monitoring.rst)** (sensitive commands are redacted)
 - **Retryable [reads](https://docs.mongodb.com/manual/core/retryable-reads/) and [writes](https://docs.mongodb.com/manual/core/retryable-writes/)**
 - **[Causal consistency](https://docs.mongodb.com/manual/core/read-isolation-consistency-recency/#client-sessions-and-causal-consistency-guarantees)**
@@ -230,9 +232,16 @@ client.close
 ```
 
 ```crystal
-# To enable SSL/TLS, use the `tls` option, alongside the `tlsCAFile` and `tlsCertificateKeyFile` options.
-uri = "mongodb://localhost:27017/?tls=true&tlsCAFile=./ca.crt&tlsCertificateKeyFile=./client.pem"
+# To enable SSL/TLS, use the `tls` option, alongside `tlsCAFile` and `tlsCertificateKeyFile`.
+# Encrypted PEM keys use `tlsCertificateKeyFilePassword`.
+uri = "mongodb://localhost:27017/?tls=true&tlsCAFile=./ca.crt&tlsCertificateKeyFile=./client.pem&tlsCertificateKeyFilePassword=secret"
 ssl_client = Mongo::Client.new uri
+```
+
+```crystal
+# Wire compression. The driver uses the first name that the server also has.
+uri = "mongodb://localhost:27017/?compressors=snappy,zlib,zstd"
+client = Mongo::Client.new uri
 ```
 
 **Links**
@@ -812,7 +821,7 @@ See [BENCHMARK.md](BENCHMARK.md). BSON tasks: `crystal run bench/driver_bench.cr
 4. Push to the branch (`git push origin my-new-feature`)
 5. Create a new Pull Request
 
-Spec CI runs `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=zlib`.
+Spec CI runs `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=zlib,snappy,zstd` (zlib is first, so the suite stays on zlib; snappy and zstd run in compression prose).
 
 ## Contributors
 

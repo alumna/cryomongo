@@ -77,7 +77,7 @@ Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CR
 - [x] **Connection Pool Refactoring:** One lock for the address-to-pool map. Handshake I/O no longer nests that lock with a per-address mutex.
 
 ### Zero-Allocation & Network I/O
-- [x] **Compression (OP_COMPRESSED):** zlib on the wire. URI `compressors` / `zlibCompressionLevel`. snappy and zstd are not wired yet.
+- [x] **Compression (OP_COMPRESSED):** zlib, snappy, and zstd on the wire. URI `compressors` / `zlibCompressionLevel`. zstd needs libzstd.
 - [x] **Greedy Network Reads:** OP_MSG / OP_REPLY / header use `IO#read_greedy` and a `Channel(Bytes)` buffer pool. A short frame raises `IO::EOFError` (retryable network error).
 - [x] **SDAM Event Optimization:** `Monitoring::Observable` copy-on-write subscriber list. Broadcast does not allocate a copy on the hot path.
 - [x] **Reduced or zero-allocation:** Server-selection pick without a window Array. GridFS batched `insertMany` and one find cursor for download (zero-length files do not query chunks). Connection compression staging reuses `IO::Memory`.
@@ -89,7 +89,7 @@ Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CR
 
 ## Remaining work (MongoDB 8.0, toward production grade)
 
-Phases 1–3 are done. Local Phase **3.11** `crystal spec` is **859** examples (802 after 3.10 plus 22 CLAM, 2 CMAP UTF, 33 cmap-format). Push a PR so GitHub Docker confirms the matrix (replica set is **3** members). The driver is production-capable for core 8.0 (CRUD, sessions, transactions). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). Remaining 8.0 holes are Phase **3.12–3.14**. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
+Phases 1–3 are done. Local Phase **3.12** `crystal spec` is **905** examples (859 after 3.11 plus deprioritized selection JSON, compression, and TLS password specs). Push a PR so GitHub Docker confirms the matrix (replica set is **3** members). The driver is production-capable for core 8.0 (CRUD, sessions, transactions, zlib / snappy / zstd). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). Remaining 8.0 holes are Phase **3.13–3.14**. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
 
 ### Out of scope until the user asks
 
@@ -193,15 +193,15 @@ Env: `MONGODB_LOG_COMMAND`, `MONGODB_LOG_TOPOLOGY`, `MONGODB_LOG_CONNECTION`, `M
 
 ### Phase 3.12 — URI, compression, sessions, IO, load-balancer leftovers
 
-- [ ] `tls_certificate_key_file_password` and OCSP / CRL flags (parsed, unused).
-- [ ] `auth_mechanism_properties` beyond URI validation (GSSAPI and similar).
-- [ ] snappy / zstd wire compression (zlib is done).
-- [ ] `enableOverloadRetargeting` (parsed, unused).
-- [ ] Fiber-local implicit session (acquire/release still runs per command).
-- [ ] Return the OP_MSG receive buffer to the Channel pool after `BSON.view` (do not claim zero-allocation).
-- [ ] Move pool generation / handshake-before-complete from `spec/sdam_runner_spec.cr` into production if the legacy SDAM JSON still needs that.
-- [ ] Load-balanced CSOT: after a dead pin, `killCursors` must not open a new socket (`timeoutMS is refreshed for close`).
-- [ ] Two mongos `serviceId`s from HAProxy (`UTF_RUN_TWO_MONGOS=1`) for `sdam-error-handling.json`.
+- [x] `tls_certificate_key_file_password` and stapled OCSP (`tlsDisableCertificateRevocationCheck`). No OCSP HTTP fetch.
+- [x] `auth_mechanism_properties` stored as a Hash on Credentials (GSSAPI / Kerberos stay out of scope).
+- [x] snappy / zstd wire compression (zlib is done).
+- [x] `enableOverloadRetargeting` deprioritizes the last server on an overload retry.
+- [x] Fiber-local implicit session.
+- [x] Return the OP_MSG receive buffer to the Channel pool after `BSON.view` (do not claim zero-allocation).
+- [x] Shared SDAM `ApplicationError.decide` for the legacy runner and production.
+- [x] Load-balanced CSOT: after a timed-out getMore, `killCursors` stays on the pin (`timeoutMS is refreshed for close`).
+- [x] Two mongos `serviceId`s from HAProxy (`UTF_RUN_TWO_MONGOS=1`) for `sdam-error-handling.json`.
 
 ### Phase 3.13 — Replica-set leftover skip audit
 
@@ -210,10 +210,11 @@ Env: `MONGODB_LOG_COMMAND`, `MONGODB_LOG_TOPOLOGY`, `MONGODB_LOG_CONNECTION`, `M
 - [x] Add a 3-member replica set (native `scripts/mongo-topology.sh` and GitHub Docker), **or** skip this file only when the set has one member.
 - [x] Un-skip `replicaset-emit-topology-changed-before-close.json` when the topology can emit 4 events.
 - [ ] Audit leftover skips from Phases 1–3 that should not have stayed skipped.
+- [ ] Audit any item showed as "Pending" when executing crystal spec in the multiple different topologies.
 
 ### Phase 3.14 — Performance review and improvement
 
-Not a spec hole. Review every hot path after 3.1–3.13: allocations, `insertOne` vs Node / Python, pool checkout, BSON receive buffer return, fiber-local sessions if not done in 3.12, DriverBench, and execution-context use. Change only what measurements support.
+Not a spec hole. Review every hot path after 3.1–3.13: allocations, `insertOne` vs Node / Python, pool checkout, DriverBench, and execution-context use. Change only what measurements support. Fiber-local sessions and receive-buffer return are done in 3.12.
 
 ---
 

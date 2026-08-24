@@ -28,8 +28,9 @@ class Mongo::Connection::Pool(T)
 
   # total of open connections managed by this pool
   @total = [] of T
-  # connections available for checkout
-  @idle = Set(T).new
+  # Idle sockets. LIFO so a failPoint and the next command reuse the same
+  # mongos (load-balanced per-serviceId tests).
+  @idle = [] of T
   # connections waiting to be stablished (they are not in *@idle* nor in *@total*)
   @inflight : Int32
   # CMAP paused: minPoolSize fill must not run. Checkout while paused raises
@@ -627,7 +628,7 @@ class Mongo::Connection::Pool(T)
   end
 
   private def pick_available
-    @idle.first?
+    @idle.last?
   end
 
   # True when a socket became free. False on wait-queue timeout.

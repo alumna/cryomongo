@@ -1,9 +1,13 @@
 require "compress/zlib"
+require "snappy"
+require "sync"
+require "zstd/compress/context"
+require "zstd/decompress/context"
 require "./error"
 
 # Wire compression (OP_COMPRESSED). Handshake lists compressors the driver can
 # actually use. Unknown names are dropped with a warning. zlib is in the Crystal
-# stdlib. snappy and zstd are not wired yet.
+# stdlib. snappy is pure Crystal. zstd uses libzstd.
 module Mongo::Compression
   extend self
 
@@ -15,7 +19,7 @@ module Mongo::Compression
   end
 
   # Handshake names this driver can compress and decompress.
-  SUPPORTED = {"zlib", "noop"}
+  SUPPORTED = {"snappy", "zlib", "zstd", "noop"}
 
   # Names the URI parser accepts. Others are unknown.
   KNOWN = {"snappy", "zlib", "zstd", "noop"}
@@ -36,6 +40,11 @@ module Mongo::Compression
   }
 
   MAX_UNCOMPRESSED = 48_000_000
+
+  @@zstd_lock = Sync::Mutex.new
+  @@zstd_cctx : Zstd::Compress::Context? = nil
+  @@zstd_dctx : Zstd::Decompress::Context? = nil
+  @@zstd_dst = Bytes.empty
 
   # Split a URI compressors value. Keep the original order. Drop names this
   # driver cannot use. *warn* logs once at URI parse time.
@@ -107,6 +116,19 @@ module Mongo::Compression
       Compress::Zlib::Writer.open(output, level: zlib_level) do |writer|
         writer.write(input) unless input.empty?
       end
+    when .snappy?
+      output.write(Compress::Snappy.encode(input))
+    when .zstd?
+      @@zstd_lock.synchronize do
+        ctx = zstd_cctx
+        need = ctx.compress_bound(input.size)
+        dst = @@zstd_dst
+        if dst.size < need
+          dst = Bytes.new(need)
+          @@zstd_dst = dst
+        end
+        output.write(ctx.compress(input, dst))
+      end
     when .noop?
       output.write(input)
     else
@@ -134,10 +156,42 @@ module Mongo::Compression
         end
       end
       plain
+    when .snappy?
+      plain = Bytes.new(uncompressed_size)
+      n = Compress::Snappy.decode(input, plain)
+      unless n == uncompressed_size
+        raise Mongo::Error.new("snappy decompressed #{n} bytes, expected #{uncompressed_size}")
+      end
+      plain
+    when .zstd?
+      plain = Bytes.new(uncompressed_size)
+      @@zstd_lock.synchronize do
+        got = zstd_dctx.decompress(input, plain)
+        unless got.size == uncompressed_size
+          raise Mongo::Error.new("zstd decompressed #{got.size} bytes, expected #{uncompressed_size}")
+        end
+      end
+      plain
     when .noop?
       input
     else
       raise Mongo::Error.new("Cannot decompress #{name_of(id)}")
     end
+  end
+
+  private def zstd_cctx : Zstd::Compress::Context
+    ctx = @@zstd_cctx
+    return ctx if ctx
+    ctx = Zstd::Compress::Context.new
+    @@zstd_cctx = ctx
+    ctx
+  end
+
+  private def zstd_dctx : Zstd::Decompress::Context
+    ctx = @@zstd_dctx
+    return ctx if ctx
+    ctx = Zstd::Decompress::Context.new
+    @@zstd_dctx = ctx
+    ctx
   end
 end
