@@ -275,10 +275,22 @@ class Mongo::Connection
     end
   end
 
-  # Awaitable hello reads in short slices and checks this flag. Do not close or
-  # shutdown the fd from another fiber (fd reuse can hit an application socket).
+  # Awaitable hello reads in short slices and checks this flag. A 1ms read
+  # timeout wakes Crystal's evented wait. Do not close or shutdown the fd here:
+  # cancelCheck runs while application sockets are live (fd reuse).
   def interrupt : Nil
     @interrupted.set(true)
+    apply_timeout(1.millisecond) unless @raw_socket.closed?
+  end
+
+  # Client#close / monitor stop. interrupt plus shutdown so an awaitable hello
+  # blocked on another execution-context thread does not sit out the 100ms slice.
+  # Socket#close from this fiber would wait FdLock.
+  def interrupt_and_wake : Nil
+    interrupt
+    raw = @raw_socket
+    return if raw.closed?
+    LibC.shutdown(raw.fd, LibC::SHUT_RDWR)
   end
 
   def interrupted_by_clear? : Bool
@@ -290,24 +302,7 @@ class Mongo::Connection
   # the monitor until the command fiber finished (the find would succeed).
   def interrupt_in_use : Nil
     @cleared_by_interrupt.set(true)
-    @interrupted.set(true)
-    raw = @raw_socket
-    return if raw.closed?
-    # Wake a recv on another execution-context thread. shutdown alone can sit
-    # until socketTimeoutMS / a long blocking read; a 1ms read timeout forces
-    # Crystal's evented wait to return.
-    raw.read_timeout = 1.millisecond
-    raw.write_timeout = 1.millisecond
-    socket = @socket
-    unless socket.same?(raw)
-      if socket.responds_to?(:read_timeout=)
-        socket.read_timeout = 1.millisecond
-      end
-      if socket.responds_to?(:write_timeout=)
-        socket.write_timeout = 1.millisecond
-      end
-    end
-    LibC.shutdown(raw.fd, LibC::SHUT_RDWR)
+    interrupt_and_wake
   end
 
   def self.average_round_trip_time(round_trip_time : Time::Span, old_rtt : Time::Span?)
@@ -575,6 +570,11 @@ class Mongo::Connection::AwaitReadIO < IO
         if inner.responds_to?(:write_timeout=)
           inner.write_timeout = wait
         end
+      end
+      # interrupt() may have set 1ms, then this loop wrote 100ms back. Recheck
+      # so close does not start another full slice.
+      if @connection.interrupted? || @inner.closed?
+        raise IO::Error.new("Closed stream")
       end
       begin
         return @inner.read(slice)

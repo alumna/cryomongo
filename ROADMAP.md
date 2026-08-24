@@ -89,7 +89,7 @@ Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CR
 
 ## Remaining work (MongoDB 8.0, toward production grade)
 
-Phases 1–3 are done. Local Phase **3.12** `crystal spec` is **905** examples (859 after 3.11 plus deprioritized selection JSON, compression, and TLS password specs). Push a PR so GitHub Docker confirms the matrix (replica set is **3** members). The driver is production-capable for core 8.0 (CRUD, sessions, transactions, zlib / snappy / zstd). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). Remaining 8.0 holes are Phase **3.13–3.14**. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
+Phases 1–3 are done. GitHub Docker Phase **3.12** `crystal spec` is **905** examples (859 after 3.11 plus deprioritized selection JSON, compression, and TLS password specs): standalone **2:59 / 167 pending**, replica set **7:45 / 45 pending**, sharded **12:20 / 56 pending**, load-balanced **6:35 / 102 pending**. Replica set is **3** members. The driver is production-capable for core 8.0 (CRUD, sessions, transactions, zlib / snappy / zstd). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). Remaining 8.0 holes are Phase **3.13–3.14**. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
 
 ### Out of scope until the user asks
 
