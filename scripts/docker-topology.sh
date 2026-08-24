@@ -63,18 +63,6 @@ create_test_user() {
   local extra=()
   if [ -n "${2:-}" ]; then
     extra=(--port "$2")
-  else
-    # Replica set: 27017 is not always primary. mongos/standalone keep default port.
-    local primary_port
-    primary_port=$(docker exec "$name" mongosh --quiet --eval '
-      const h = db.hello();
-      if (h.msg === "isdbgrid" || h.isWritablePrimary) { print(""); quit(0); }
-      if (h.primary) { print("" + h.primary.split(":").pop()); quit(0); }
-      quit(1);
-    ')
-    if [ -n "$primary_port" ]; then
-      extra=(--port "$primary_port")
-    fi
   fi
   docker exec "$name" mongosh "${extra[@]}" --quiet --eval "
     try {
@@ -85,7 +73,10 @@ create_test_user() {
       });
     } catch (e) {
       const m = e.message || String(e);
-      if (m.indexOf('already exists') === -1) throw e;
+      if (m.indexOf('already exists') === -1) {
+        print('createUser failed: ' + m);
+        throw e;
+      }
     }
   "
 }
@@ -106,12 +97,41 @@ wait_primary() {
 wait_rs_members() {
   local name="$1"
   for _ in $(seq 1 40); do
-    if docker exec "$name" mongosh --quiet --eval 'quit((rs.status().members || []).filter(m => m.stateStr === "PRIMARY" || m.stateStr === "SECONDARY").length >= 3 ? 0 : 1)' >/dev/null 2>&1; then
+    # print/grep: mongosh quit() does not always set the process exit code.
+    if docker exec "$name" mongosh --quiet --eval '
+      const s = rs.status();
+      if (!s.ok) { print("no"); }
+      else {
+        const members = s.members || [];
+        const up = members.filter(m => m.stateStr === "PRIMARY" || m.stateStr === "SECONDARY").length;
+        const hasPrimary = members.some(m => m.stateStr === "PRIMARY");
+        print(up >= 3 && hasPrimary ? "yes" : "no");
+      }
+    ' 2>/dev/null | grep -qx 'yes'; then
       return 0
     fi
     sleep 1
   done
   echo "$name replica set members are not all up" >&2
+  dump_logs "$name"
+  return 1
+}
+
+# 27017 is often a secondary. Do not use mongosh quit() under set -e: a missing
+# hello.primary exits 1 with no log, which is what GitHub replica set CI hit.
+wait_any_primary() {
+  local name="$1"
+  local port
+  for _ in $(seq 1 40); do
+    for port in 27017 27018 27019; do
+      if docker exec "$name" mongosh --port "$port" --quiet --eval 'print(db.runCommand({hello:1}).isWritablePrimary === true ? "PRIMARY" : "OTHER")' 2>/dev/null | grep -qx 'PRIMARY'; then
+        echo "$port"
+        return 0
+      fi
+    done
+    sleep 1
+  done
+  echo "$name has no writable primary" >&2
   dump_logs "$name"
   return 1
 }
@@ -145,9 +165,13 @@ start_replicaset() {
   wait_running mongo 27018
   wait_running mongo 27019
   docker exec mongo mongosh --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"},{_id:1,host:"127.0.0.1:27018"},{_id:2,host:"127.0.0.1:27019"}]})'
+  echo "waiting for replica set members and a writable primary..." >&2
   wait_rs_members mongo
-  create_test_user mongo
-  echo "replicaset is ready on 27017 (3 members: 27017, 27018, 27019)"
+  local primary_port
+  primary_port=$(wait_any_primary mongo)
+  echo "creating test user on primary port ${primary_port}" >&2
+  create_test_user mongo "$primary_port"
+  echo "replicaset is ready on 27017 (3 members: 27017, 27018, 27019; primary ${primary_port})"
 }
 
 # $1 = empty or "lb". lb maps PROXY v2 ports and sets loadBalancerPort.
