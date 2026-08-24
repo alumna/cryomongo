@@ -7,6 +7,8 @@ module Mongo::Unified
     property maxServerVersion : String?
     property topologies : Array(String)?
     property auth : Bool?
+    # Skip unless the seed URI asks for this mechanism (OIDC / AWS are out of scope).
+    property authMechanism : String?
     property serverless : String?
     property serverParameters : JSON::Any?
   end

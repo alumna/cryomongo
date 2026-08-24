@@ -91,8 +91,11 @@ backend mongoses_backend
 EOF
 
   haproxy -D -f "$CONF" -p "$PIDFILE"
-  SINGLE="mongodb://127.0.0.1:${FRONT1}/?loadBalanced=true"
-  MULTI="mongodb://127.0.0.1:${FRONT2}/?loadBalanced=true"
+  AUTH_USER="${AUTH_USER:-bob}"
+  AUTH_PASS="${AUTH_PASS:-pwd123}"
+  AUTH_DB="${AUTH_DB:-admin}"
+  SINGLE="mongodb://${AUTH_USER}:${AUTH_PASS}@127.0.0.1:${FRONT1}/?loadBalanced=true&authSource=${AUTH_DB}"
+  MULTI="mongodb://${AUTH_USER}:${AUTH_PASS}@127.0.0.1:${FRONT2}/?loadBalanced=true&authSource=${AUTH_DB}"
   cat > "$ENVFILE" <<EOF
 export SINGLE_MONGOS_LB_URI='${SINGLE}'
 export MULTI_MONGOS_LB_URI='${MULTI}'

@@ -51,7 +51,7 @@ module Mongo::Unified
       # Handshake backpressure labels are 3.4. interruptInUseConnections is 3.5.
       # Concurrent shutdown stale-generation ignore is 3.6. UTF topology helpers
       # (waitForPrimaryChange / recordTopologyDescription / assertTopologyType)
-      # are 3.7. pool-clear-min-pool-size-error auth test stays pending.
+      # are 3.7. pool-clear-min-pool-size-error auth test runs in 3.10 (URI userinfo).
       basename = File.basename(file_path)
       if basename.in?(SKIP_FILES) || file_path.includes?("/logging-")
         @skip_reason = "hardcoded skip"
@@ -389,6 +389,14 @@ module Mongo::Unified
       SemanticVersion.parse(parts[0..2].join("."))
     end
 
+    # UTF `auth: true` means the URI has userinfo, not that mongod used --auth.
+    private def uri_has_credentials? : Bool
+      uri = ENV["MONGODB_URI"]? || ""
+      rest = uri.split("://", 2)[-1]? || ""
+      host_part = rest.split('/', 2)[0]
+      host_part.includes?('@')
+    end
+
     private def meets_requirements?(requirements : Array(RunOnRequirement)?) : Bool
       return true if requirements.nil? || requirements.empty?
 
@@ -421,7 +429,12 @@ module Mongo::Unified
         end
 
         if !req.auth.nil?
-          ok = false if req.auth == true
+          ok = false unless req.auth == uri_has_credentials?
+        end
+
+        if mech = req.authMechanism
+          uri = (ENV["MONGODB_URI"]? || "").upcase
+          ok = false unless uri.includes?("AUTHMECHANISM=#{mech.upcase}")
         end
 
         if req.serverless == "require"
@@ -476,6 +489,12 @@ module Mongo::Unified
                       v.as_s? || v.to_json
                     end
               query_parts << "#{k}=#{val}"
+            end
+            if mech = req.uriOptions.try(&.as_h?).try(&.["authMechanism"]?).try(&.as_s?)
+              up = mech.upcase
+              if up.starts_with?("MONGODB-OIDC") || up == "MONGODB-AWS"
+                raise Skip.new("authMechanism #{mech} is out of scope")
+              end
             end
 
             uri = ENV["MONGODB_URI"]

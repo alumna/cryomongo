@@ -17,6 +17,8 @@ class Mongo::Auth::Scram
   @client_signature : Bytes?
   @client_proof : String?
   @mongo_hashed_password : String?
+  @id : Int32? = nil
+  @server_first : String? = nil
 
   private def safe_salt : Bytes
     @salt || raise Mongo::Error.new("SCRAM salt is not initialized")
@@ -40,36 +42,64 @@ class Mongo::Auth::Scram
     @client_nonce = Random::Secure.base64
   end
 
-  def authenticate(connection : Mongo::Connection)
+  private def auth_source : String
     source = @credentials.source || ""
-    source = "admin" if source.empty?
-    # 1.
-    request = if connection.server_description.max_wire_version > 6
-                Messages::OpMsg.new({
-                  saslStart: 1,
-                  mechanism: @mechanism_string,
-                  "$db":     source,
-                  options:   {skipEmptyExchange: true},
-                  payload:   client_first_payload.to_slice,
-                })
-              else
-                # DocumentDB workaround - skipEmptyExchange is not supported
-                Messages::OpMsg.new({
-                  saslStart: 1,
-                  mechanism: @mechanism_string,
-                  "$db":     source,
-                  payload:   client_first_payload.to_slice,
-                })
-              end
+    source.empty? ? "admin" : source
+  end
+
+  # Nested hello document uses `db`, not `$db`. MongoDB 8.0 always accepts skipEmptyExchange.
+  def start_document : BSON
+    BSON.build do |builder|
+      builder["saslStart"] = 1
+      builder["mechanism"] = @mechanism_string
+      builder["payload"] = client_first_payload.to_slice
+      builder["db"] = auth_source
+      builder["options"] = BSON.build do |opts|
+        opts["skipEmptyExchange"] = true
+      end
+    end
+  end
+
+  def authenticate(connection : Mongo::Connection)
+    source = auth_source
+    request = Messages::OpMsg.new({
+      saslStart: 1,
+      mechanism: @mechanism_string,
+      "$db":     source,
+      options:   {skipEmptyExchange: true},
+      payload:   client_first_payload.to_slice,
+    })
     connection.send(request, "saslStart")
-    # 2.
     response = connection.receive
     if error = response.error?
       raise error
     end
-    reply_document = response.body
-    @id = reply_document["conversationId"].as(Int32)
+    process_server_first(response.body)
+    send_client_final_and_finish(connection, source)
+  end
+
+  # Hello already ran saslStart as speculativeAuthenticate. Continue with saslContinue.
+  def continue_from_hello(connection : Mongo::Connection, reply : BSON)
+    process_server_first(reply)
+    send_client_final_and_finish(connection, auth_source)
+  end
+
+  private def conversation_id(doc : BSON) : Int32
+    value = doc["conversationId"]
+    case value
+    when Int32
+      value
+    when Int64
+      value.to_i32
+    else
+      raise Mongo::Error.new("SCRAM conversationId is missing")
+    end
+  end
+
+  private def process_server_first(reply_document : BSON)
+    @id = conversation_id(reply_document)
     payload_data = String.new(reply_document["payload"].as(Bytes))
+    @server_first = payload_data
     parsed_data = parse_payload(payload_data)
     @server_nonce = parsed_data["r"]
     @salt = Base64.decode(parsed_data["s"])
@@ -78,24 +108,25 @@ class Mongo::Auth::Scram
         raise Mongo::Error.new "Insufficient iteration count: #{i}, min: #{MIN_ITER_COUNT}"
       end
     end
+  end
 
-    # AuthMessage     := client-first-message-bare + "," +
-    #                   server-first-message + "," +
-    #                   client-final-message-without-proof
-    auth_message = "#{first_bare},#{payload_data},#{without_proof}"
+  private def send_client_final_and_finish(connection : Mongo::Connection, source : String)
+    server_first = @server_first || raise Mongo::Error.new("SCRAM server-first message is missing")
+    id = @id || raise Mongo::Error.new("SCRAM conversationId is missing")
+    # AuthMessage := client-first-message-bare + "," + server-first-message + "," +
+    #                client-final-message-without-proof
+    auth_message = "#{first_bare},#{server_first},#{without_proof}"
 
     validate_server_nonce!
 
-    # 3.
     request = Messages::OpMsg.new({
       saslContinue:   1,
-      conversationId: @id,
+      conversationId: id,
       "$db":          source,
       payload:        client_final_message(auth_message).to_slice,
     })
     connection.send(request, "saslContinue")
 
-    # 4.
     response = connection.receive
     if error = response.error?
       raise error
@@ -105,13 +136,12 @@ class Mongo::Auth::Scram
     parsed_data = parse_payload(payload_data)
     check_server_signature(server_key, auth_message, parsed_data)
 
-    # 5.
     loop do
       break if reply_document["done"] == true
 
       request = Messages::OpMsg.new({
         saslContinue:   1,
-        conversationId: @id,
+        conversationId: id,
         "$db":          source,
         payload:        "".to_slice,
       })

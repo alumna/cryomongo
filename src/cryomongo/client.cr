@@ -517,6 +517,14 @@ class Mongo::Client
         raise error
       rescue error : Mongo::Error::Network
         fail_known_handshake_overload(error, server_description)
+        # Hello TCP/hello network on Unknown is SystemOverloadedError and retries
+        # leftover failCommand closeConnection (Phase 3.2). Auth after hello is
+        # not labeled. Fail checkout so retryable reads/writes start a new
+        # checkout (handshakeError expects another connectionCheckOutStartedEvent).
+        unless error.retryable_overload?
+          emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+          raise error
+        end
         last_network = error
         Fiber.yield
       rescue error : NetworkError
@@ -526,6 +534,10 @@ class Mongo::Client
           raise wrapped
         end
         fail_known_handshake_overload(wrapped, server_description)
+        unless wrapped.retryable_overload?
+          emit_cmap_event(Monitoring::CMAP::ConnectionCheckOutFailedEvent.new(server_description.address, "connectionError"))
+          raise wrapped
+        end
         last_network = wrapped
         Fiber.yield
       rescue error
@@ -651,10 +663,16 @@ class Mongo::Client
   end
 
   private def fail_setup_connection(server_description : SDAM::ServerDescription, connection : Mongo::Connection, error : Exception, handshake_complete : Bool) : NoReturn
-    # Auth (hello already done) in load-balanced mode clears that serviceId first.
-    if @options.load_balanced && handshake_complete
-      if sid = connection.service_id
-        clear_connection_pool(server_description, sid)
+    # Auth after hello: mark Unknown and clear the pool (SDAM). Load-balanced:
+    # clear that serviceId only, do not mark Unknown. Do not add backpressure labels.
+    if handshake_complete
+      if @options.load_balanced
+        if sid = connection.service_id
+          clear_connection_pool(server_description, sid)
+        end
+      else
+        network = error.is_a?(IO::Error) || error.is_a?(Socket::Error) || error.is_a?(Mongo::Error::Network)
+        handle_application_error(server_description, connection, error, network: network, shutdown: true)
       end
     end
     emit_cmap_event(Monitoring::CMAP::ConnectionClosedEvent.new(server_description.address, connection.connection_id, "error"))

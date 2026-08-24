@@ -19,6 +19,9 @@ class Mongo::Connection
   # True after hello succeeds. Handshake errors before this must not clear the pool.
   property handshake_complete : Bool = false
   @sasl_supported_mechs : Array(String)? = nil
+  @speculative_scram : Auth::Scram? = nil
+  @speculative_x509 : Bool = false
+  @speculative_reply : BSON? = nil
   # After the first handshake, later hellos follow helloOk from the server.
   getter? use_hello : Bool = false
   # Monitor sockets must not negotiate SASL mechanisms (SDAM spec).
@@ -149,15 +152,22 @@ class Mongo::Connection
         max_await_time_ms: max_await_time_ms
       )
 
-      # Monitor sockets must not send saslSupportedMechs.
+      # Monitor sockets must not send saslSupportedMechs or speculativeAuthenticate (SDAM).
+      spec_doc = nil.as(BSON?)
+      if first && !@monitor
+        spec_doc = start_speculative_auth
+      end
       add_sasl = first && !@monitor && @credentials.username && !@credentials.mechanism
       api = @options.server_api
-      if add_sasl || api
+      if add_sasl || api || spec_doc
         body.append do |builder|
           if add_sasl
             source = @credentials.source || ""
             source = "admin" if source.empty?
             builder["saslSupportedMechs"] = "#{source}.#{@credentials.username}"
+          end
+          if spec_doc
+            builder["speculativeAuthenticate"] = spec_doc
           end
           if api
             builder["apiVersion"] = api.version
@@ -197,6 +207,13 @@ class Mongo::Connection
 
     if result.sasl_supported_mechs
       @sasl_supported_mechs = result.sasl_supported_mechs
+    end
+
+    @speculative_reply = result.speculative_authenticate
+    if @speculative_reply.nil?
+      if spec = response.body["speculativeAuthenticate"]?
+        @speculative_reply = spec.as?(BSON)
+      end
     end
 
     @use_hello = !use_legacy || result.helloOk == true
@@ -306,20 +323,29 @@ class Mongo::Connection
     return if server_description.type.rs_arbiter?
     return if @credentials.username.nil? && @credentials.password.nil? && @credentials.mechanism.nil?
 
-    if mechanism = @credentials.mechanism
-      mechanism = Auth::Mechanism.parse(mechanism.gsub('-', ""))
-    elsif @sasl_supported_mechs
-      mechanisms = @sasl_supported_mechs.try &.map { |mech|
-        Auth::Mechanism.parse(mech.gsub('-', ""))
-      }
-      if mechanisms.try &.any? &.scram_sha256?
-        mechanism = Auth::Mechanism::ScramSha256
-      else
-        mechanism = Auth::Mechanism::ScramSha1
+    if reply = @speculative_reply
+      if scram = @speculative_scram
+        scram.continue_from_hello(self, reply)
+        clear_speculative_auth
+        return
+      elsif @speculative_x509
+        clear_speculative_auth
+        return
       end
-    else
-      mechanism = Auth::Mechanism::ScramSha1
     end
+    clear_speculative_auth
+
+    mechanism = if m = @credentials.mechanism
+                  Auth.parse_mechanism(m)
+                elsif mechs = @sasl_supported_mechs
+                  if mechs.any? { |name| name.upcase.gsub(/[-_]/, "") == "SCRAMSHA256" }
+                    Auth::Mechanism::ScramSha256
+                  else
+                    Auth::Mechanism::ScramSha1
+                  end
+                else
+                  Auth::Mechanism::ScramSha1
+                end
 
     case mechanism
     when .scram_sha1?, .scram_sha256?
@@ -332,6 +358,45 @@ class Mongo::Connection
     else
       raise Mongo::Error.new "Authentication mechanism not supported: #{mechanism}"
     end
+  end
+
+  private def speculative_mechanism : Auth::Mechanism?
+    return nil if @monitor
+    if m = @credentials.mechanism
+      case m.upcase.gsub(/[-_]/, "")
+      when "SCRAMSHA1"
+        Auth::Mechanism::ScramSha1
+      when "SCRAMSHA256"
+        Auth::Mechanism::ScramSha256
+      when "MONGODBX509"
+        Auth::Mechanism::MongodbX509
+      else
+        nil
+      end
+    elsif @credentials.username
+      Auth::Mechanism::ScramSha256
+    end
+  end
+
+  private def start_speculative_auth : BSON?
+    mech = speculative_mechanism
+    return nil unless mech
+    case mech
+    when .scram_sha1?, .scram_sha256?
+      return nil unless @credentials.username
+      scram = Auth::Scram.new(mech, @credentials)
+      @speculative_scram = scram
+      scram.start_document
+    when .mongodb_x509?
+      @speculative_x509 = true
+      Auth::X509.speculative_document(@credentials)
+    end
+  end
+
+  private def clear_speculative_auth
+    @speculative_scram = nil
+    @speculative_reply = nil
+    @speculative_x509 = false
   end
 
   def send(op_msg : Messages::OpMsg, command = nil, log = true, &block)

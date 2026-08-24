@@ -39,7 +39,12 @@ module Mongo::Commands::Hello
     property max_wire_version : Int32 = 0
     property read_only : Bool?
     property compression : Array(String)?
+    # Hello reply field is saslSupportedMechs (mechanism list).
+    @[BSON::Field(key: "saslSupportedMechs")]
     property sasl_supported_mechs : Array(String)?
+    # Nested first SASL reply when the client sent speculativeAuthenticate.
+    @[BSON::Field(key: "speculativeAuthenticate")]
+    property speculative_authenticate : BSON?
 
     # Sharded instances
     property msg : String?

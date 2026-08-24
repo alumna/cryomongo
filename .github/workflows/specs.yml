@@ -13,13 +13,13 @@ jobs:
       matrix:
         include:
           - topology: standalone
-            uri: mongodb://localhost:27017/?compressors=zlib
+            uri: mongodb://bob:pwd123@localhost:27017/?authSource=admin&compressors=zlib
           - topology: replicaset
-            uri: mongodb://127.0.0.1:27017/?replicaSet=rs0&compressors=zlib
+            uri: mongodb://bob:pwd123@127.0.0.1:27017/?replicaSet=rs0&authSource=admin&compressors=zlib
           - topology: sharded
-            uri: mongodb://localhost:27017,localhost:27016/?compressors=zlib
+            uri: mongodb://bob:pwd123@localhost:27017,localhost:27016/?authSource=admin&compressors=zlib
           - topology: load-balanced
-            uri: mongodb://127.0.0.1:8000/?loadBalanced=true&compressors=zlib
+            uri: mongodb://bob:pwd123@127.0.0.1:8000/?loadBalanced=true&authSource=admin&compressors=zlib
     runs-on: ubuntu-24.04
     name: MongoDB 8.0 ${{ matrix.topology }}
     steps:
@@ -49,8 +49,8 @@ jobs:
         env:
           TOPOLOGY: ${{ matrix.topology }}
           MONGODB_URI: ${{ matrix.uri }}
-          SINGLE_MONGOS_LB_URI: mongodb://127.0.0.1:8000/?loadBalanced=true&compressors=zlib
-          MULTI_MONGOS_LB_URI: mongodb://127.0.0.1:8001/?loadBalanced=true&compressors=zlib
+          SINGLE_MONGOS_LB_URI: mongodb://bob:pwd123@127.0.0.1:8000/?loadBalanced=true&authSource=admin&compressors=zlib
+          MULTI_MONGOS_LB_URI: mongodb://bob:pwd123@127.0.0.1:8001/?loadBalanced=true&authSource=admin&compressors=zlib
           UTF_TIMING_LOG: tmp/utf-timing.log
           CRYSTAL_WORKERS: "2"
         run: |

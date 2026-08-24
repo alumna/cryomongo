@@ -52,6 +52,44 @@ wait_running() {
   return 1
 }
 
+# Application URI user. Do not enable --auth. SASL still runs when the URI has
+# userinfo, so failCommand on saslContinue and auth: true UTF can run.
+TEST_USER="${TEST_USER:-bob}"
+TEST_PWD="${TEST_PWD:-pwd123}"
+TEST_AUTH_DB="${TEST_AUTH_DB:-admin}"
+
+create_test_user() {
+  local name="${1:-mongo}"
+  local extra=()
+  if [ -n "${2:-}" ]; then
+    extra=(--port "$2")
+  else
+    # Replica set: 27017 is not always primary. mongos/standalone keep default port.
+    local primary_port
+    primary_port=$(docker exec "$name" mongosh --quiet --eval '
+      const h = db.hello();
+      if (h.msg === "isdbgrid" || h.isWritablePrimary) { print(""); quit(0); }
+      if (h.primary) { print("" + h.primary.split(":").pop()); quit(0); }
+      quit(1);
+    ')
+    if [ -n "$primary_port" ]; then
+      extra=(--port "$primary_port")
+    fi
+  fi
+  docker exec "$name" mongosh "${extra[@]}" --quiet --eval "
+    try {
+      db.getSiblingDB('${TEST_AUTH_DB}').createUser({
+        user: '${TEST_USER}',
+        pwd: '${TEST_PWD}',
+        roles: [ { role: 'root', db: 'admin' } ]
+      });
+    } catch (e) {
+      const m = e.message || String(e);
+      if (m.indexOf('already exists') === -1) throw e;
+    }
+  "
+}
+
 wait_primary() {
   local name="$1" port="$2"
   for _ in $(seq 1 40); do
@@ -87,6 +125,7 @@ start_standalone() {
   stop_all
   docker run --name mongo -d -p 27017:27017 --tmpfs /data/db "$IMAGE" $MONGOD_PARAMS
   wait_running mongo
+  create_test_user mongo
   echo "standalone is ready on 27017"
 }
 
@@ -107,6 +146,7 @@ start_replicaset() {
   wait_running mongo 27019
   docker exec mongo mongosh --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"},{_id:1,host:"127.0.0.1:27018"},{_id:2,host:"127.0.0.1:27019"}]})'
   wait_rs_members mongo
+  create_test_user mongo
   echo "replicaset is ready on 27017 (3 members: 27017, 27018, 27019)"
 }
 
@@ -144,6 +184,7 @@ start_sharded() {
   docker run -d --name mongos2 --network mongo-test $mongos2_ports "$IMAGE" \
     mongos --configdb cfg/cfg:27019 --bind_ip_all $MONGOS_PARAMS $mongos2_lb
   wait_running mongos2
+  create_test_user mongos
   echo "sharded cluster is ready on 27017 and 27016"
   if [ "$lb" = "lb" ]; then
     echo "load-balancer ports: 27050 (mongos 27017) and 27051 (mongos 27016)"
