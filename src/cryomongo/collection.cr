@@ -183,6 +183,16 @@ class Mongo::Collection
     )
   end
 
+  # Drops this collection. NamespaceNotFound (code 26) is ignored.
+  #
+  # NOTE: [for more details, please check the official MongoDB documentation](https://docs.mongodb.com/manual/reference/command/drop/).
+  def drop(*, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil, deadline : Mongo::Deadline? = nil) : Commands::Common::BaseResult?
+    @database.command(Commands::Drop, name: @name, session: session, timeout_ms: timeout_ms, deadline: deadline, write_concern: @write_concern)
+  rescue e : Mongo::Error::Command
+    return nil if e.code == 26
+    raise e
+  end
+
   # Returns a variety of storage statistics for the collection.
   #
   # NOTE: [for more details, please check the official MongoDB documentation](https://docs.mongodb.com/manual/reference/command/collStats/).

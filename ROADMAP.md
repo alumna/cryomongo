@@ -89,7 +89,7 @@ Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CR
 
 ## Remaining work (MongoDB 8.0, toward production grade)
 
-Phases 1–3 are done. GitHub Docker Phase **3.12** `crystal spec` is **905** examples (859 after 3.11 plus deprioritized selection JSON, compression, and TLS password specs): standalone **2:59 / 167 pending**, replica set **7:45 / 45 pending**, sharded **12:20 / 56 pending**, load-balanced **6:35 / 102 pending**. Replica set is **3** members. The driver is production-capable for core 8.0 (CRUD, sessions, transactions, zlib / snappy / zstd). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). Remaining 8.0 holes are Phase **3.13–3.14**. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
+Phases 1–3 are done. GitHub Docker Phase **3.12** `crystal spec` is **905** examples: standalone **1:59 / 167 pending**, replica set **4:26 / 45 pending**, sharded **6:56 / 56 pending**, load-balanced **4:24 / 102 pending**. Replica set is **3** members. Phase **3.13.1** closed leftover UTF `dropDatabase` and GridFS `drop`. Remaining pending is `runOnRequirements` / official `skipReason` / out of scope. Optional CMAP wait-queue options are 3.13.2. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
 
 ### Out of scope until the user asks
 
@@ -203,14 +203,18 @@ Env: `MONGODB_LOG_COMMAND`, `MONGODB_LOG_TOPOLOGY`, `MONGODB_LOG_CONNECTION`, `M
 - [x] Load-balanced CSOT: after a timed-out getMore, `killCursors` stays on the pin (`timeoutMS is refreshed for close`).
 - [x] Two mongos `serviceId`s from HAProxy (`UTF_RUN_TWO_MONGOS=1`) for `sdam-error-handling.json`.
 
-### Phase 3.13 — Replica-set leftover skip audit
+### Phase 3.13 — Leftover skip audit
 
 `replicaset-emit-topology-changed-before-close.json` wants **4** `topologyDescriptionChanged` events before close. The 3-member `rs0` (native and GitHub Docker, added in 3.7) emits 4, so that file runs.
 
+GitHub Docker 3.12 pending counts (file-level Crystal `pending`) are standalone **167**, replica set **45**, sharded **56**, load-balanced **102**. Almost all of those files skip because `runOnRequirements` does not match (wrong topology, `auth: false` with URI userinfo, `maxServerVersion` for old servers) or because of an official `skipReason`. Intra-file `skip_op` leftovers are 3.13.1.
+
 - [x] Add a 3-member replica set (native `scripts/mongo-topology.sh` and GitHub Docker), **or** skip this file only when the set has one member.
 - [x] Un-skip `replicaset-emit-topology-changed-before-close.json` when the topology can emit 4 events.
-- [ ] Audit leftover skips from Phases 1–3 that should not have stayed skipped.
-- [ ] Audit any item showed as "Pending" when executing crystal spec in the multiple different topologies.
+- [x] **3.13.1** Audit leftover skips and pending lists. UTF `dropDatabase` and GridFS `drop` (CSOT `gridfs-advanced.json` drop tests). `Database#drop` / `Collection#drop`.
+- [ ] **3.13.2** Optional CMAP `waitQueueSize` / `waitQueueMultiple` (deprecated; the spec says skip if the driver does not support them). Do not start unless we want those two log tests.
+- [x] Audit leftover skips from Phases 1–3 that should not have stayed skipped.
+- [x] Audit any item showed as "Pending" when executing crystal spec in the multiple different topologies. Remaining pending is expected (topology / auth / old-server / out of scope). Details: `FIXES.md`.
 
 ### Phase 3.14 — Performance review and improvement
 

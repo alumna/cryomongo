@@ -422,8 +422,10 @@ module Mongo::GridFS
     # ```
     def drop(*, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil)
       deadline = start_deadline(timeout_ms)
-      bucket.delete_many(BSON.new, session: session, deadline: deadline)
-      chunks.delete_many(BSON.new, session: session, deadline: deadline)
+      # GridFS spec: drop the files collection first, then the chunks collection.
+      # One CSOT deadline covers both drop commands.
+      bucket.drop(session: session, deadline: deadline)
+      chunks.drop(session: session, deadline: deadline)
     end
 
     private module Internal

@@ -276,6 +276,12 @@ module Mongo::Unified::Operations
     target.as(Mongo::Database).command(Mongo::Commands::Drop, name: coll_name, session: session, options: NamedTuple.new) rescue nil
   end
 
+  private def execute_drop_database(args, target, session)
+    raise "Missing arguments" unless args
+    name = args["database"].as_s
+    target.as(Mongo::Client)[name].drop(session: session, timeout_ms: op_timeout_ms(args))
+  end
+
   private def execute_create_index(args, target, session)
     raise "Missing arguments" unless args
     keys = BSON.from_json(args["keys"].to_json)
@@ -1215,6 +1221,10 @@ module Mongo::Unified::Operations
     filename = args["filename"].as_s
     new_name = args["newFilename"].as_s
     target.as(Mongo::GridFS::Bucket).rename_by_name(filename, new_name, timeout_ms: op_timeout_ms(args))
+  end
+
+  private def execute_gridfs_drop(args, target)
+    target.as(Mongo::GridFS::Bucket).drop(timeout_ms: op_timeout_ms(args))
   end
 
   private def execute_rename_collection(args, target, session)

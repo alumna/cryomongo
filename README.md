@@ -506,6 +506,9 @@ gridfs.delete_by_name("file.txt")
 gridfs.rename(id, "new.txt")
 gridfs.rename_by_name("file.txt", "new.txt")
 
+# Drop the files and chunks collections
+gridfs.drop
+
 # And many more methods… (check the link below.)
 ```
 
