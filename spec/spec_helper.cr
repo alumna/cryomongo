@@ -1,5 +1,6 @@
 require "spec"
 require "json"
+require "wait_group"
 require "../src/cryomongo"
 
 # Parallel execution for CI. The default context stays at 1 worker until resized.
@@ -53,15 +54,43 @@ def mongodb_uri_one_host(uri : String) : String
   "#{scheme}://#{hosts[0]}#{suffix}"
 end
 
+def mongodb_uri_strip_option(uri : String, name : String) : String
+  return uri unless uri.includes?('?')
+  base, query = uri.split('?', 2)
+  kept = query.split('&').reject { |part| part.downcase.starts_with?(name.downcase + "=") }
+  kept.empty? ? base : "#{base}?#{kept.join("&")}"
+end
+
+# One mongod/mongos with SDAM monitors. Load-balanced URIs have no monitors, so
+# close-timing tests use this instead of MONGODB_URI.
+def mongodb_uri_direct(uri : String) : String
+  uri = mongodb_uri_one_host(uri)
+  uri = mongodb_uri_strip_option(uri, "replicaSet")
+  uri = mongodb_uri_strip_option(uri, "loadBalanced")
+  uri = mongodb_uri_with(uri, "directConnection=true") unless uri.downcase.includes?("directconnection=")
+  uri
+end
+
 private def drop_user_databases
   uri = ENV["MONGODB_URI"]
   client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=2000"))
   begin
+    names = [] of String
     result = client.list_databases
     result.databases.try &.each do |db|
       next if SYSTEM_DATABASES.includes?(db.name)
-      client[db.name].command(Mongo::Commands::DropDatabase) rescue nil
+      names << db.name
     end
+    wg = WaitGroup.new
+    names.each do |name|
+      wg.add(1)
+      spawn do
+        client[name].command(Mongo::Commands::DropDatabase) rescue nil
+      ensure
+        wg.done
+      end
+    end
+    wg.wait
   rescue
     # Server may be down or not yet a replica set. Offline specs still run.
   ensure
@@ -69,5 +98,7 @@ private def drop_user_databases
   end
 end
 
+# Drop leftover databases before examples. Do not drop again in after_suite:
+# that extra client plus sequential drops sat in the ~18s gap after the last
+# UTF file on GitHub. The next run's before_suite still cleans.
 Spec.before_suite { drop_user_databases }
-Spec.after_suite { drop_user_databases }

@@ -33,16 +33,24 @@ class Mongo::SDAM::RttMonitor
     @started.get
   end
 
-  def close : Nil
+  # Stop the fiber. Do not Socket#close from this caller: hello() may hold
+  # FdLock on another execution-context thread. interrupt_and_wake is enough.
+  # The run loop's ensure closes the socket.
+  def interrupt : Nil
     @closed.set(true)
-    # Interrupt an in-flight hello. Sending on @wake only helps the sleep
-    # between pings; hello() does not wait on that channel.
-    drop_socket(close_socket: true)
-    select
-    when @wake.send(nil)
-    else
+    drop_socket(close_socket: false)
+    begin
+      select
+      when @wake.send(nil)
+      else
+      end
+      @wake.close
+    rescue Channel::ClosedError
     end
-    @wake.close rescue nil
+  end
+
+  def close : Nil
+    interrupt
     @done.wait if @started.get
   end
 

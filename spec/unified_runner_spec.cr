@@ -47,13 +47,16 @@ describe "Unified Test Runner" do
   end
 
   it "closes a client without waiting a full heartbeat" do
-    uri = ENV["MONGODB_URI"]
+    uri = mongodb_uri_direct(ENV["MONGODB_URI"])
     client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=3000"))
     begin
       client.command(Mongo::Commands::Ping)
     rescue e : Mongo::Error::ServerSelection
       pending! "MongoDB is not reachable as a replica set (#{e.message}). Run: sudo scripts/mongo-topology.sh replicaset"
     end
+    # First hello is a handshake. Wait so awaitable hello is in flight (the
+    # GitHub ~18s hang was a long-lived client, not close-right-after-ping).
+    sleep 500.milliseconds
     started = Time.instant
     client.close
     (Time.instant - started).should be < 3.seconds

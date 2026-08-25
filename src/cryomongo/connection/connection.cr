@@ -560,6 +560,9 @@ class Mongo::Connection::AwaitReadIO < IO
       else
         wait = slice_cap
       end
+      if @connection.interrupted?
+        wait = 1.millisecond
+      end
       @raw.read_timeout = wait
       @raw.write_timeout = wait
       inner = @inner
