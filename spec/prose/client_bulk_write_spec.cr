@@ -3,7 +3,7 @@ require "../spec_helper"
 # CRUD prose tests 3–9, 11, 12, 15, 16 for MongoClient.bulkWrite
 # (specifications/source/crud/tests/README.md). UTF does not cover batch split.
 
-private DB  = "client_bw_prose"
+private DB   = "client_bw_prose"
 private COLL = "coll"
 private NS   = "#{DB}.#{COLL}"
 
@@ -131,34 +131,36 @@ describe "CRUD prose: client bulkWrite" do
   end
 
   it "5. collects writeConcernErrors across batches" do
-    client = open_client(extra: "retryWrites=false", one_host: true)
-    events = [] of Mongo::Monitoring::Commands::CommandStartedEvent
-    begin
-      hello = hello_or_pending(client)
-      subscribe_started(client, events)
-      drop_coll(client)
-      client["admin"].command(
-        Mongo::Commands::ConfigureFailPoint,
-        fail_point: "failCommand",
-        mode: {times: 2},
-        options: {
-          data: {
-            failCommands:      ["bulkWrite"],
-            writeConcernError: {code: 91, errmsg: "Replication is being shut down"},
+    Mongo::SpecCluster.exclusive do
+      client = open_client(extra: "retryWrites=false", one_host: true)
+      events = [] of Mongo::Monitoring::Commands::CommandStartedEvent
+      begin
+        hello = hello_or_pending(client)
+        subscribe_started(client, events)
+        drop_coll(client)
+        client["admin"].command(
+          Mongo::Commands::ConfigureFailPoint,
+          fail_point: "failCommand",
+          mode: {times: 2},
+          options: {
+            data: {
+              failCommands:      ["bulkWrite"],
+              writeConcernError: {code: 91, errmsg: "Replication is being shut down"},
+            },
           },
-        },
-      )
-      n = hello.max_write_batch_size + 1
-      models = [] of Mongo::ClientBulk::WriteModel
-      n.times { models << Mongo::ClientBulk::InsertOne.new(NS, {a: "b"}) }
-      error = expect_raises(Mongo::Error::ClientBulkWrite) { client.bulk_write(models) }
-      error.write_concern_errors.size.should eq 2
-      error.partial_result.try(&.inserted_count).should eq n
-      bulk_started(events).size.should eq 2
-    ensure
-      fail_off(client)
-      drop_coll(client)
-      client.close
+        )
+        n = hello.max_write_batch_size + 1
+        models = [] of Mongo::ClientBulk::WriteModel
+        n.times { models << Mongo::ClientBulk::InsertOne.new(NS, {a: "b"}) }
+        error = expect_raises(Mongo::Error::ClientBulkWrite) { client.bulk_write(models) }
+        error.write_concern_errors.size.should eq 2
+        error.partial_result.try(&.inserted_count).should eq n
+        bulk_started(events).size.should eq 2
+      ensure
+        fail_off(client)
+        drop_coll(client)
+        client.close
+      end
     end
   end
 
@@ -246,42 +248,44 @@ describe "CRUD prose: client bulkWrite" do
   end
 
   it "9. handles a getMore error and kills the cursor" do
-    client = open_client(one_host: true)
-    events = [] of Mongo::Monitoring::Commands::CommandStartedEvent
-    begin
-      hello = hello_or_pending(client)
-      subscribe_started(client, events)
-      drop_coll(client)
-      client["admin"].command(
-        Mongo::Commands::ConfigureFailPoint,
-        fail_point: "failCommand",
-        mode: {times: 1},
-        options: {
-          data: {
-            failCommands: ["getMore"],
-            errorCode:    8,
+    Mongo::SpecCluster.exclusive do
+      client = open_client(one_host: true)
+      events = [] of Mongo::Monitoring::Commands::CommandStartedEvent
+      begin
+        hello = hello_or_pending(client)
+        subscribe_started(client, events)
+        drop_coll(client)
+        client["admin"].command(
+          Mongo::Commands::ConfigureFailPoint,
+          fail_point: "failCommand",
+          mode: {times: 1},
+          options: {
+            data: {
+              failCommands: ["getMore"],
+              errorCode:    8,
+            },
           },
-        },
-      )
-      half = hello.max_bson_object_size // 2
-      models = [
-        Mongo::ClientBulk::UpdateOne.new(NS, {_id: "a" * half}, BSON.new({"$set" => {"x" => 1}}), upsert: true),
-        Mongo::ClientBulk::UpdateOne.new(NS, {_id: "b" * half}, BSON.new({"$set" => {"x" => 1}}), upsert: true),
-      ] of Mongo::ClientBulk::WriteModel
-      error = expect_raises(Mongo::Error::ClientBulkWrite) { client.bulk_write(models, verbose_results: true) }
-      inner = error.error
-      inner.should be_a(Mongo::Error::Command)
-      if cmd = inner.as?(Mongo::Error::Command)
-        cmd.code.should eq 8
+        )
+        half = hello.max_bson_object_size // 2
+        models = [
+          Mongo::ClientBulk::UpdateOne.new(NS, {_id: "a" * half}, BSON.new({"$set" => {"x" => 1}}), upsert: true),
+          Mongo::ClientBulk::UpdateOne.new(NS, {_id: "b" * half}, BSON.new({"$set" => {"x" => 1}}), upsert: true),
+        ] of Mongo::ClientBulk::WriteModel
+        error = expect_raises(Mongo::Error::ClientBulkWrite) { client.bulk_write(models, verbose_results: true) }
+        inner = error.error
+        inner.should be_a(Mongo::Error::Command)
+        if cmd = inner.as?(Mongo::Error::Command)
+          cmd.code.should eq 8
+        end
+        error.partial_result.try(&.upserted_count).should eq 2
+        error.partial_result.try(&.update_results).try(&.size).should eq 1
+        events.any? { |event| event.command_name == "getMore" }.should eq true
+        events.any? { |event| event.command_name == "killCursors" }.should eq true
+      ensure
+        fail_off(client)
+        drop_coll(client)
+        client.close
       end
-      error.partial_result.try(&.upserted_count).should eq 2
-      error.partial_result.try(&.update_results).try(&.size).should eq 1
-      events.any? { |event| event.command_name == "getMore" }.should eq true
-      events.any? { |event| event.command_name == "killCursors" }.should eq true
-    ensure
-      fail_off(client)
-      drop_coll(client)
-      client.close
     end
   end
 
