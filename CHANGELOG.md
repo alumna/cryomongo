@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+Replica-set GitHub flaked once after v0.17.2: `logging-replicaset.json` **Failing heartbeat** (`waitForEvent` `serverHeartbeatFailedEvent` got 0 in 10s). The client uses the default 10s heartbeat. Awaitable hello does not see `failCommand` until that wait ends, and `waitForEvent` is also 10s. After a hello `closeConnection` / `errorCode` failPoint, UTF aborts in-progress monitor hello on the matching appName client when that client observes `serverHeartbeatFailedEvent`. Backpressure tests freeze monitors (`heartbeatFrequencyMS` 1000000) and are not aborted. Do not copy this failPoint to all members. `:nodoc:` helper on `Client` / `Monitor`; production call sites unchanged.
+
 ## 0.17.2 - 2026-08-25
 
 Replica-set GitHub flaked after v0.17.1 on squash-and-merge (5 extra insert events). UTF files did not overlap. The seed hello failPoint now applies only to handshake errors (`errorCode` or `closeConnection`), not CSOT alwaysOn `blockConnection`. `disable_fail_points` turns off failCommand on every member through a `directConnection` client, including Unknown / paused pools. `waitForPrimaryChange` also does a w:1 insert on that primary. No production `src/` change. GitHub after this fix: 0 failures on all four topologies. Same example / pending counts and time band as v0.17.1 (2:01 / 4:32 / 6:55 / 4:03).

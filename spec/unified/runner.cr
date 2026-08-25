@@ -578,6 +578,7 @@ module Mongo::Unified
             ignored = req.ignoreCommandMonitoringEvents.try(&.map(&.downcase)) || [] of String
             @registry.ignored_command_events[client_id] = ignored
             observed = req.observeEvents || [] of String
+            @registry.observed_events[client_id] = observed
             observe_sensitive = req.observeSensitiveCommands == true || @force_observe_sensitive
 
             client.subscribe_commands do |event|

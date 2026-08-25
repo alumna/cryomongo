@@ -123,6 +123,15 @@ module Mongo::SDAM
       request_immediate_scan
     end
 
+    # UTF: hello failCommand does not apply to an in-flight awaitable hello.
+    # Shutdown this monitor fd so the next hello is sent now (interrupt() alone
+    # can sit out a 100ms read slice on another execution-context thread).
+    # cancel_check stays interrupt-only: application sockets may reuse fds.
+    def abort_in_progress_hello : Nil
+      steal_monitor_connection.try(&.interrupt_and_wake)
+      request_immediate_scan
+    end
+
     def check(previous : ServerDescription) : ServerDescription
       @retry_now = false
       result, round_trip_time, from_handshake = do_check(previous)

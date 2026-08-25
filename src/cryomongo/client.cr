@@ -332,6 +332,14 @@ class Mongo::Client
     start_monitoring
   end
 
+  # :nodoc:
+  # UTF: after a hello failCommand, abort awaitable hello so waitForEvent does
+  # not race the default heartbeatFrequencyMS (both 10s). Production code
+  # does not call this.
+  def abort_in_progress_monitor_hello : Nil
+    @monitors.dup.each(&.abort_in_progress_hello)
+  end
+
   ##################
   # Public Methods #
   ##################

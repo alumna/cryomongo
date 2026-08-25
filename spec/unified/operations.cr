@@ -74,7 +74,13 @@ module Mongo::Unified::Operations
         # copy CSOT alwaysOn + blockConnection hello failPoints: that retried
         # insertOne in command-execution. Do not copy every failPoint to all
         # members (extra Unknown / leftover failGetMoreAfterCursorCheckout).
-        arm_hello_failpoint_on_uri_seed(registry, client, name, mode, data.as?(BSON))
+        bson_data = data.as?(BSON)
+        arm_hello_failpoint_on_uri_seed(registry, client, name, mode, bson_data)
+        # logging-*.json Failing heartbeat: client already exists, default
+        # heartbeat is 10s, waitForEvent is 10s. Awaitable hello does not see
+        # failCommand until that wait ends. Abort only clients that observe
+        # serverHeartbeatFailedEvent (backpressure freezes monitors on purpose).
+        abort_hello_failpoint_monitors(registry, bson_data)
       end
     end
   end
@@ -108,22 +114,43 @@ module Mongo::Unified::Operations
   # blockConnection to raise RTT, and that must stay on the primary only.
   private def hello_failpoint_for_new_client?(data : BSON?, registry : Registry) : Bool
     return false unless data
-    app = data["appName"]?.try(&.as?(String)) || data["appname"]?.try(&.as?(String))
+    app = failpoint_appname(data)
     return false unless app
-    cmds = data["failCommands"]?
-    return false unless cmds.is_a?(BSON)
-    has_hello = false
-    cmds.each do |_, value|
-      next unless s = value.as?(String)
-      n = s.downcase
-      has_hello = true if n == "hello" || n == "ismaster"
-    end
-    return false unless has_hello
+    return false unless hello_fail_commands?(data)
     return false unless hello_handshake_error_failpoint?(data)
     registry.clients.each_value do |c|
       return false if c.options.appname == app
     end
     true
+  end
+
+  private def abort_hello_failpoint_monitors(registry, data : BSON?) : Nil
+    return unless data
+    app = failpoint_appname(data)
+    return unless app
+    return unless hello_fail_commands?(data)
+    return unless hello_handshake_error_failpoint?(data)
+    registry.clients.each do |id, c|
+      next unless c.options.appname == app
+      observed = registry.observed_events[id]?
+      next unless observed && observed.includes?("serverHeartbeatFailedEvent")
+      c.abort_in_progress_monitor_hello
+    end
+  end
+
+  private def failpoint_appname(data : BSON) : String?
+    data["appName"]?.try(&.as?(String)) || data["appname"]?.try(&.as?(String))
+  end
+
+  private def hello_fail_commands?(data : BSON) : Bool
+    cmds = data["failCommands"]?
+    return false unless cmds.is_a?(BSON)
+    cmds.each do |_, value|
+      next unless s = value.as?(String)
+      n = s.downcase
+      return true if n == "hello" || n == "ismaster"
+    end
+    false
   end
 
   private def hello_handshake_error_failpoint?(data : BSON) : Bool
