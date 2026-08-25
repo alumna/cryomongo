@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Replica-set GitHub can still flake after v0.17.1 (5 extra insert events on squash-and-merge, then green on the next markdown bump). UTF files did not overlap. The seed hello failPoint now applies only to handshake errors (`errorCode` or `closeConnection`), not CSOT alwaysOn `blockConnection`. `disable_fail_points` turns off failCommand on every member through a `directConnection` client, including Unknown / paused pools. `waitForPrimaryChange` checks a w:1 insert on that primary, not only hello.
+Replica-set GitHub flaked after v0.17.1 on squash-and-merge (5 extra insert events). UTF files did not overlap. The seed hello failPoint now applies only to handshake errors (`errorCode` or `closeConnection`), not CSOT alwaysOn `blockConnection`. `disable_fail_points` turns off failCommand on every member through a `directConnection` client, including Unknown / paused pools. `waitForPrimaryChange` also does a w:1 insert on that primary. No production `src/` change. GitHub after this fix: 0 failures on all four topologies. Same example / pending counts and time band as v0.17.1 (2:01 / 4:32 / 6:55 / 4:03).
 
 ## 0.17.1 - 2026-08-25
 
