@@ -49,6 +49,7 @@ module Mongo::Unified
     end
 
     property ignored_command_events = Hash(String, Array(String)).new
+    property observed_events = Hash(String, Array(String)).new
     property threads = Hash(String, Channel(Exception?)).new
 
     def close_all
