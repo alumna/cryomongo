@@ -12,8 +12,9 @@ class Mongo::Client
     **args,
   )
     provided_server = server_description
-    server_description = live_retryable_write_server(
-      provided_server || session.server_description,
+    server_description = select_retryable_write_server(
+      provided_server,
+      session,
       command,
       args,
       read_preference,
@@ -38,8 +39,15 @@ class Mongo::Client
 
     loop do
       begin
-        preferred = provided_server || session.server_description
-        server_description = live_retryable_write_server(preferred, command, args, read_preference, deadline, deprioritized)
+        server_description = select_retryable_write_server(
+          provided_server,
+          session,
+          command,
+          args,
+          read_preference,
+          deadline,
+          deprioritized
+        )
         # Unknown: handshake rediscovers. Standalone: send once, no txnNumber.
         if !server_description.type.unknown? &&
            (!topology.supports_sessions? || !server_description.supports_retryable_writes?) &&
@@ -107,9 +115,27 @@ class Mongo::Client
     end
   end
 
-  # Prefer a live copy of the pinned server. After closeConnection that
+  # Session pin: wait until that mongos is selectable (DRIVERS-2032). After
+  # unpin, handshake an Unknown member or pick another mongos (recovery token).
+  private def select_retryable_write_server(
+    provided : SDAM::ServerDescription?,
+    session : Session::ClientSession,
+    command,
+    args,
+    read_preference : ReadPreference,
+    deadline : Mongo::Deadline? = nil,
+    deprioritized : Array(String)? = nil,
+  ) : SDAM::ServerDescription
+    if pin = session.server_description
+      return wait_for_selectable_pin(pin, deadline)
+    end
+    live_retryable_write_server(provided, command, args, read_preference, deadline, deprioritized)
+  end
+
+  # Prefer a live copy of a caller-provided server. After closeConnection that
   # address is Unknown. Handshake on get_connection rediscovers it. Waiting
-  # only on the monitor can miss that (pool-cleared-error).
+  # only on the monitor can miss that (pool-cleared-error). A still-pinned
+  # session uses wait_for_selectable_pin instead.
   private def live_retryable_write_server(
     preferred : SDAM::ServerDescription?,
     command,
@@ -192,7 +218,7 @@ class Mongo::Client
 
     loop do
       begin
-        selected = provided_server || session.server_description || server_selection(command, args, read_preference, deadline, deprioritized)
+        selected = select_with_session_pin(provided_server, session, command, args, read_preference, deadline, deprioritized)
 
         if session.options.snapshot && selected.max_wire_version < 13
           raise Error::Client.new("Snapshot reads require MongoDB 5.0 or later")

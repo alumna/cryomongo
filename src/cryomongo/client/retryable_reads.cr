@@ -28,7 +28,7 @@ class Mongo::Client
 
     loop do
       begin
-        server_description = provided_server || session.server_description || server_selection(command, args, read_preference, deadline, deprioritized)
+        server_description = select_with_session_pin(provided_server, session, command, args, read_preference, deadline, deprioritized)
         # TopologyType Single returns an Unknown server immediately. Connecting
         # runs hello and rediscovers. Do not abort the retry just because
         # sessions dropped while the only server was Unknown.

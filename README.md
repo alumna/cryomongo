@@ -43,6 +43,7 @@ The driver is **0.x**. It is ready for core CRUD, sessions, and transactions on 
 - CI matrix: standalone, replica set, sharded, and load-balanced. Spec jobs resize the default execution context.
 - zlib / snappy / zstd OP_COMPRESSED (`compressors=zlib,snappy,zstd`). Pool map lock is not nested with handshake I/O. Idle sockets are LIFO.
 - Unified `pool-cleared-error.json`. Socket timeouts after handshake do not mark the server Unknown.
+- After a handshake error, a pinned mongos is waited on until it is selectable again before commit / abort retry. A load-balanced transaction pin is dropped when that serviceId's pool generation moves.
 - CI and local topologies create user `bob` / `pwd123` on `admin` (no `--auth`). `auth: true` UTF runs. Speculative auth is on the first application hello. Monitor sockets do not authenticate (SDAM).
 - Spec logs: `MONGODB_LOG_COMMAND`, `MONGODB_LOG_TOPOLOGY`, `MONGODB_LOG_CONNECTION`, `MONGODB_LOG_ALL`, `MONGODB_LOG_PATH`, `MONGODB_LOG_MAX_DOCUMENT_LENGTH`. CMAP subscribe. Official CMAP JSON and CLAM UTF run.
 - TLS `tlsCertificateKeyFilePassword`. Stapled OCSP is requested unless `tlsDisableCertificateRevocationCheck` is true. This driver does not contact OCSP HTTP endpoints.
