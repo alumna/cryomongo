@@ -321,7 +321,9 @@ module Mongo::Session
     protected def drop_dead_pin : Nil
       conn = @pinned_connection
       return unless conn
-      return unless conn.socket.closed?
+      # Closed socket, or the pool generation moved (load-balanced clear of
+      # this serviceId). Do not reuse that pin (DRIVERS-2032 handshake retry).
+      return unless conn.socket.closed? || @client.stale_pin?(conn)
       @pinned_connection = nil
       @client.checkin_connection(conn)
     end

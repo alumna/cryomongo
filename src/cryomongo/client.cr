@@ -819,6 +819,14 @@ class Mongo::Client
     pool_for(connection).try &.mark_transaction(connection)
   end
 
+  # True when this socket's pool generation is old. A load-balanced
+  # transaction pin must not be reused after that serviceId was cleared.
+  def stale_pin?(connection : Mongo::Connection) : Bool
+    pool = pool_for(connection)
+    return true unless pool
+    pool.stale?(connection)
+  end
+
   private def pool_for(connection : Mongo::Connection) : Mongo::Connection::Pool(Mongo::Connection)?
     pool_at(connection.server_description.address)
   end
@@ -1122,4 +1130,3 @@ class Mongo::Client
     topology.servers.first? || SDAM::ServerDescription.new("127.0.0.1:27017")
   end
 end
-

@@ -89,7 +89,7 @@ Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CR
 
 ## Remaining work (MongoDB 8.0, toward production grade)
 
-Phases 1–3 are done. GitHub Docker after 3.13.1 teardown fix (wrong-topology UTF is not registered): standalone **2:02 / 14 pending / 754 examples**, replica set **4:06 / 17 / 879**, sharded **6:49 / 17 / 868**, load-balanced **4:19 / 17 / 822**. Same band as GitHub 3.12 (1:59 / 4:26 / 6:56 / 4:24), with extra real UTF tests (`dropDatabase`, GridFS `drop`). Replica set is **3** members. Remaining Crystal `pending` is newer-server / `auth: false` / extra auth env / official `skipReason`. **3.13.3** is DRIVERS-2032 (pinned mongos still selectable). Optional CMAP wait-queue options are 3.13.2. Live **X509** prose stays pending because CI has no TLS client certs (`MONGODB_X509_URI`); that is optional extra CI, not a driver hole and not a 3.13.4. Details of how to automate it are under **Optional CI — X509 + certs** below and in `FIXES.md`. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
+Phases 1–3 are done. GitHub Docker after 3.13.1 teardown fix (wrong-topology UTF is not registered): standalone **2:02 / 14 pending / 754 examples**, replica set **4:06 / 17 / 879**, sharded **6:49 / 17 / 868**, load-balanced **4:19 / 17 / 822**. Same band as GitHub 3.12 (1:59 / 4:26 / 6:56 / 4:24), with extra real UTF tests (`dropDatabase`, GridFS `drop`). Replica set is **3** members. **3.13.3** is done (DRIVERS-2032). After that, replica set / sharded / load-balanced pending should be **15** (the two handshake files run). Remaining Crystal `pending` is newer-server / `auth: false` / extra auth env / official `skipReason`. Optional CMAP wait-queue options are 3.13.2. Live **X509** prose stays pending because CI has no TLS client certs (`MONGODB_X509_URI`); that is optional extra CI, not a driver hole and not a 3.13.4. Details of how to automate it are under **Optional CI — X509 + certs** below and in `FIXES.md`. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
 
 ### Out of scope until the user asks
 
@@ -100,7 +100,7 @@ Do not treat these as the next work.
 - **Phase 5:** `MONGODB-OIDC` (identity provider). UTF `mongodb-oidc-no-retry.json` stays pending.
 - **MongoDB newer than 8.0.** Example: change-stream `nsType` needs **8.1**. Do not add 8.1+ fields now.
 - **Atlas Search.** Keep `SKIP_TEST` for search-index ops. Do not copy search-index JSON.
-- Official JSON `skipReason` that is a server or spec bug (`lb-connection-establishment.json` on 8.0; CSOT `runCursorCommand` “failure” tests with `blockTimeMS` < `timeoutMS`). DRIVERS-2032 handshake files are **3.13.3**.
+- Official JSON `skipReason` that is a server or spec bug (`lb-connection-establishment.json` on 8.0; CSOT `runCursorCommand` “failure” tests with `blockTimeMS` < `timeoutMS`).
 
 ### Phase 3.1 — CMAP pool at discovery
 
@@ -214,9 +214,9 @@ GitHub Docker 3.13.1 pending counts (file-level Crystal `pending`) were standalo
 - [x] Un-skip `replicaset-emit-topology-changed-before-close.json` when the topology can emit 4 events.
 - [x] **3.13.1** Audit leftover skips and pending lists. UTF `dropDatabase` and GridFS `drop` (CSOT `gridfs-advanced.json` drop tests). `Database#drop` / `Collection#drop`. Omit Crystal examples for UTF files that cannot run on the current topology. RTT `close` interrupts an in-flight hello. Spec `after_suite` no longer drops leftover databases (the next run’s `before_suite` still does). CMAP admin client closes when CMAP examples finish, not after UTF.
 - [ ] **3.13.2** Optional CMAP `waitQueueSize` / `waitQueueMultiple` (deprecated; the spec says skip if the driver does not support them). Do not start unless we want those two log tests.
-- [ ] **3.13.3** DRIVERS-2032: after a handshake error on a pinned mongos, check that the pin is still selectable before retrying `commitTransaction` / `abortTransaction`. Un-skip `retryable-commit-handshake.json` and `retryable-abort-handshake.json` only after they pass. Official JSON still has `skipReason` until then.
+- [x] **3.13.3** DRIVERS-2032: after a handshake error on a pinned mongos, wait until that pin is selectable before retrying `commitTransaction` / `abortTransaction`. Load-balanced: drop a stale transaction pin. `retryable-commit-handshake.json` and `retryable-abort-handshake.json` run. Local native replica set, sharded, and load-balanced pass.
 - [x] Audit leftover skips from Phases 1–3 that should not have stayed skipped.
-- [x] Audit Crystal `pending` on every topology after omit (GitHub teardown-fix run: 14 / 17 / 17 / 17). No extra 8.0 driver hole for a **3.13.4**. Remaining pending is extra auth env, Phase 5, MongoDB 8.1+, `auth: false`, old `maxServerVersion`, or server `skipReason`. The only 8.0 hole on that list is **3.13.3**. Details: `FIXES.md`.
+- [x] Audit Crystal `pending` on every topology after omit (GitHub teardown-fix run: 14 / 17 / 17 / 17). No extra 8.0 driver hole for a **3.13.4**. Remaining pending is extra auth env, Phase 5, MongoDB 8.1+, `auth: false`, old `maxServerVersion`, or server `skipReason`. **3.13.3** closed the last 8.0 hole on that list. Details: `FIXES.md`.
 - [ ] **Optional CI — X509 + certs.** Do not start unless the user asks. Not a driver hole and not Phase 5. The four GitHub jobs stay SCRAM-without-TLS. Add a **separate** standalone TLS job that creates a CA / server / client cert with `openssl`, starts Community `mongo:8.0` with `net.tls`, creates a `$external` user from the client subject DN, sets `MONGODB_X509_URI`, and un-pends `spec/prose/auth_spec.cr` “authenticates with MONGODB-X509”. Full recipe: the section below and `FIXES.md`.
 
 ### Optional CI — X509 + certs (not started)
