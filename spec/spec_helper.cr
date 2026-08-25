@@ -14,6 +14,8 @@ end
 # once retried writes and broke expectEvents on GitHub replica set.
 # UTF holds this lock for a whole JSON file (not one test), so killAllSessions
 # cannot run between tests of another file. CMAP holds it per cmap-format file.
+# Timing logs after v0.17.1 showed 0 overlapping UTF files; leftover failCommand
+# on a paused / Unknown member still retried the next insert.
 module Mongo::SpecCluster
   @@lock = Sync::Mutex.new
 
@@ -82,6 +84,38 @@ def mongodb_uri_direct(uri : String) : String
   uri = mongodb_uri_strip_option(uri, "loadBalanced")
   uri = mongodb_uri_with(uri, "directConnection=true") unless uri.downcase.includes?("directconnection=")
   uri
+end
+
+# First host in the URI (GitHub replica set is often a secondary on 27017).
+def mongodb_seed_address(uri : String) : String?
+  rest = uri.split("://", 2)[1]?
+  return nil unless rest
+  hostpart = rest.includes?('@') ? rest.split('@', 2)[1] : rest
+  cut = hostpart.index('/') || hostpart.index('?')
+  raw = cut ? hostpart[0, cut] : hostpart
+  return nil if raw.empty?
+  raw.includes?(':') ? raw.downcase : "#{raw.downcase}:27017"
+end
+
+# One mongod at `address`, same credentials as `uri`. A replica-set client
+# cannot turn off failCommand on an Unknown / paused member (pool cleared).
+def mongodb_uri_direct_address(uri : String, address : String) : String
+  parts = uri.split("://", 2)
+  return uri unless parts.size == 2
+  scheme, rest = parts
+  userinfo = ""
+  hostrest = rest
+  if at = rest.rindex('@')
+    userinfo = rest[0, at + 1]
+    hostrest = rest[at + 1..]
+  end
+  cut = hostrest.index('/') || hostrest.index('?')
+  suffix = cut ? hostrest[cut..] : ""
+  built = "#{scheme}://#{userinfo}#{address}#{suffix}"
+  built = mongodb_uri_strip_option(built, "replicaSet")
+  built = mongodb_uri_strip_option(built, "loadBalanced")
+  built = mongodb_uri_strip_option(built, "directConnection")
+  mongodb_uri_with(built, "directConnection=true")
 end
 
 private def drop_user_databases

@@ -17,6 +17,7 @@ module Mongo::Unified
     @@topology : String? = nil
     @@shared_client : Mongo::Client? = nil
     @@shared_lock = Sync::Mutex.new
+    @@direct_clients = {} of String => Mongo::Client
 
     @registry = Registry.new
     @test_file : TestFile
@@ -77,6 +78,29 @@ module Mongo::Unified
       @@shared_lock.synchronize do
         @@shared_client.try(&.close)
         @@shared_client = nil
+        @@direct_clients.each_value(&.close)
+        @@direct_clients.clear
+      end
+    end
+
+    # One Single-topology client per mongod. Turning off failCommand through
+    # the replica-set shared client skips Unknown / paused pools, so leftover
+    # failCommand retried the next UTF insert (GitHub squash-merge flake).
+    def self.direct_client(address : String) : Mongo::Client
+      @@shared_lock.synchronize do
+        if client = @@direct_clients[address]?
+          return client
+        end
+      end
+      uri = mongodb_uri_direct_address(ENV["MONGODB_URI"], address)
+      opened = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=3000"))
+      @@shared_lock.synchronize do
+        if existing = @@direct_clients[address]?
+          opened.close
+          return existing
+        end
+        @@direct_clients[address] = opened
+        opened
       end
     end
 
@@ -85,19 +109,37 @@ module Mongo::Unified
     end
 
     private def disable_fail_points
-      # failCommand is per mongos. Use the internal client only. A test client
-      # pool may be paused (interruptInUse); checkout there would wait out
-      # serverSelectionTimeoutMS.
+      # failCommand is per mongos / per mongod. Use the internal client for the
+      # selected server, then a directConnection client for every known address
+      # (including Unknown). A paused replica-set pool cannot send mode=off, and
+      # leftover failCommand retried insertOne in the next file.
       ic = internal_client
       send_fail_point_off(ic, nil)
+      addresses = Set(String).new
       begin
-        ic.topology.servers.each do |server|
-          next if server.type.unknown? || server.type.rs_ghost?
+        ic.topology.snapshot.servers.each do |server|
+          next if server.type.rs_ghost?
+          addresses << server.address
+          next if server.type.unknown?
           send_fail_point_off(ic, server)
         end
       rescue
       end
+      if seed = mongodb_seed_address(ENV["MONGODB_URI"]? || "")
+        addresses << seed
+      end
+      unless load_balanced_topology?
+        addresses.each do |address|
+          send_fail_point_off(Runner.direct_client(address), nil)
+        rescue
+        end
+      end
       @fail_point_active = false
+    end
+
+    private def load_balanced_topology? : Bool
+      mapped = @@topology || Runner.utf_topology_name(ENV["TOPOLOGY"]? || "")
+      mapped == "load-balanced"
     end
 
     private def kill_all_sessions
@@ -115,7 +157,7 @@ module Mongo::Unified
     end
 
     private def send_fail_point_off(client : Mongo::Client, server : Mongo::SDAM::ServerDescription?) : Nil
-      ["failCommand", "onPrimaryTransactionalWrite"].each do |fp|
+      ["failCommand", "onPrimaryTransactionalWrite", "failGetMoreAfterCursorCheckout"].each do |fp|
         begin
           client.command(
             Mongo::Commands::ConfigureFailPoint,

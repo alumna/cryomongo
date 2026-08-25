@@ -812,7 +812,7 @@ See [BENCHMARK.md](BENCHMARK.md). BSON tasks: `crystal run bench/driver_bench.cr
 4. Push to the branch (`git push origin my-new-feature`)
 5. Create a new Pull Request
 
-Spec CI runs `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=snappy,zstd,zlib` (snappy is first, so the suite uses snappy; zlib and zstd run in compression prose). UTF holds one cluster lock per JSON file so failCommand and step-down do not overlap.
+Spec CI runs `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=snappy,zstd,zlib` (snappy is first, so the suite uses snappy; zlib and zstd run in compression prose). UTF holds one cluster lock per JSON file so failCommand and step-down do not overlap. Replica-set leftover failCommand is turned off with `directConnection` so an Unknown member cannot keep it.
 
 ## Contributors
 

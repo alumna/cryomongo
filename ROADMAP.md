@@ -73,7 +73,7 @@ This phase optimizes the driver to take full advantage of Crystal's new `-Dprevi
 Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=zlib` after Phase **3.2** is **783** examples: standalone **2:02 / 209 pending**, replica set **6:08 / 94 pending**, sharded **8:05 / 101 pending**, load-balanced **5:25 / 136 pending**. Local after Phase **3.8** is **785** examples: standalone **2:13 / 183 pending**, replica set **6:23 / 67 pending**, sharded **8:17 / 77 pending**, load-balanced **5:22 / 116 pending**. What is still skipped, and what is out of scope, is listed below and in `FIXES.md`.
 
 ### Concurrency
-- [x] **CI Parallel Testing:** GitHub runs `crystal spec -Dpreview_mt -Dexecution_context` and sets `CRYSTAL_WORKERS=2` so the default execution context is resized. UTF holds `Mongo::SpecCluster.exclusive` for a whole JSON file (CMAP cmap-format files and prose `failCommand` tests use the same lock) so failCommand / killAllSessions / replSetStepDown do not overlap on one mongod.
+- [x] **CI Parallel Testing:** GitHub runs `crystal spec -Dpreview_mt -Dexecution_context` and sets `CRYSTAL_WORKERS=2` so the default execution context is resized. UTF holds `Mongo::SpecCluster.exclusive` for a whole JSON file (CMAP cmap-format files and prose `failCommand` tests use the same lock) so failCommand / killAllSessions / replSetStepDown do not overlap on one mongod. Replica-set leftover failCommand is turned off with `directConnection` (Unknown / paused pools cannot send mode=off).
 - [x] **Connection Pool Refactoring:** One lock for the address-to-pool map. Handshake I/O no longer nests that lock with a per-address mutex.
 
 ### Zero-Allocation & Network I/O

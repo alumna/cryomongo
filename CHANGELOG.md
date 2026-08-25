@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+Replica-set GitHub can still flake after v0.17.1 (5 extra insert events on squash-and-merge, then green on the next markdown bump). UTF files did not overlap. The seed hello failPoint now applies only to handshake errors (`errorCode` or `closeConnection`), not CSOT alwaysOn `blockConnection`. `disable_fail_points` turns off failCommand on every member through a `directConnection` client, including Unknown / paused pools. `waitForPrimaryChange` checks a w:1 insert on that primary, not only hello.
+
 ## 0.17.1 - 2026-08-25
 
 UTF holds one cluster lock per JSON file (CMAP cmap-format files and prose `failCommand` tests use the same lock). A per-test lock still let another file run `killAllSessions` / `failCommand` between tests, so retryable writes retried and GitHub replica set failed `expectEvents` (5 errors after the v0.17.0 markdown merge, then again after the per-test lock). Sending every `failPoint` to all replica-set members was wrong (extra Unknown / checkout events, leftover `failGetMoreAfterCursorCheckout`). A hello `failPoint` for an appName client that does not exist yet is also set on the URI seed, because that seed is often a secondary. `waitForPrimaryChange` waits until that new primary answers hello as writable. UTF event lists are pinned per client and appended under a mutex so a closed client's late callback cannot land in the next test. GitHub Docker after this harness fix (`CRYSTAL_WORKERS=2`): standalone **2:01 / 14 pending / 754**, replica set **4:32 / 15 / 879**, sharded **6:55 / 15 / 868**, load-balanced **4:03 / 15 / 822**. 0 failures. Same band as 3.13.3 (2:03 / 4:33 / 7:10 / 4:23).
