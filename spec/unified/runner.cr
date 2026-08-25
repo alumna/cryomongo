@@ -215,50 +215,55 @@ module Mongo::Unified
 
         test_aborted = false
 
-        begin
-          disable_fail_points
-          # Official runner: kill leftover sessions so a sharded txn that was
-          # not aborted does not block the next drop for transactionLifetimeLimitSeconds.
-          kill_all_sessions
-          create_entities(@test_file.createEntities)
+        # Hold the cluster for this test only, so a second UTF file can run
+        # between tests. Do not overlap failCommand, killAllSessions, or
+        # replSetStepDown with another file's operations.
+        Mongo::SpecCluster.exclusive do
+          begin
+            disable_fail_points
+            # Official runner: kill leftover sessions so a sharded txn that was
+            # not aborted does not block the next drop for transactionLifetimeLimitSeconds.
+            kill_all_sessions
+            create_entities(@test_file.createEntities)
 
-          # Drop leftover collections on the internal client. The test client
-          # must keep an empty pool (CMAP) and an unused session pool (txnNumber).
-          @registry.collections.each_value do |coll|
-            internal_client[coll.database.name].command(Mongo::Commands::Drop, name: coll.name) rescue nil
-          end
+            # Drop leftover collections on the internal client. The test client
+            # must keep an empty pool (CMAP) and an unused session pool (txnNumber).
+            @registry.collections.each_value do |coll|
+              internal_client[coll.database.name].command(Mongo::Commands::Drop, name: coll.name) rescue nil
+            end
 
-          setup_initial_data(@test_file.initialData)
-          gossip_after_setup
+            setup_initial_data(@test_file.initialData)
+            gossip_after_setup
 
-          # Setup (drop/create/insert) must not appear in expectEvents.
-          @registry.command_events.each_value(&.clear)
-          @registry.cmap_events.each_value(&.clear)
-          @registry.sdam_events.each_value(&.clear)
-          @registry.log_messages.each_value(&.clear)
+            # Setup (drop/create/insert) must not appear in expectEvents.
+            @registry.command_events.each_value(&.clear)
+            @registry.cmap_events.each_value(&.clear)
+            @registry.sdam_events.each_value(&.clear)
+            @registry.log_messages.each_value(&.clear)
 
-          test.operations.each do |op|
-            Dispatcher.execute(op, @registry, client, self)
-          end
-          verify_outcome(test.outcome)
-          verify_events(test.expectEvents)
-          verify_log_messages(test.expectLogMessages)
-          executed += 1
-        rescue e : Skip
-          test_aborted = true
-          skipped += 1
-        rescue e : Exception
-          if e.message == "SKIP_TEST"
+            test.operations.each do |op|
+              Dispatcher.execute(op, @registry, client, self)
+            end
+            verify_outcome(test.outcome)
+            verify_events(test.expectEvents)
+            verify_log_messages(test.expectLogMessages)
+            executed += 1
+          rescue e : Skip
             test_aborted = true
             skipped += 1
-          else
-            raise Exception.new("#{test.description}: #{e.message}", cause: e)
+          rescue e : Exception
+            if e.message == "SKIP_TEST"
+              test_aborted = true
+              skipped += 1
+            else
+              raise Exception.new("#{test.description}: #{e.message}", cause: e)
+            end
+          ensure
+            disable_fail_points
+            kill_all_sessions
+            @registry.close_all
+            @registry = Registry.new
           end
-        ensure
-          disable_fail_points
-          kill_all_sessions
-          @registry.close_all
-          @registry = Registry.new
         end
 
         test_ms = Timing.elapsed_ms(test_started)

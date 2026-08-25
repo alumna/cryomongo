@@ -9,6 +9,17 @@ if (workers = ENV["CRYSTAL_WORKERS"]?.try(&.to_i?)) && workers > 1
   Fiber::ExecutionContext.default.resize(workers)
 end
 
+# One mongod. UTF setup turns off every failCommand and kills all sessions.
+# CMAP integration uses failCommand too. Two examples at once retried writes
+# and broke expectEvents on GitHub replica set (markdown-only merge, same code).
+module Mongo::SpecCluster
+  @@lock = Sync::Mutex.new
+
+  def self.exclusive(&)
+    @@lock.synchronize { yield }
+  end
+end
+
 # Use the environment variable or a URI that matches TOPOLOGY.
 ENV["MONGODB_URI"] ||= begin
   case ENV["TOPOLOGY"]?

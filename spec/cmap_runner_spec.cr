@@ -12,7 +12,9 @@ describe "CMAP cmap-format runner" do
 
   files.each do |file|
     it "executes: #{file}" do
-      Mongo::Cmap::Runner.new(file).run
+      Mongo::SpecCluster.exclusive do
+        Mongo::Cmap::Runner.new(file).run
+      end
     rescue e : Mongo::Cmap::Skip
       pending! e.message || "skipped"
     rescue e : Mongo::Error::ServerSelection

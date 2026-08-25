@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+UTF tests take one cluster lock per test, and CMAP cmap-format files take the same lock. `CRYSTAL_WORKERS=2` must not overlap `failCommand`, `killAllSessions`, or `replSetStepDown` on one mongod. That overlap retried writes and failed `expectEvents` on GitHub replica set after the v0.17.0 markdown merge (same driver code; 5 errors, extra insert/update events).
+
 ## 0.17.0 - 2026-08-25
 
 Phase 3 of the roadmap is done (through **3.13.3**). Next 8.0 work is Phase **3.14** (performance review).

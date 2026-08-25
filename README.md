@@ -812,7 +812,7 @@ See [BENCHMARK.md](BENCHMARK.md). BSON tasks: `crystal run bench/driver_bench.cr
 4. Push to the branch (`git push origin my-new-feature`)
 5. Create a new Pull Request
 
-Spec CI runs `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=snappy,zstd,zlib` (snappy is first, so the suite uses snappy; zlib and zstd run in compression prose).
+Spec CI runs `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=snappy,zstd,zlib` (snappy is first, so the suite uses snappy; zlib and zstd run in compression prose). UTF tests share one cluster lock per test so failCommand and step-down do not overlap.
 
 ## Contributors
 
