@@ -68,11 +68,12 @@ module Mongo::Unified::Operations
           mode: mode,
           options: {data: data}
         )
-        # Official failPoint goes to the selected server (primary). Hello
-        # handshake tests create the appName client after this op, and the URI
-        # seed is often a secondary, so also arm the seed. Do not copy every
-        # failPoint to all members: that marked every replica Unknown, retried
-        # extra checkouts, and left failGetMoreAfterCursorCheckout on secondaries.
+        # Official failPoint goes to the selected server (primary). Handshake
+        # tests create the appName client after this op, and the URI seed is
+        # often a secondary, so also arm the seed for hello *errors*. Do not
+        # copy CSOT alwaysOn + blockConnection hello failPoints: that retried
+        # insertOne in command-execution. Do not copy every failPoint to all
+        # members (extra Unknown / leftover failGetMoreAfterCursorCheckout).
         arm_hello_failpoint_on_uri_seed(registry, client, name, mode, data.as?(BSON))
       end
     end
@@ -103,6 +104,8 @@ module Mongo::Unified::Operations
   # Hello failPoint for a client that does not exist yet (handshake tests).
   # If that appName client already exists, its monitors are live on every
   # member; a seed extra would emit more than one Unknown.
+  # Only command / network handshake errors: CSOT uses alwaysOn hello
+  # blockConnection to raise RTT, and that must stay on the primary only.
   private def hello_failpoint_for_new_client?(data : BSON?, registry : Registry) : Bool
     return false unless data
     app = data["appName"]?.try(&.as?(String)) || data["appname"]?.try(&.as?(String))
@@ -116,20 +119,17 @@ module Mongo::Unified::Operations
       has_hello = true if n == "hello" || n == "ismaster"
     end
     return false unless has_hello
+    return false unless hello_handshake_error_failpoint?(data)
     registry.clients.each_value do |c|
       return false if c.options.appname == app
     end
     true
   end
 
-  private def mongodb_seed_address(uri : String) : String?
-    rest = uri.split("://", 2)[1]?
-    return nil unless rest
-    hostpart = rest.includes?('@') ? rest.split('@', 2)[1] : rest
-    cut = hostpart.index('/') || hostpart.index('?')
-    raw = cut ? hostpart[0, cut] : hostpart
-    return nil if raw.empty?
-    raw.includes?(':') ? raw.downcase : "#{raw.downcase}:27017"
+  private def hello_handshake_error_failpoint?(data : BSON) : Bool
+    return true if data["closeConnection"]? == true
+    return true if data["errorCode"]?
+    false
   end
 
   private def execute_create_entities(args, runner)
@@ -1060,17 +1060,19 @@ module Mongo::Unified::Operations
     end
   end
 
-  # Shared client hello, not the test client: ping/hello would show up in expectEvents.
-  # Address change alone is not enough: the new primary may still reject writes
-  # (catch-up), and retryable insertMany then fails rediscover-quickly expectEvents.
+  # Direct client, not the test client: ping/hello/insert would show up in
+  # expectEvents. Address change alone is not enough: the new primary may still
+  # reject writes (catch-up), and retryable insertMany then fails
+  # rediscover-quickly expectEvents. A replica-set shared client can also miss
+  # a paused member; directConnection talks to that process.
   private def replica_set_member_writable?(address : String) : Bool
-    ic = Mongo::Unified::Runner.shared_client
-    server = ic.topology.snapshot.servers.find { |s| s.address == address }
-    return false unless server
+    client = Mongo::Unified::Runner.direct_client(address)
     begin
-      result = ic.command(Mongo::Commands::Hello, server_description: server)
+      result = client.command(Mongo::Commands::Hello)
       return false unless result.is_a?(Mongo::Commands::Hello::Result)
-      result.isWritablePrimary || result.ismaster
+      return false unless result.isWritablePrimary || result.ismaster
+      client["cryomongo_spec"]["primary_wait"].insert_one({n: 1}, write_concern: Mongo::WriteConcern.new(w: 1))
+      true
     rescue
       false
     end
