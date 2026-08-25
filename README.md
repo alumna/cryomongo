@@ -9,60 +9,62 @@
 
 <hr/>
 
-This is a fork of `elbywan/cryomongo`. The goal is to make the driver ready for **MongoDB 8.0** (max wire version **25**, OP_MSG-only) and **Crystal 1.21**.
+A MongoDB driver in Crystal (no mongo-c-driver). Tested against **MongoDB 8.0**. zstd wire compression links libzstd.
 
-It is **0.x** pre-release. **Phase 1, Phase 2 and Phase 3** of [ROADMAP.md](ROADMAP.md) are done. Core CRUD, sessions and transactions work on MongoDB 8.0. **1.0** waits on client-side encryption (Phase 4). Cloud auth (Phase 5: AWS / OIDC) for post 1.0.
+> If you are looking for a higher-level object-document mapper, see [`moongoon`](https://github.com/elbywan/moongoon).
 
-The driver is ready for **core CRUD, sessions, and transactions** on MongoDB 8.0. Remaining 8.0 work is [ROADMAP.md](ROADMAP.md) Phase 3.13–3.14.
+## Contents
 
-What is already in place:
+- [This fork](#this-fork)
+- [Features](#features)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Conventions](#conventions)
+- [Connection](#connection)
+- [Authentication](#authentication)
+- [Basic operations](#basic-operations)
+- [Bulk operations](#bulk-operations)
+- [Indexes](#indexes)
+- [GridFS](#gridfs)
+- [Change streams](#change-streams)
+- [Raw commands](#raw-commands)
+- [Concerns and preference](#concerns-and-preference)
+- [Commands and SDAM monitoring](#commands-and-sdam-monitoring)
+- [Causal consistency](#causal-consistency)
+- [Transactions](#transactions)
+- [Benchmarks](#benchmarks)
+- [Contributing](#contributing)
+- [Contributors](#contributors)
 
-* **MongoDB 8.0:** `hello`, sessions, transactions, retryable reads and writes, Versioned API, and a Unified Test Format (UTF) runner.
-* **Crystal 1.21:** `Sync::Mutex`, `Time.instant`, no `spawn(same_thread:)`. Execution contexts are on by default. Spec CI resizes the default context.
-* **BSON:** `alumna/bson.cr` 0.8.1. Commands use `BSON.build` / `append`. Receive uses `BSON.view`, then copies the document so the OP_MSG buffer can return to the pool. Dates decode as `BSON::DateTime` (model fields of type `Time` still convert). Vector / ExtJSON are not on the hot path.
-* **Auth:** SCRAM-SHA-1, SCRAM-SHA-256 (SASLprep on the password), X509, and PLAIN.
-* **Compression:** zlib, snappy, and zstd via URI `compressors`. The driver uses the first name that the server also has. zstd needs libzstd (`libzstd-dev` on Debian/Ubuntu).
+## This fork
 
-The UTF runner is **clear**: unknown operations become Crystal `pending`, they do not fake a pass. Files that cannot run on the current topology are omitted, not pending. Files that are still skipped because a feature is missing (not AWS / OIDC / MongoDB 8.1+) are listed in [ROADMAP.md](ROADMAP.md) and [FIXES.md](FIXES.md).
+`alumna/cryomongo` is a fork of [`elbywan/cryomongo`](https://github.com/elbywan/cryomongo). The work here is for **MongoDB 8.0** (max wire version **25**, OP_MSG-only) and **Crystal 1.21**. It is meant to merge into the upstream repository.
 
-### Where the work stands
+The driver is **0.x**. Phases 1–3 of [ROADMAP.md](ROADMAP.md) are done (CRUD, sessions, transactions, CSOT, load balancer, CMAP/SDAM, compression). Next is Phase **3.14** (performance). **1.0** waits on client-side encryption (Phase 4). Cloud auth (Phase 5: AWS / OIDC) is after 1.0.
 
-The driver is **0.x**. It is ready for core CRUD, sessions, and transactions on standalone, replica set, and sharded MongoDB 8.0. It is not **1.0** yet, which waits on CSFLE.
+Not in this fork: Atlas Search, MongoDB newer than 8.0, `MONGODB-AWS`, `MONGODB-OIDC`. Open work: [ROADMAP.md](ROADMAP.md).
 
-**Done enough to build apps (Phase 1, Phase 2, and Phase 3)**
-- CRUD helpers, bulk, client `bulkWrite` (MongoDB 8.0), aggregation, mapReduce, legacy `count`. `let` on find / aggregate / updates / deletes / findOneAnd* / collection bulkWrite.
-- Sessions, causal consistency, transactions, convenient `with_transaction`.
-- Retryable reads and writes (including `insertMany` as one command).
-- Command redaction in APM / `Log.trace`. Handshake metadata. Cursor `#each` / block `find` close the cursor.
-- Backpressure retry and `PoolClearedError` retry.
-- Legacy SDAM state-machine tests. Versioned API.
-- SCRAM-SHA-256 with SASLprep, X509, and PLAIN.
-- Change streams: `comment`, `showExpandedEvents`, `fullDocumentBeforeChange`, resume after a labeled getMore error.
-- CSOT `timeoutMS`: remaining time becomes `maxTimeMS`. Code 50 is `Error::Timeout`. Collection / database / operation `timeoutMS`, `timeoutMode`, GridFS lifetime, tailable / change-stream iteration. `run_command` / `run_cursor_command`. Official CSOT UTF is 28 files.
-- Load-balancer pin, `serviceId` on command and pool-cleared events, wait-queue cursor/txn counts, pool clear per `serviceId`. Retryable reads/writes after `failCommand` / `closeConnection`. GitHub load-balanced runs full `crystal spec`.
-- CI matrix: standalone, replica set, sharded, and load-balanced. Spec jobs resize the default execution context.
-- zlib / snappy / zstd OP_COMPRESSED (`compressors=zlib,snappy,zstd`). Pool map lock is not nested with handshake I/O. Idle sockets are LIFO.
-- Unified `pool-cleared-error.json`. Socket timeouts after handshake do not mark the server Unknown.
-- After a handshake error, a pinned mongos is waited on until it is selectable again before commit / abort retry. A load-balanced transaction pin is dropped when that serviceId's pool generation moves.
-- CI and local topologies create user `bob` / `pwd123` on `admin` (no `--auth`). `auth: true` UTF runs. Speculative auth is on the first application hello. Monitor sockets do not authenticate (SDAM).
-- Spec logs: `MONGODB_LOG_COMMAND`, `MONGODB_LOG_TOPOLOGY`, `MONGODB_LOG_CONNECTION`, `MONGODB_LOG_ALL`, `MONGODB_LOG_PATH`, `MONGODB_LOG_MAX_DOCUMENT_LENGTH`. CMAP subscribe. Official CMAP JSON and CLAM UTF run.
-- TLS `tlsCertificateKeyFilePassword`. Stapled OCSP is requested unless `tlsDisableCertificateRevocationCheck` is true. This driver does not contact OCSP HTTP endpoints.
-- One implicit session per fiber. `enableOverloadRetargeting` deprioritizes the last server on an overload retry.
+## Features
 
-**Not done yet (MongoDB 8.0). See [ROADMAP.md](ROADMAP.md) Phase 3.13–3.14 and [FIXES.md](FIXES.md).**
-- UTF ops still `SKIP_TEST`: search-index ops (Atlas). Remaining official index-management JSON is Atlas Search (not copied).
-- CSFLE (`libmongocrypt`) is Phase 4. AWS / OIDC is Phase 5.
+- **[CRUD](https://docs.mongodb.com/manual/crud/index.html)** - helpers, collection bulk, client `bulkWrite` (MongoDB 8.0), `let`, legacy `count`, mapReduce, `Database#drop` / `Collection#drop`
+- **[Aggregation](https://docs.mongodb.com/manual/aggregation/)**
+- **[Read](https://docs.mongodb.com/manual/reference/read-concern/index.html) / [write](https://docs.mongodb.com/manual/reference/write-concern/) concerns** and **[read preference](https://docs.mongodb.com/manual/core/read-preference/index.html)**
+- **[Authentication](https://docs.mongodb.com/manual/core/authentication/index.html)** - SCRAM-SHA-1/256 (SASLprep on SHA-256 passwords), X509, PLAIN
+- **[TLS](https://docs.mongodb.com/manual/core/security-transport-encryption/)** - `tlsCertificateKeyFilePassword`; stapled OCSP unless `tlsDisableCertificateRevocationCheck`
+- **[Indexes](https://docs.mongodb.com/manual/indexes/index.html)**
+- **[GridFS](https://docs.mongodb.com/manual/core/gridfs/index.html)** - `session:`, `delete_by_name` / `rename_by_name`, `drop`
+- **[Change streams](https://docs.mongodb.com/manual/changeStreams/index.html)** - `#next` waits; `#try_next` polls; resume after a labeled getMore error
+- **[Tailable cursors](https://docs.mongodb.com/manual/core/tailable-cursors/index.html)** and **[collation](https://docs.mongodb.com/manual/reference/collation/index.html)**
+- **Standalone, [replica set](https://docs.mongodb.com/manual/replication/), [sharded](https://docs.mongodb.com/manual/sharding/), load-balanced**
+- **[CSOT](https://github.com/mongodb/specifications/blob/master/source/client-side-operations-timeout/client-side-operations-timeout.md)** - URI / client / database / collection `timeoutMS`; remaining time becomes `maxTimeMS`
+- **[Wire compression](https://github.com/mongodb/specifications/blob/master/source/compression/OP_COMPRESSED.md)** - zlib, snappy, zstd (`compressors=`)
+- **[Command monitoring](https://github.com/mongodb/specifications/blob/master/source/command-monitoring/command-monitoring.rst)** - sensitive commands are redacted; CMAP subscribe; spec logs `MONGODB_LOG_*`
+- **Retryable [reads](https://docs.mongodb.com/manual/core/retryable-reads/) and [writes](https://docs.mongodb.com/manual/core/retryable-writes/)**
+- **[Causal consistency](https://docs.mongodb.com/manual/core/read-isolation-consistency-recency/#client-sessions-and-causal-consistency-guarantees)** and **[transactions](https://docs.mongodb.com/manual/core/transactions/)** - pinned mongos; handshake retry on that pin
+- **[Versioned API](https://www.mongodb.com/docs/manual/reference/versioned-api/)**
+- **Raw commands** - `command`, `Database#run_command` / `#run_cursor_command`
 
-**Out of scope**
-- `MONGODB-AWS`, `MONGODB-OIDC`.
-- MongoDB newer than 8.0 (example: change-stream `nsType` needs 8.1).
-- Atlas Search.
-
-#### Cryomongo is a MongoDB driver written in Crystal (no mongo-c-driver). zstd wire compression links libzstd.
-
-*Works with MongoDB 8.0+. Tested against 8.0.*
-
-> If you are looking for a higher-level object-document mapper library, you might want to check out the [`moongoon`](https://github.com/elbywan/moongoon) shard.
+Generated API pages live in [`docs/`](docs/Mongo.html). That folder is stale until it is regenerated.
 
 ## Installation
 
@@ -76,7 +78,7 @@ dependencies:
 
 2. Run `shards install`
 
-zstd wire compression links **libzstd**. On Debian/Ubuntu: `sudo apt-get install libzstd-dev`. snappy is pure Crystal. zlib is in the Crystal stdlib. GitHub spec CI installs `libzstd-dev` before `shards install`.
+zstd wire compression links **libzstd**. On Debian/Ubuntu: `sudo apt-get install libzstd-dev`. snappy is pure Crystal. zlib is in the Crystal stdlib.
 
 ## Usage
 
@@ -166,39 +168,12 @@ puts cursor.of(User).to_a.to_pretty_json
 # ]
 ```
 
-## Features
-
-- **[CRUD operations](https://docs.mongodb.com/manual/crud/index.html)**
-- **[Aggregation](https://docs.mongodb.com/manual/aggregation/)** (including mapReduce)
-- **[Bulk](https://docs.mongodb.com/manual/reference/method/Bulk/index.html)**
-- **[Read](https://docs.mongodb.com/manual/reference/read-concern/index.html) and [Write](https://docs.mongodb.com/manual/reference/write-concern/) Concerns**
-- **[Read Preference](https://docs.mongodb.com/manual/core/read-preference/index.html)**
-- **[Authentication](https://docs.mongodb.com/manual/core/authentication/index.html)** — SCRAM-SHA-1/256 (SASLprep on SHA-256 passwords), X509, PLAIN
-- **[TLS encryption](https://docs.mongodb.com/manual/core/security-transport-encryption/)**
-- **[Indexes](https://docs.mongodb.com/manual/indexes/index.html)**
-- **[GridFS](https://docs.mongodb.com/manual/core/gridfs/index.html)** (methods accept `session:`)
-- **[Change Streams](https://docs.mongodb.com/manual/changeStreams/index.html)** (`#next` waits; use `#try_next` to poll)
-- **[Admin/Diagnostic commands](docs/Mongo/Commands.html)** and raw `Database#run_command` / `#run_cursor_command`
-- **[Tailable and Awaitable cursors](https://docs.mongodb.com/manual/core/tailable-cursors/index.html)**
-- **[Collation](https://docs.mongodb.com/manual/reference/collation/index.html)**
-- **Standalone, [Sharded](https://docs.mongodb.com/manual/sharding/) or [ReplicaSet](https://docs.mongodb.com/manual/replication/) topologies**
-- **[Wire compression](https://github.com/mongodb/specifications/blob/master/source/compression/OP_COMPRESSED.md)** — zlib, snappy, zstd (`compressors=zlib,snappy,zstd`)
-- **[Command monitoring](https://github.com/mongodb/specifications/blob/master/source/command-monitoring/command-monitoring.rst)** (sensitive commands are redacted)
-- **Retryable [reads](https://docs.mongodb.com/manual/core/retryable-reads/) and [writes](https://docs.mongodb.com/manual/core/retryable-writes/)**
-- **[Causal consistency](https://docs.mongodb.com/manual/core/read-isolation-consistency-recency/#client-sessions-and-causal-consistency-guarantees)**
-- **[Transactions](https://docs.mongodb.com/manual/core/transactions/)**
-- **[Versioned API](https://www.mongodb.com/docs/manual/reference/versioned-api/)**
-
 ## Conventions
 
 - Methods and arguments names are in **snake case**.
 - Object arguments can usually be passed as a **[NamedTuple](https://crystal-lang.org/api/NamedTuple.html)**, **[Hash](https://crystal-lang.org/api/Hash.html)**, **[BSON::Serializable](https://github.com/alumna/bson.cr#serialization)** or a **[BSON](https://github.com/alumna/bson.cr)** instance.
 
-## Documentation
-
-Generated API pages live in [`docs/`](docs/Mongo.html). The old `elbywan.github.io` site is stale.
-
-### Connection
+## Connection
 
 ```crystal
 require "cryomongo"
@@ -207,9 +182,12 @@ require "cryomongo"
 # It is responsible for monitoring the cluster, routing the requests and managing the socket pools.
 
 # A client can be instantiated using a standard mongodb connection string.
-# Against a replica set:
+# Replica set:
 #   Mongo::Client.new("mongodb://localhost:27017/?replicaSet=rs0")
-# GitHub Actions also runs standalone and sharded.
+# Load balancer:
+#   Mongo::Client.new("mongodb://localhost:8000/?loadBalanced=true")
+# CSOT (one deadline for selection, checkout, and maxTimeMS):
+#   Mongo::Client.new("mongodb://localhost:27017/?timeoutMS=5000")
 
 # Client options can be passed as query parameters…
 client = Mongo::Client.new("mongodb://address:port/database?appname=MyApp")
@@ -245,12 +223,17 @@ uri = "mongodb://localhost:27017/?compressors=snappy,zlib,zstd"
 client = Mongo::Client.new uri
 ```
 
+```crystal
+# CSOT: remaining timeoutMS becomes maxTimeMS. timeoutMS=0 means no timeout.
+client = Mongo::Client.new("mongodb://localhost:27017/?timeoutMS=5000")
+```
+
 **Links**
 
 - [Mongo::Client](docs/Mongo/Client.html)
 - [Mongo::Options](docs/Mongo/Options.html)
 
-### Authentication
+## Authentication
 
 Supported: **SCRAM-SHA-1**, **SCRAM-SHA-256** (SASLprep on the password), **X509**, and **PLAIN**.
 
@@ -268,7 +251,7 @@ client = Mongo::Client.new("mongodb://username:password@localhost:27017")
 # mongodb://user:pass@localhost:27017/?authMechanism=PLAIN
 ```
 
-### Basic operations
+## Basic operations
 
 ```crystal
 require "cryomongo"
@@ -327,6 +310,10 @@ collection.delete_many({ age: { "$lt": 18 }})
 document = collection.find_one_and_delete({ age: { "$lt": 18 }})
 puts document.try &.["age"]
 
+# Drop the collection (NamespaceNotFound is ignored) or the database.
+collection.drop
+client["database_name"].drop
+
 # Aggregate
 
 # Perform an aggregation pipeline query
@@ -379,7 +366,7 @@ cursor.each { |doc| puts doc.to_json }
 - [Mongo::Collection](docs/Mongo/Collection.html)
 - [Mongo::Database](docs/Mongo/Database.html)
 
-### Bulk operations
+## Bulk operations
 
 ```crystal
 require "cryomongo"
@@ -418,7 +405,7 @@ puts result.inserted_count
 - [Mongo::Bulk](docs/Mongo/Bulk.html)
 - [Mongo::Client#bulk_write](docs/Mongo/Client.html#bulk_write-instance-method)
 
-### Indexes
+## Indexes
 
 ```crystal
 require "cryomongo"
@@ -469,7 +456,7 @@ collection.create_indexes([
 
 - [Mongo::Collection](docs/Mongo/Collection.html)
 
-### GridFS
+## GridFS
 
 ```crystal
 require "cryomongo"
@@ -517,7 +504,7 @@ gridfs.drop
 
 - [Mongo::GridFS::Bucket](docs/Mongo/GridFS/Bucket.html)
 
-### Change streams
+## Change streams
 
 ```crystal
 require "cryomongo"
