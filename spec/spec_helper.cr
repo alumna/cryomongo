@@ -10,8 +10,10 @@ if (workers = ENV["CRYSTAL_WORKERS"]?.try(&.to_i?)) && workers > 1
 end
 
 # One mongod. UTF setup turns off every failCommand and kills all sessions.
-# CMAP integration uses failCommand too. Two examples at once retried writes
-# and broke expectEvents on GitHub replica set (markdown-only merge, same code).
+# CMAP integration and some prose tests use failCommand too. Two examples at
+# once retried writes and broke expectEvents on GitHub replica set.
+# UTF holds this lock for a whole JSON file (not one test), so killAllSessions
+# cannot run between tests of another file. CMAP holds it per cmap-format file.
 module Mongo::SpecCluster
   @@lock = Sync::Mutex.new
 

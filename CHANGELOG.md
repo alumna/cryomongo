@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-UTF tests take one cluster lock per test, and CMAP cmap-format files take the same lock. `CRYSTAL_WORKERS=2` must not overlap `failCommand`, `killAllSessions`, or `replSetStepDown` on one mongod. That overlap retried writes and failed `expectEvents` on GitHub replica set after the v0.17.0 markdown merge (same driver code; 5 errors, extra insert/update events).
+UTF holds one cluster lock per JSON file (CMAP cmap-format files and prose `failCommand` tests use the same lock). A per-test lock still let another file run `killAllSessions` / `failCommand` between tests, so retryable writes retried and GitHub replica set failed `expectEvents` (5 errors after the v0.17.0 markdown merge, then again after the per-test lock). Replica-set `failPoint` is also sent to every known member (failCommand is per mongod; Docker 27017 is often a secondary). `waitForPrimaryChange` waits until that new primary answers hello as writable. UTF event lists are pinned per client and appended under a mutex so a closed client's late callback cannot land in the next test.
 
 ## 0.17.0 - 2026-08-25
 

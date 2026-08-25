@@ -12,11 +12,40 @@ module Mongo::Unified
     property sdam_events = Hash(String, Array(Mongo::Monitoring::SDAM::Event)).new
     property cmap_events = Hash(String, Array(Mongo::Monitoring::CMAP::Event)).new
     property log_messages = Hash(String, Array(Mongo::Logging::Message)).new
+    # Monitor, pool, and test fibers all append. Crystal Array is not thread-safe.
+    getter events_lock = Sync::Mutex.new
 
     def command_started_events
-      command_events.transform_values { |events|
-        events.select(Mongo::Monitoring::Commands::CommandStartedEvent)
-      }
+      events_lock.synchronize do
+        command_events.transform_values { |events|
+          events.select(Mongo::Monitoring::Commands::CommandStartedEvent)
+        }
+      end
+    end
+
+    def snapshot_command_events(client_id : String) : Array(Mongo::Monitoring::Commands::Event)
+      events_lock.synchronize { (command_events[client_id]? || [] of Mongo::Monitoring::Commands::Event).dup }
+    end
+
+    def snapshot_sdam_events(client_id : String) : Array(Mongo::Monitoring::SDAM::Event)
+      events_lock.synchronize { (sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).dup }
+    end
+
+    def snapshot_cmap_events(client_id : String) : Array(Mongo::Monitoring::CMAP::Event)
+      events_lock.synchronize { (cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).dup }
+    end
+
+    def snapshot_log_messages(client_id : String) : Array(Mongo::Logging::Message)
+      events_lock.synchronize { (log_messages[client_id]? || [] of Mongo::Logging::Message).dup }
+    end
+
+    def clear_observed_events : Nil
+      events_lock.synchronize do
+        command_events.each_value(&.clear)
+        cmap_events.each_value(&.clear)
+        sdam_events.each_value(&.clear)
+        log_messages.each_value(&.clear)
+      end
     end
 
     property ignored_command_events = Hash(String, Array(String)).new

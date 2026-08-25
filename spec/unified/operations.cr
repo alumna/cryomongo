@@ -58,14 +58,51 @@ module Mongo::Unified::Operations
     if client_name = args["client"]?.try(&.as_s)
       if client = registry.clients[client_name]?
         fail_point = BSON.from_json(args["failPoint"].to_json)
+        name = fail_point["configureFailPoint"].as(String)
+        mode = fail_point["mode"]
+        data = fail_point["data"]?
+        # Selection hits the primary / mongos. Replica-set failCommand is per
+        # mongod: GitHub 27017 is often a secondary, so hello failPoints on the
+        # primary never fire on the seed handshake (hello-command-error).
         client.command(
           Mongo::Commands::ConfigureFailPoint,
           database: "admin",
-          fail_point: fail_point["configureFailPoint"].as(String),
-          mode: fail_point["mode"],
-          options: {data: fail_point["data"]?}
+          fail_point: name,
+          mode: mode,
+          options: {data: data}
         )
+        type = client.topology.type
+        rs = type.replica_set_with_primary? || type.replica_set_no_primary? ||
+             Mongo::Unified::Runner.utf_topology_name(ENV["TOPOLOGY"]? || "") == "replicaset"
+        if rs
+          seen = Set(String).new
+          if primary = client.topology.primary_address
+            seen.add(primary)
+          end
+          [client, Mongo::Unified::Runner.shared_client].each do |c|
+            c.topology.snapshot.servers.each do |server|
+              next if server.type.unknown? || server.type.rs_ghost?
+              next unless seen.add?(server.address)
+              send_configure_fail_point(c, server, name, mode, data)
+            end
+          end
+        end
       end
+    end
+  end
+
+  private def send_configure_fail_point(client : Mongo::Client, server : Mongo::SDAM::ServerDescription?, name, mode, data) : Nil
+    begin
+      client.command(
+        Mongo::Commands::ConfigureFailPoint,
+        database: "admin",
+        fail_point: name,
+        mode: mode,
+        options: {data: data},
+        server_description: server
+      )
+    rescue
+      # A secondary may still be Unknown on this client. The primary send already ran.
     end
   end
 
@@ -309,11 +346,11 @@ module Mongo::Unified::Operations
       collection: coll_name,
       session: session,
       options: {
-        validator:                           validator,
-        validation_level:                    validation_level,
-        validation_action:                   validation_action,
-        change_stream_pre_and_post_images:   pre_post,
-        index:                               index,
+        validator:                         validator,
+        validation_level:                  validation_level,
+        validation_action:                 validation_action,
+        change_stream_pre_and_post_images: pre_post,
+        index:                             index,
       }
     )
   end
@@ -987,13 +1024,29 @@ module Mongo::Unified::Operations
     deadline = Time.instant + timeout_ms.milliseconds
     loop do
       current_primary = client.topology.primary_address
-      if current_primary && current_primary != prior_primary
+      if current_primary && current_primary != prior_primary && replica_set_member_writable?(current_primary)
         return
       end
       if Time.instant >= deadline
         raise Exception.new("TEST_FAILED: waitForPrimaryChange timed out (prior=#{prior_primary.inspect}, current=#{current_primary.inspect})")
       end
       sleep 50.milliseconds
+    end
+  end
+
+  # Shared client hello, not the test client: ping/hello would show up in expectEvents.
+  # Address change alone is not enough: the new primary may still reject writes
+  # (catch-up), and retryable insertMany then fails rediscover-quickly expectEvents.
+  private def replica_set_member_writable?(address : String) : Bool
+    ic = Mongo::Unified::Runner.shared_client
+    server = ic.topology.snapshot.servers.find { |s| s.address == address }
+    return false unless server
+    begin
+      result = ic.command(Mongo::Commands::Hello, server_description: server)
+      return false unless result.is_a?(Mongo::Commands::Hello::Result)
+      result.isWritablePrimary || result.ismaster
+    rescue
+      false
     end
   end
 
@@ -1057,110 +1110,113 @@ module Mongo::Unified::Operations
   end
 
   private def count_matching_events(registry : Registry, client_id : String, event : JSON::Any) : Int32
+    cmap = registry.snapshot_cmap_events(client_id)
+    sdam = registry.snapshot_sdam_events(client_id)
+    command = registry.snapshot_command_events(client_id)
     if event["poolCreatedEvent"]?
-      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+      return cmap.count { |e|
         e.is_a?(Mongo::Monitoring::CMAP::PoolCreatedEvent)
       }
     end
     if event["poolReadyEvent"]?
-      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+      return cmap.count { |e|
         e.is_a?(Mongo::Monitoring::CMAP::PoolReadyEvent)
       }
     end
     if event["poolClearedEvent"]?
-      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+      return cmap.count { |e|
         e.is_a?(Mongo::Monitoring::CMAP::PoolClearedEvent)
       }
     end
     if event["poolClosedEvent"]?
-      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+      return cmap.count { |e|
         e.is_a?(Mongo::Monitoring::CMAP::PoolClosedEvent)
       }
     end
     if event["connectionCreatedEvent"]?
-      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+      return cmap.count { |e|
         e.is_a?(Mongo::Monitoring::CMAP::ConnectionCreatedEvent)
       }
     end
     if event["connectionReadyEvent"]?
-      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+      return cmap.count { |e|
         e.is_a?(Mongo::Monitoring::CMAP::ConnectionReadyEvent)
       }
     end
     if event["connectionClosedEvent"]?
-      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+      return cmap.count { |e|
         e.is_a?(Mongo::Monitoring::CMAP::ConnectionClosedEvent)
       }
     end
     if event["connectionCheckOutStartedEvent"]?
-      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+      return cmap.count { |e|
         e.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckOutStartedEvent)
       }
     end
     if event["connectionCheckedOutEvent"]?
-      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+      return cmap.count { |e|
         e.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckedOutEvent)
       }
     end
     if event["connectionCheckOutFailedEvent"]?
-      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+      return cmap.count { |e|
         e.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckOutFailedEvent)
       }
     end
     if event["connectionCheckedInEvent"]?
-      return (registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).count { |e|
+      return cmap.count { |e|
         e.is_a?(Mongo::Monitoring::CMAP::ConnectionCheckedInEvent)
       }
     end
     if event["topologyDescriptionChangedEvent"]?
-      return (registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).count { |e|
+      return sdam.count { |e|
         e.is_a?(Mongo::Monitoring::SDAM::TopologyDescriptionChangedEvent)
       }
     end
     if event["topologyOpeningEvent"]?
-      return (registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).count { |e|
+      return sdam.count { |e|
         e.is_a?(Mongo::Monitoring::SDAM::TopologyOpeningEvent)
       }
     end
     if event["topologyClosedEvent"]?
-      return (registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).count { |e|
+      return sdam.count { |e|
         e.is_a?(Mongo::Monitoring::SDAM::TopologyClosedEvent)
       }
     end
     if expected = event["serverHeartbeatStartedEvent"]?
-      return (registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).count { |e|
+      return sdam.count { |e|
         e.is_a?(Mongo::Monitoring::SDAM::ServerHeartbeatStartedEvent) && Matcher.heartbeat_awaited?(e.awaited, expected)
       }
     end
     if expected = event["serverHeartbeatSucceededEvent"]?
-      return (registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).count { |e|
+      return sdam.count { |e|
         e.is_a?(Mongo::Monitoring::SDAM::ServerHeartbeatSucceededEvent) && Matcher.heartbeat_awaited?(e.awaited, expected)
       }
     end
     if expected = event["serverHeartbeatFailedEvent"]?
-      return (registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).count { |e|
+      return sdam.count { |e|
         e.is_a?(Mongo::Monitoring::SDAM::ServerHeartbeatFailedEvent) && Matcher.heartbeat_awaited?(e.awaited, expected)
       }
     end
     if expected = event["serverDescriptionChangedEvent"]?
-      return (registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).count { |e|
+      return sdam.count { |e|
         match_server_description_changed?(e, expected)
       }
     end
     if expected = event["commandStartedEvent"]?
-      return (registry.command_events[client_id]? || [] of Mongo::Monitoring::Commands::Event).count { |e|
+      return command.count { |e|
         e.is_a?(Mongo::Monitoring::Commands::CommandStartedEvent) &&
           command_name_match?(e, expected)
       }
     end
     if expected = event["commandSucceededEvent"]?
-      return (registry.command_events[client_id]? || [] of Mongo::Monitoring::Commands::Event).count { |e|
+      return command.count { |e|
         e.is_a?(Mongo::Monitoring::Commands::CommandSucceededEvent) &&
           command_name_match?(e, expected)
       }
     end
     if expected = event["commandFailedEvent"]?
-      return (registry.command_events[client_id]? || [] of Mongo::Monitoring::Commands::Event).count { |e|
+      return command.count { |e|
         e.is_a?(Mongo::Monitoring::Commands::CommandFailedEvent) &&
           command_name_match?(e, expected)
       }

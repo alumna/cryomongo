@@ -171,54 +171,54 @@ module Mongo::Unified
       skipped = 0
       client = internal_client
 
-      @test_file.tests.each do |test|
-        test_started = Time.utc
-        if (reason = test.skipReason) && ENV["UTF_RUN_SKIPPED"]? != "1"
-          skipped += 1
-          Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: reason, duration_ms: Timing.elapsed_ms(test_started))
-          next
-        end
-        # Needs two mongos serviceIds from one client. roundrobin + health-check
-        # still sometimes sends both sockets to one mongos (got extra
-        # connectionCreated after pool clear). Skip unless UTF_RUN_TWO_MONGOS=1.
-        if test.description == "only connections for a specific serviceId are closed when pools are cleared" && ENV["UTF_RUN_TWO_MONGOS"]? != "1"
-          skipped += 1
-          Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "needs two serviceIds from HAProxy", duration_ms: Timing.elapsed_ms(test_started))
-          next
-        end
-        # Official CSOT runCursorCommand "failure" cases use blockTimeMS 60 with
-        # timeoutMS 100, so a correct iteration timeout does not expire. The
-        # matching find tests use 250ms vs 200ms.
-        if test.description == "Non-tailable cursor iteration timeoutMS is refreshed for getMore if timeoutMode is iteration - failure" ||
-           test.description == "Tailable cursor iteration timeoutMS is refreshed for getMore - failure" ||
-           test.description == "Tailable cursor awaitData iteration timeoutMS is refreshed for getMore - failure"
-          skipped += 1
-          Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "official blockTimeMS is less than timeoutMS", duration_ms: Timing.elapsed_ms(test_started))
-          next
-        end
-        if test.description.includes?("waitQueueSize") || test.description.includes?("waitQueueMultiple")
-          skipped += 1
-          Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "waitQueueSize / waitQueueMultiple are not implemented", duration_ms: Timing.elapsed_ms(test_started))
-          next
-        end
-        if only = ENV["UTF_TEST"]?
-          unless test.description.includes?(only)
+      # One lock for the whole file. A per-test lock still let another file
+      # run killAllSessions / failCommand between tests (GitHub replica set,
+      # extra insert retries after the per-test lock).
+      Mongo::SpecCluster.exclusive do
+        @test_file.tests.each do |test|
+          test_started = Time.utc
+          if (reason = test.skipReason) && ENV["UTF_RUN_SKIPPED"]? != "1"
             skipped += 1
+            Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: reason, duration_ms: Timing.elapsed_ms(test_started))
             next
           end
-        end
-        unless meets_requirements?(test.runOnRequirements)
-          skipped += 1
-          Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "runOnRequirements", duration_ms: Timing.elapsed_ms(test_started))
-          next
-        end
+          # Needs two mongos serviceIds from one client. roundrobin + health-check
+          # still sometimes sends both sockets to one mongos (got extra
+          # connectionCreated after pool clear). Skip unless UTF_RUN_TWO_MONGOS=1.
+          if test.description == "only connections for a specific serviceId are closed when pools are cleared" && ENV["UTF_RUN_TWO_MONGOS"]? != "1"
+            skipped += 1
+            Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "needs two serviceIds from HAProxy", duration_ms: Timing.elapsed_ms(test_started))
+            next
+          end
+          # Official CSOT runCursorCommand "failure" cases use blockTimeMS 60 with
+          # timeoutMS 100, so a correct iteration timeout does not expire. The
+          # matching find tests use 250ms vs 200ms.
+          if test.description == "Non-tailable cursor iteration timeoutMS is refreshed for getMore if timeoutMode is iteration - failure" ||
+             test.description == "Tailable cursor iteration timeoutMS is refreshed for getMore - failure" ||
+             test.description == "Tailable cursor awaitData iteration timeoutMS is refreshed for getMore - failure"
+            skipped += 1
+            Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "official blockTimeMS is less than timeoutMS", duration_ms: Timing.elapsed_ms(test_started))
+            next
+          end
+          if test.description.includes?("waitQueueSize") || test.description.includes?("waitQueueMultiple")
+            skipped += 1
+            Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "waitQueueSize / waitQueueMultiple are not implemented", duration_ms: Timing.elapsed_ms(test_started))
+            next
+          end
+          if only = ENV["UTF_TEST"]?
+            unless test.description.includes?(only)
+              skipped += 1
+              next
+            end
+          end
+          unless meets_requirements?(test.runOnRequirements)
+            skipped += 1
+            Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "runOnRequirements", duration_ms: Timing.elapsed_ms(test_started))
+            next
+          end
 
-        test_aborted = false
+          test_aborted = false
 
-        # Hold the cluster for this test only, so a second UTF file can run
-        # between tests. Do not overlap failCommand, killAllSessions, or
-        # replSetStepDown with another file's operations.
-        Mongo::SpecCluster.exclusive do
           begin
             disable_fail_points
             # Official runner: kill leftover sessions so a sharded txn that was
@@ -236,10 +236,7 @@ module Mongo::Unified
             gossip_after_setup
 
             # Setup (drop/create/insert) must not appear in expectEvents.
-            @registry.command_events.each_value(&.clear)
-            @registry.cmap_events.each_value(&.clear)
-            @registry.sdam_events.each_value(&.clear)
-            @registry.log_messages.each_value(&.clear)
+            @registry.clear_observed_events
 
             test.operations.each do |op|
               Dispatcher.execute(op, @registry, client, self)
@@ -256,6 +253,12 @@ module Mongo::Unified
               test_aborted = true
               skipped += 1
             else
+              test_ms = Timing.elapsed_ms(test_started)
+              Timing.record_test(@file_path, test.description, test_ms)
+              Timing.line("TEST", file: @file_path, name: test.description, status: "error", duration_ms: test_ms)
+              file_ms = Timing.elapsed_ms(file_started)
+              Timing.record_file(@file_path, file_ms)
+              Timing.line("FILE", file: @file_path, status: "error", executed: executed, skipped: skipped, duration_ms: file_ms)
               raise Exception.new("#{test.description}: #{e.message}", cause: e)
             end
           ensure
@@ -264,11 +267,11 @@ module Mongo::Unified
             @registry.close_all
             @registry = Registry.new
           end
-        end
 
-        test_ms = Timing.elapsed_ms(test_started)
-        Timing.record_test(@file_path, test.description, test_ms)
-        Timing.line("TEST", file: @file_path, name: test.description, status: (test_aborted ? "skip_op" : "ok"), duration_ms: test_ms)
+          test_ms = Timing.elapsed_ms(test_started)
+          Timing.record_test(@file_path, test.description, test_ms)
+          Timing.line("TEST", file: @file_path, name: test.description, status: (test_aborted ? "skip_op" : "ok"), duration_ms: test_ms)
+        end
       end
 
       file_ms = Timing.elapsed_ms(file_started)
@@ -519,10 +522,17 @@ module Mongo::Unified
 
             client = Mongo::Client.new(uri, options: options, start_monitoring: false)
             @registry.clients[client_id] = client
-            @registry.command_events[client_id] = [] of Mongo::Monitoring::Commands::Event
-            @registry.sdam_events[client_id] = [] of Mongo::Monitoring::SDAM::Event
-            @registry.cmap_events[client_id] = [] of Mongo::Monitoring::CMAP::Event
-            @registry.log_messages[client_id] = [] of Mongo::Logging::Message
+            # Local arrays so a closed client's late callback cannot append to
+            # the next test's registry (same client id "client", @registry reassigned).
+            command_events = [] of Mongo::Monitoring::Commands::Event
+            sdam_events = [] of Mongo::Monitoring::SDAM::Event
+            cmap_events = [] of Mongo::Monitoring::CMAP::Event
+            log_messages = [] of Mongo::Logging::Message
+            events_lock = @registry.events_lock
+            @registry.command_events[client_id] = command_events
+            @registry.sdam_events[client_id] = sdam_events
+            @registry.cmap_events[client_id] = cmap_events
+            @registry.log_messages[client_id] = log_messages
             ignored = req.ignoreCommandMonitoringEvents.try(&.map(&.downcase)) || [] of String
             @registry.ignored_command_events[client_id] = ignored
             observed = req.observeEvents || [] of String
@@ -557,7 +567,7 @@ module Mongo::Unified
                            end
               # UTF: only record types listed in observeEvents. Empty list means no observation.
               next if observed.empty? || !observed.includes?(event_type)
-              @registry.command_events[client_id] << event
+              events_lock.synchronize { command_events << event }
             end
 
             if observed.any? { |name| name.starts_with?("server") || name.starts_with?("topology") }
@@ -576,7 +586,7 @@ module Mongo::Unified
                                next
                              end
                 next unless observed.includes?(event_type)
-                @registry.sdam_events[client_id] << event
+                events_lock.synchronize { sdam_events << event }
               end
             end
 
@@ -598,7 +608,7 @@ module Mongo::Unified
                                next
                              end
                 next unless observed.includes?(event_type)
-                @registry.cmap_events[client_id] << event
+                events_lock.synchronize { cmap_events << event }
               end
             end
 
@@ -608,7 +618,7 @@ module Mongo::Unified
                 severity = Mongo::Logging::Severity.parse_spec(level_name)
                 next unless component && severity
                 client.log_sink.subscribe(component, severity) do |msg|
-                  @registry.log_messages[client_id] << msg
+                  events_lock.synchronize { log_messages << msg }
                 end
               end
             end
@@ -827,7 +837,7 @@ module Mongo::Unified
           verify_sdam_events(client_id, expected_events, hash["ignoreExtraEvents"]?.try(&.as_bool) || false)
           next
         end
-        actual_events = (@registry.command_events[client_id]? || [] of Mongo::Monitoring::Commands::Event).dup
+        actual_events = @registry.snapshot_command_events(client_id)
 
         expected_names = expected_events.compact_map { |event|
           started = event["commandStartedEvent"]?
@@ -954,7 +964,7 @@ module Mongo::Unified
     end
 
     private def verify_sdam_events(client_id : String, expected_events : Array(JSON::Any), ignore_extra : Bool)
-      actual = (@registry.sdam_events[client_id]? || [] of Mongo::Monitoring::SDAM::Event).dup
+      actual = @registry.snapshot_sdam_events(client_id)
       if actual.size < expected_events.size
         names = actual.map(&.class.name)
         raise Exception.new("TEST_FAILED: expected at least #{expected_events.size} sdam events for #{client_id}, got #{actual.size}: #{names}")
@@ -1028,7 +1038,7 @@ module Mongo::Unified
     end
 
     private def verify_cmap_events(client_id : String, expected_events : Array(JSON::Any), ignore_extra : Bool)
-      actual = (@registry.cmap_events[client_id]? || [] of Mongo::Monitoring::CMAP::Event).dup
+      actual = @registry.snapshot_cmap_events(client_id)
       unless ignore_extra || actual.size == expected_events.size
         names = actual.map(&.class.name)
         raise Exception.new("TEST_FAILED: expected #{expected_events.size} cmap events for #{client_id}, got #{actual.size}: #{names}")
@@ -1122,7 +1132,7 @@ module Mongo::Unified
         ignore_extra = group["ignoreExtraMessages"]?.try(&.as_bool) || false
         ignore = group["ignoreMessages"]?.try(&.as_a) || [] of JSON::Any
         wanted = group["messages"].as_a
-        actual = (@registry.log_messages[client_id]? || [] of Mongo::Logging::Message).dup
+        actual = @registry.snapshot_log_messages(client_id)
         actual.reject! { |msg| ignore.any? { |pattern| Matcher.matches?(pattern, log_message_json(msg), @registry) } }
 
         wanted.each_with_index do |expected_msg, index|
