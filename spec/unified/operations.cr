@@ -61,9 +61,6 @@ module Mongo::Unified::Operations
         name = fail_point["configureFailPoint"].as(String)
         mode = fail_point["mode"]
         data = fail_point["data"]?
-        # Selection hits the primary / mongos. Replica-set failCommand is per
-        # mongod: GitHub 27017 is often a secondary, so hello failPoints on the
-        # primary never fire on the seed handshake (hello-command-error).
         client.command(
           Mongo::Commands::ConfigureFailPoint,
           database: "admin",
@@ -71,29 +68,27 @@ module Mongo::Unified::Operations
           mode: mode,
           options: {data: data}
         )
-        type = client.topology.type
-        rs = type.replica_set_with_primary? || type.replica_set_no_primary? ||
-             Mongo::Unified::Runner.utf_topology_name(ENV["TOPOLOGY"]? || "") == "replicaset"
-        if rs
-          seen = Set(String).new
-          if primary = client.topology.primary_address
-            seen.add(primary)
-          end
-          [client, Mongo::Unified::Runner.shared_client].each do |c|
-            c.topology.snapshot.servers.each do |server|
-              next if server.type.unknown? || server.type.rs_ghost?
-              next unless seen.add?(server.address)
-              send_configure_fail_point(c, server, name, mode, data)
-            end
-          end
-        end
+        # Official failPoint goes to the selected server (primary). Hello
+        # handshake tests create the appName client after this op, and the URI
+        # seed is often a secondary, so also arm the seed. Do not copy every
+        # failPoint to all members: that marked every replica Unknown, retried
+        # extra checkouts, and left failGetMoreAfterCursorCheckout on secondaries.
+        arm_hello_failpoint_on_uri_seed(registry, client, name, mode, data.as?(BSON))
       end
     end
   end
 
-  private def send_configure_fail_point(client : Mongo::Client, server : Mongo::SDAM::ServerDescription?, name, mode, data) : Nil
+  private def arm_hello_failpoint_on_uri_seed(registry, client, name, mode, data : BSON?) : Nil
+    return unless hello_failpoint_for_new_client?(data, registry)
+    seed = mongodb_seed_address(ENV["MONGODB_URI"]? || "")
+    return unless seed
+    return if seed == client.topology.primary_address
+    ic = Mongo::Unified::Runner.shared_client
+    server = ic.topology.snapshot.servers.find { |s| s.address == seed }
+    return unless server
+    return if server.type.unknown? || server.type.rs_ghost?
     begin
-      client.command(
+      ic.command(
         Mongo::Commands::ConfigureFailPoint,
         database: "admin",
         fail_point: name,
@@ -102,8 +97,39 @@ module Mongo::Unified::Operations
         server_description: server
       )
     rescue
-      # A secondary may still be Unknown on this client. The primary send already ran.
     end
+  end
+
+  # Hello failPoint for a client that does not exist yet (handshake tests).
+  # If that appName client already exists, its monitors are live on every
+  # member; a seed extra would emit more than one Unknown.
+  private def hello_failpoint_for_new_client?(data : BSON?, registry : Registry) : Bool
+    return false unless data
+    app = data["appName"]?.try(&.as?(String)) || data["appname"]?.try(&.as?(String))
+    return false unless app
+    cmds = data["failCommands"]?
+    return false unless cmds.is_a?(BSON)
+    has_hello = false
+    cmds.each do |_, value|
+      next unless s = value.as?(String)
+      n = s.downcase
+      has_hello = true if n == "hello" || n == "ismaster"
+    end
+    return false unless has_hello
+    registry.clients.each_value do |c|
+      return false if c.options.appname == app
+    end
+    true
+  end
+
+  private def mongodb_seed_address(uri : String) : String?
+    rest = uri.split("://", 2)[1]?
+    return nil unless rest
+    hostpart = rest.includes?('@') ? rest.split('@', 2)[1] : rest
+    cut = hostpart.index('/') || hostpart.index('?')
+    raw = cut ? hostpart[0, cut] : hostpart
+    return nil if raw.empty?
+    raw.includes?(':') ? raw.downcase : "#{raw.downcase}:27017"
   end
 
   private def execute_create_entities(args, runner)
