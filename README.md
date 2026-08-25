@@ -23,7 +23,7 @@ What is already in place:
 * **Auth:** SCRAM-SHA-1, SCRAM-SHA-256 (SASLprep on the password), X509, and PLAIN.
 * **Compression:** zlib, snappy, and zstd via URI `compressors`. The driver uses the first name that the server also has. zstd needs libzstd (`libzstd-dev` on Debian/Ubuntu).
 
-The UTF runner is **clear**: unknown operations become Crystal `pending`, they do not fake a pass. Files that are still skipped because a feature is missing (not AWS / OIDC / MongoDB 8.1+) are listed in [ROADMAP.md](ROADMAP.md) and [FIXES.md](FIXES.md).
+The UTF runner is **clear**: unknown operations become Crystal `pending`, they do not fake a pass. Files that cannot run on the current topology are omitted, not pending. Files that are still skipped because a feature is missing (not AWS / OIDC / MongoDB 8.1+) are listed in [ROADMAP.md](ROADMAP.md) and [FIXES.md](FIXES.md).
 
 ### Where the work stands
 
@@ -505,6 +505,9 @@ gridfs.delete_by_name("file.txt")
 # Rename by id or by filename
 gridfs.rename(id, "new.txt")
 gridfs.rename_by_name("file.txt", "new.txt")
+
+# Drop the files and chunks collections
+gridfs.drop
 
 # And many more methods… (check the link below.)
 ```

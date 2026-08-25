@@ -33,13 +33,24 @@ class Mongo::SDAM::RttMonitor
     @started.get
   end
 
-  def close : Nil
+  # Stop the fiber. Do not Socket#close from this caller: hello() may hold
+  # FdLock on another execution-context thread. interrupt_and_wake is enough.
+  # The run loop's ensure closes the socket.
+  def interrupt : Nil
     @closed.set(true)
-    select
-    when @wake.send(nil)
-    else
+    drop_socket(close_socket: false)
+    begin
+      select
+      when @wake.send(nil)
+      else
+      end
+      @wake.close
+    rescue Channel::ClosedError
     end
-    @wake.close rescue nil
+  end
+
+  def close : Nil
+    interrupt
     @done.wait if @started.get
   end
 
@@ -97,7 +108,7 @@ class Mongo::SDAM::RttMonitor
     if conn.nil? || conn.socket.closed?
       drop_socket(close_socket: true)
       conn = open_connection
-      @connection = conn
+      @lock.synchronize { @connection = conn }
       legacy = @client.options.server_api.nil?
       _, rtt = conn.handshake(
         send_metadata: true,
@@ -122,7 +133,7 @@ class Mongo::SDAM::RttMonitor
       c
     end
     return unless conn
-    conn.interrupt
+    conn.interrupt_and_wake
     conn.close rescue nil if close_socket
   end
 end

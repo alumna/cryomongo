@@ -89,17 +89,18 @@ Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CR
 
 ## Remaining work (MongoDB 8.0, toward production grade)
 
-Phases 1–3 are done. GitHub Docker Phase **3.12** `crystal spec` is **905** examples (859 after 3.11 plus deprioritized selection JSON, compression, and TLS password specs): standalone **2:59 / 167 pending**, replica set **7:45 / 45 pending**, sharded **12:20 / 56 pending**, load-balanced **6:35 / 102 pending**. Replica set is **3** members. The driver is production-capable for core 8.0 (CRUD, sessions, transactions, zlib / snappy / zstd). It is still **0.x**. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). Remaining 8.0 holes are Phase **3.13–3.14**. Details: `FIXES.md`. Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
+Phases 1–3 are done. GitHub Docker after 3.13.1 teardown fix (wrong-topology UTF is not registered): standalone **2:02 / 14 pending / 754 examples**, replica set **4:06 / 17 / 879**, sharded **6:49 / 17 / 868**, load-balanced **4:19 / 17 / 822**. Same band as GitHub 3.12 (1:59 / 4:26 / 6:56 / 4:24), with extra real UTF tests (`dropDatabase`, GridFS `drop`). Replica set is **3** members. Remaining Crystal `pending` is newer-server / `auth: false` / extra auth env / official `skipReason`. **3.13.3** is DRIVERS-2032 (pinned mongos still selectable). Optional CMAP wait-queue options are 3.13.2. Live **X509** prose stays pending because CI has no TLS client certs (`MONGODB_X509_URI`); that is optional extra CI, not a driver hole and not a 3.13.4. Details of how to automate it are under **Optional CI — X509 + certs** below and in `FIXES.md`. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
 
 ### Out of scope until the user asks
 
 Do not treat these as the next work.
 
+- **Optional CI — X509 + certs.** The client already has `MONGODB-X509`. GitHub has no TLS certs and no `MONGODB_X509_URI`. That is extra CI (Community `mongo:8.0`, `openssl`, a **separate** standalone TLS job), not a driver hole and not Phase 5. Do not start unless the user asks. Full recipe under **Optional CI — X509 + certs** below and in `FIXES.md`.
 - **Phase 5:** `MONGODB-AWS` (SigV4, AWS accounts).
 - **Phase 5:** `MONGODB-OIDC` (identity provider). UTF `mongodb-oidc-no-retry.json` stays pending.
 - **MongoDB newer than 8.0.** Example: change-stream `nsType` needs **8.1**. Do not add 8.1+ fields now.
 - **Atlas Search.** Keep `SKIP_TEST` for search-index ops. Do not copy search-index JSON.
-- Official JSON `skipReason` that is a server or spec bug (`lb-connection-establishment.json` on 8.0; CSOT `runCursorCommand` “failure” tests with `blockTimeMS` < `timeoutMS`; DRIVERS-2032 handshake skips).
+- Official JSON `skipReason` that is a server or spec bug (`lb-connection-establishment.json` on 8.0; CSOT `runCursorCommand` “failure” tests with `blockTimeMS` < `timeoutMS`). DRIVERS-2032 handshake files are **3.13.3**.
 
 ### Phase 3.1 — CMAP pool at discovery
 
@@ -181,7 +182,7 @@ CI creates user `bob` / `pwd123` on `admin` (no `--auth`). The URI has credentia
 - [x] Speculative auth on the first application hello. Monitor sockets must **not** authenticate (SDAM).
 - [x] Un-skip `retryable-reads/handshakeError.json` and `retryable-writes/handshakeError.json`.
 - [x] Un-skip unified SDAM `auth-error.json`, `auth-misc-command-error.json`, `auth-network-error.json`, `auth-network-timeout-error.json`, `auth-shutdown-error.json`, `pool-clear-checkout-error.json`.
-- [x] Live SCRAM prose. X509 / PLAIN stay pending unless `MONGODB_X509_URI` / `MONGODB_PLAIN_URI` is set.
+- [x] Live SCRAM prose. X509 / PLAIN stay pending unless `MONGODB_X509_URI` / `MONGODB_PLAIN_URI` is set. The X509 client is done (`Mongo::Auth::X509`, speculative hello, URI rules). GitHub does not generate certs or start TLS mongod yet. How to add that job: **Optional CI — X509 + certs** below. PLAIN still needs MongoDB Enterprise plus LDAP; that is a different job.
 
 ### Phase 3.11 — SDAM / CMAP logging and remaining official JSON
 
@@ -203,14 +204,129 @@ Env: `MONGODB_LOG_COMMAND`, `MONGODB_LOG_TOPOLOGY`, `MONGODB_LOG_CONNECTION`, `M
 - [x] Load-balanced CSOT: after a timed-out getMore, `killCursors` stays on the pin (`timeoutMS is refreshed for close`).
 - [x] Two mongos `serviceId`s from HAProxy (`UTF_RUN_TWO_MONGOS=1`) for `sdam-error-handling.json`.
 
-### Phase 3.13 — Replica-set leftover skip audit
+### Phase 3.13 — Leftover skip audit
 
 `replicaset-emit-topology-changed-before-close.json` wants **4** `topologyDescriptionChanged` events before close. The 3-member `rs0` (native and GitHub Docker, added in 3.7) emits 4, so that file runs.
 
+GitHub Docker 3.13.1 pending counts (file-level Crystal `pending`) were standalone **167**, replica set **45**, sharded **56**, load-balanced **102**. Wrong-topology UTF files are now omitted from Crystal spec (not `pending`). After omit: standalone **14**, replica set / sharded / load-balanced **17**. Newer-server files stay `pending`. Intra-file `skip_op` leftovers are done in 3.13.1.
+
 - [x] Add a 3-member replica set (native `scripts/mongo-topology.sh` and GitHub Docker), **or** skip this file only when the set has one member.
 - [x] Un-skip `replicaset-emit-topology-changed-before-close.json` when the topology can emit 4 events.
-- [ ] Audit leftover skips from Phases 1–3 that should not have stayed skipped.
-- [ ] Audit any item showed as "Pending" when executing crystal spec in the multiple different topologies.
+- [x] **3.13.1** Audit leftover skips and pending lists. UTF `dropDatabase` and GridFS `drop` (CSOT `gridfs-advanced.json` drop tests). `Database#drop` / `Collection#drop`. Omit Crystal examples for UTF files that cannot run on the current topology. RTT `close` interrupts an in-flight hello. Spec `after_suite` no longer drops leftover databases (the next run’s `before_suite` still does). CMAP admin client closes when CMAP examples finish, not after UTF.
+- [ ] **3.13.2** Optional CMAP `waitQueueSize` / `waitQueueMultiple` (deprecated; the spec says skip if the driver does not support them). Do not start unless we want those two log tests.
+- [ ] **3.13.3** DRIVERS-2032: after a handshake error on a pinned mongos, check that the pin is still selectable before retrying `commitTransaction` / `abortTransaction`. Un-skip `retryable-commit-handshake.json` and `retryable-abort-handshake.json` only after they pass. Official JSON still has `skipReason` until then.
+- [x] Audit leftover skips from Phases 1–3 that should not have stayed skipped.
+- [x] Audit Crystal `pending` on every topology after omit (GitHub teardown-fix run: 14 / 17 / 17 / 17). No extra 8.0 driver hole for a **3.13.4**. Remaining pending is extra auth env, Phase 5, MongoDB 8.1+, `auth: false`, old `maxServerVersion`, or server `skipReason`. The only 8.0 hole on that list is **3.13.3**. Details: `FIXES.md`.
+- [ ] **Optional CI — X509 + certs.** Do not start unless the user asks. Not a driver hole and not Phase 5. The four GitHub jobs stay SCRAM-without-TLS. Add a **separate** standalone TLS job that creates a CA / server / client cert with `openssl`, starts Community `mongo:8.0` with `net.tls`, creates a `$external` user from the client subject DN, sets `MONGODB_X509_URI`, and un-pends `spec/prose/auth_spec.cr` “authenticates with MONGODB-X509”. Full recipe: the section below and `FIXES.md`.
+
+### Optional CI — X509 + certs (not started)
+
+Do not start unless the user asks. This is extra GitHub / native CI for a mechanism the driver already has. It is **not** Phase 5, **not** PLAIN / LDAP, **not** OIDC, and **not** a 3.13.4 driver hole. A second pass of the leftover pending list found that live X509 prose is pending only because CI never sets `MONGODB_X509_URI`.
+
+#### What is already done in the driver
+
+- **Mechanism:** `src/cryomongo/connection/auth/x509.cr`. `authenticate` sends `authenticate` / `mechanism: MONGODB-X509` / `$db: $external`. Optional `user` is the URI username (the certificate subject DN). If the URI has no username, the driver omits `user` and mongod uses the subject on the TLS client certificate (MongoDB 3.4+).
+- **Speculative auth:** the first application hello may send `speculativeAuthenticate` with the same document (`db`, not `$db`). `Connection#speculative_mechanism` includes `MONGODBX509`. Monitors must not send it (SDAM; already true).
+- **URI rules:** `src/cryomongo/uri/uri.cr`. `MONGODB-X509` defaults `authSource` to `$external`. A password is an error. A non-`$external` `authSource` is an error. Username is optional. Offline tests: `spec/tests/legacy/auth/connection-string.json` (recognize mechanism, ignore database, accept `$external`, no username, reject password, reject bad `authSource`) via `spec/auth_connection_string_spec.cr`.
+- **TLS client:** `src/cryomongo/connection/tls.cr` and `connection.cr`. URI `tls=true` (or `ssl=true`) wraps the socket. `tlsCAFile`, `tlsCertificateKeyFile` (concatenated cert + key PEM), `tlsCertificateKeyFilePassword` (PKCS#8 and traditional encrypted PEM; 3.12), `tlsAllowInvalidCertificates`, `tlsAllowInvalidHostnames`, `tlsInsecure`. Stapled OCSP is requested unless `tlsDisableCertificateRevocationCheck` / `tlsInsecure` / `tlsAllowInvalidCertificates`. This driver does not fetch OCSP HTTP responders.
+- **Live prose:** `spec/prose/auth_spec.cr` “authenticates with MONGODB-X509” builds `Mongo::Client.new(ENV["MONGODB_X509_URI"])` and pings. It is `pending!` when that env is unset. SCRAM live tests already run because GitHub `MONGODB_URI` has `bob:pwd123`.
+- **Not a substitute for this job:** CLAM `redacted-commands.json` lists `mechanism: MONGODB-X509` in expected APM / log events. That file needs `auth: false` and does not talk to a real X509 server. Offline URI tests do not present a client certificate.
+
+Phase 2 already marked basic X509 as done. The missing piece is a server that asks for TLS and a client certificate, plus the env var the prose test already understands.
+
+#### Why GitHub does not run it today
+
+- `.github/workflows/specs.yml` has four matrix jobs: standalone, replica set, sharded, load-balanced. Each uses Community `mongo:8.0` through `scripts/docker-topology.sh`, URI user `bob` / `pwd123` on `admin`, **no TLS**, **no `--auth`**, **no `MONGODB_X509_URI`**.
+- `scripts/docker-topology.sh` and `scripts/mongo-topology.sh` start mongod / mongos with `enableTestCommands` and friends. They never pass `--tlsMode` / `net.tls.certificateKeyFile` / `net.tls.CAFile`. They create only the SCRAM user on `admin`. They do not create a `$external` X509 user.
+- Do not bolt TLS onto those four jobs. Every socket in a process that sets `tls=true` must use TLS (application, monitors, RTT, UTF entity clients, CMAP admin, `failCommand`). The current SCRAM handshake-error UTF (`saslContinue` `closeConnection`) and `auth: true` files assume a non-TLS SCRAM URI. Mixing X509-only credentials into `MONGODB_URI` would skip or break those files. Keep the four jobs as they are.
+
+#### Why this case is automatable on the CI you already have
+
+X509 client authentication is a **Community** MongoDB feature. It does not need Atlas, GitHub secrets, an identity provider, or a MongoDB Enterprise image. A job can:
+
+1. Create a CA, a server certificate, and a client certificate with `openssl` on the runner (`ubuntu-24.04` already has it). No secrets in the repo. Certs live under `tmp/` (gitignored) for that job only.
+2. Start **Community** `mongo:8.0` (same `MONGO_IMAGE` default as today) with TLS. That is enough. PLAIN / LDAP and self-managed OIDC are the cases that need Enterprise or Atlas; X509 is not.
+3. Create a user on `$external` whose name is the client certificate subject DN (RFC 2253, as printed by `openssl x509 -noout -subject -nameopt RFC2253`).
+4. Set `MONGODB_X509_URI` with `authMechanism=MONGODB-X509`, `tls=true`, `tlsCAFile`, and `tlsCertificateKeyFile`. No password. `authSource=$external` is the default.
+5. Run `spec/prose/auth_spec.cr`. The X509 example un-pends when the env is set. A ping after handshake is enough for the test that already exists.
+
+That is the same pattern MongoDB Evergreen and other GitHub driver jobs use. Moderate complexity. Best next extra-auth CI win if the user wants one.
+
+#### Job shape (do this, not a fifth topology in the current matrix)
+
+Use a **separate** GitHub job (or a matrix entry that is not one of the current four). First target: **standalone only**.
+
+- **Standalone first.** Replica-set member-to-member TLS needs server certs on every member and often `security.clusterAuthMode` (keyFile or x509). Sharded needs TLS on config / shard / mongos. Load-balanced adds HAProxy TLS vs mongos `loadBalancerPort` PROXY v2. Do not start those until standalone X509 prose is green.
+- **Do not replace `MONGODB_URI` on the four SCRAM jobs.** Optional on the X509 job only: also create `bob` on `admin` and set `MONGODB_URI` to SCRAM **with** `tls=true` so both SCRAM and X509 live tests run against the same TLS mongod. That is extra; the minimum is `MONGODB_X509_URI` plus the X509 prose file.
+- **`--auth` on this job is allowed and stronger.** The four SCRAM jobs stay without `--auth` so `failCommand` on `saslContinue` and `auth: true` UTF still run. The X509 job does not need that UTF. With `--auth`, an unauthenticated ping fails and the prose test really proves X509. Without `--auth`, the driver still sends `authenticate` when the URI asks for `MONGODB-X509`; a failed authenticate still fails the test. Either works. Prefer `--auth` on the dedicated job.
+- **Do not run the full `crystal spec` UTF suite as the only gate for this job** unless `MONGODB_URI` is still SCRAM over TLS. An X509-only `MONGODB_URI` changes `auth: true` / userinfo detection and will not exercise SCRAM `saslContinue` handshake-error files. Minimum command: `crystal spec spec/prose/auth_spec.cr -Dpreview_mt -Dexecution_context` with `MONGODB_X509_URI` set. Offline URI / TLS password specs do not need mongod.
+- **Native LXC:** this host cannot start `mongo:8.0` Docker (kernel / SERVER-121912). Local proof uses `scripts/mongo-topology.sh` plus a TLS mode that does not exist yet. GitHub `ubuntu-24.04` uses `scripts/docker-topology.sh` and can mount `tmp/x509` into the container.
+
+#### Certificates and mongod flags (what the job must create)
+
+Generate under `tmp/x509/` (or another gitignored path):
+
+- **CA:** self-signed CA cert + key. Driver `tlsCAFile` and mongod `net.tls.CAFile` both point at this CA (or a PEM bundle).
+- **Server cert:** signed by the CA. **SAN must match the URI host.** GitHub standalone URI uses `localhost`; replica set uses `127.0.0.1`. For a standalone X509 job pick one host and put that name in the URI and in the SAN (`DNS:localhost` and/or `IP:127.0.0.1`). Prefer fixing the SAN over `tlsAllowInvalidHostnames=true`.
+- **Client cert:** signed by the same CA. Subject DN becomes the `$external` username. Concatenate the client certificate and private key into one PEM for `tlsCertificateKeyFile` (the driver loads chain and key from that path).
+- **Optional encrypted client key:** `tlsCertificateKeyFilePassword` is already covered offline in `spec/tls_spec.cr`. A live encrypted PEM on the X509 job is extra coverage, not required to un-pend the current prose test.
+- **Validity:** short-lived (days) is enough for CI. Do not commit keys.
+
+MongoDB 8.0 TLS settings (use `net.tls.*` / `--tls*`, not the old `net.ssl.*` names):
+
+- `--tlsMode requireTLS` (or `net.tls.mode: requireTLS`). `allowTLS` lets plaintext in; a dedicated X509 job should require TLS.
+- `--tlsCertificateKeyFile` = server PEM (cert + key).
+- `--tlsCAFile` = CA PEM.
+- Client certificates: keep `tlsAllowConnectionsWithoutCertificates` false once `$external` users exist, or true only for a bootstrap mongosh that creates users over TLS without a client cert. A clean recipe is: require TLS, allow connections without a client cert only long enough to `createUser`, or use mongosh with a bootstrap client cert. `createUser` from `docker exec mongosh` must itself use `--tls` / `--tlsCAFile` when the server is `requireTLS`.
+- Keep existing test parameters where they still apply (`enableTestCommands`, `minWaitForStreamingHelloMillis=0`, and the rest in `MONGOD_PARAMS`) if this mongod also runs any UTF. For prose-only, `enableTestCommands` is not required for a ping.
+
+`$external` user (mongosh, on a connection that is allowed to create users):
+
+```
+db.getSiblingDB("$external").createUser({
+  user: "<RFC2253 subject DN of the client cert>",
+  roles: [ { role: "root", db: "admin" } ]
+})
+```
+
+The `user` string must match the certificate subject mongod sees. If the URI omits the username, mongod uses the cert subject and that string must still match a user. If the URI includes a username, it must be that same DN (percent-encoded in the URI, as in the official connection-string tests).
+
+Example `MONGODB_X509_URI` (paths are job-local):
+
+```
+mongodb://127.0.0.1:27017/?authMechanism=MONGODB-X509&tls=true&tlsCAFile=/path/ca.crt&tlsCertificateKeyFile=/path/client.pem
+```
+
+Do not put a password in the URI. Add `authSource=$external` only if you want it explicit. If OpenSSL hostname checks fail, fix the server SAN; `tlsAllowInvalidHostnames=true` is a last resort. If a self-signed server cert plus stapled-OCSP request fails the handshake, set `tlsDisableCertificateRevocationCheck=true` on this URI (this driver does not contact OCSP HTTP endpoints anyway).
+
+Docker: generate certs on the runner, `docker run -v .../tmp/x509:/certs:ro`, and pass the `/certs/...` paths to mongod. Native: pass host paths to mongod and to the URI.
+
+#### What success looks like
+
+- GitHub (or native) starts Community mongod with TLS and a `$external` X509 user.
+- `MONGODB_X509_URI` is set in that job.
+- `spec/prose/auth_spec.cr` “authenticates with MONGODB-X509” runs and pings (`ok: 1`). It is no longer `pending`.
+- The four existing topology jobs stay green and unchanged (still no `MONGODB_X509_URI`).
+- Offline X509 connection-string tests and TLS password tests stay as they are.
+
+#### What this job does not cover (do not mix into the same work)
+
+- **PLAIN / LDAP:** the driver has `Mongo::Auth::Plain`. Live prose needs `MONGODB_PLAIN_URI`. MongoDB only accepts SASL PLAIN through **LDAP**, and that path is **MongoDB Enterprise** plus a directory (OpenLDAP / `slapd`). Community `mongo:8.0` cannot prove PLAIN. Different image, different license, different job. Many OSS drivers leave it to Evergreen.
+- **MONGODB-OIDC:** Phase 5. URI `ENVIRONMENT` / `TOKEN_RESOURCE` rules exist; the SASL/OIDC client does not. Self-managed OIDC needs Enterprise or Atlas and a mock IdP. Not an `openssl` add-on to this X509 job. UTF `mongodb-oidc-no-retry.json` stays pending until Phase 5.
+- **MONGODB-AWS:** Phase 5. SigV4 and AWS accounts.
+- **Atlas X509**, client-cert rotation, CRL files, OCSP HTTP fetch (out of this driver).
+- **Replica set / sharded / load-balanced TLS + X509** until standalone is green.
+
+#### Rank vs other extra-auth CI
+
+| Case | Automatable on GitHub? | Fits current `mongo:8.0` Community jobs? | Notes |
+|---|---|---|---|
+| X509 + certs | Yes | No — needs a **separate** TLS standalone job. Same Community image. Do not change the four SCRAM URIs. | No secrets, no Enterprise. Highest extra-auth value. |
+| PLAIN + LDAP | Yes in principle | No | Enterprise mongod + LDAP. |
+| OIDC test / machine UTF | Yes after the client exists | No | Enterprise / Atlas + mock IdP. Phase 5. |
+| OIDC human / cloud IdP | Only with secrets / Evergreen | No | Phase 5. |
+
+Details a later conversation can follow without re-reading the tree: `FIXES.md` (same heading).
 
 ### Phase 3.14 — Performance review and improvement
 

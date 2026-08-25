@@ -409,6 +409,13 @@ class Mongo::Database
     )
   end
 
+  # Drops this database.
+  #
+  # NOTE: [for more details, please check the official MongoDB documentation](https://docs.mongodb.com/manual/reference/command/dropDatabase/).
+  def drop(*, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil) : Commands::Common::BaseResult?
+    self.command(Commands::DropDatabase, session: session, timeout_ms: timeout_ms)
+  end
+
   # Returns a variety of storage statistics for the database.
   #
   # NOTE: [for more details, please check the official MongoDB documentation](https://docs.mongodb.com/manual/reference/command/dbStats/).

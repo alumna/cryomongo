@@ -65,6 +65,13 @@ module Mongo::Unified::Dispatcher
                when "dropIndexes"                              then execute_drop_indexes(args, target, session)
                when "createCollection"                         then execute_create_collection(args, target, session)
                when "dropCollection"                           then execute_drop_collection(args, target, session)
+               when "dropDatabase"                             then execute_drop_database(args, target, session)
+               when "drop"
+                 if target.is_a?(Mongo::GridFS::Bucket)
+                   execute_gridfs_drop(args, target)
+                 else
+                   raise Exception.new("SKIP_TEST")
+                 end
                when "createIndex"                              then execute_create_index(args, target, session)
                when "modifyCollection"                         then execute_modify_collection(args, target, session)
                when "insertOne"                                then execute_insert_one(args, target, session)

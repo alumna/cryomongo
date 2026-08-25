@@ -1,9 +1,9 @@
 require "../spec_helper"
 
 describe "Transactions prose: write concern is not inherited from the collection" do
-  it "inserts inside a transaction when the collection write concern is w: 0" do
-    pending! "standalone has no transactions" if ENV["TOPOLOGY"]? == "standalone"
+  next if ENV["TOPOLOGY"]? == "standalone"
 
+  it "inserts inside a transaction when the collection write concern is w: 0" do
     uri = mongodb_uri_one_host(ENV["MONGODB_URI"])
     client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=3000"))
     begin

@@ -1,8 +1,9 @@
 require "../spec_helper"
 
 describe "SDAM prose: RTT is updated by the monitor" do
+  next if ENV["TOPOLOGY"]? == "load-balanced"
+
   it "keeps a non-zero RTT after heartbeats" do
-    pending! "load-balanced mode has no monitor sockets" if ENV["TOPOLOGY"]? == "load-balanced"
     uri = mongodb_uri_one_host(ENV["MONGODB_URI"])
     client = Mongo::Client.new(mongodb_uri_with(uri, "heartbeatFrequencyMS=500&appname=streamingRttTest&serverSelectionTimeoutMS=5000"))
     begin

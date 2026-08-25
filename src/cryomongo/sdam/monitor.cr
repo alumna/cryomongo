@@ -137,6 +137,9 @@ module Mongo::SDAM
     def close
       @closed.set(true)
       steal_monitor_connection.try(&.interrupt_and_wake)
+      # Wake RTT now. Waiting for scan first left RTT hello running until
+      # the scan fiber's ensure, which added another close wait.
+      @rtt.interrupt
       request_immediate_scan
       @resume_scan.close rescue nil
       @done.wait
