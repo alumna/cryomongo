@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.17.3 - 2026-08-25
 
 Replica-set GitHub flaked once after v0.17.2: `logging-replicaset.json` **Failing heartbeat** (`waitForEvent` `serverHeartbeatFailedEvent` got 0 in 10s). The client uses the default 10s heartbeat. Awaitable hello does not see `failCommand` until that wait ends, and `waitForEvent` is also 10s. After a hello `closeConnection` / `errorCode` failPoint, UTF aborts in-progress monitor hello on the matching appName client when that client observes `serverHeartbeatFailedEvent`. Backpressure tests freeze monitors (`heartbeatFrequencyMS` 1000000) and are not aborted. Do not copy this failPoint to all members. `:nodoc:` helper on `Client` / `Monitor`; production call sites unchanged.
 
