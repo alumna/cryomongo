@@ -118,6 +118,7 @@ def mongodb_uri_direct(uri : String) : String
 end
 
 # First host in the URI (GitHub replica set is often a secondary on 27017).
+# A sharded URI has two mongos; the host list is not one address.
 def mongodb_seed_address(uri : String) : String?
   rest = uri.split("://", 2)[1]?
   return nil unless rest
@@ -125,7 +126,9 @@ def mongodb_seed_address(uri : String) : String?
   cut = hostpart.index('/') || hostpart.index('?')
   raw = cut ? hostpart[0, cut] : hostpart
   return nil if raw.empty?
-  raw.includes?(':') ? raw.downcase : "#{raw.downcase}:27017"
+  first = raw.split(',', 2)[0]
+  return nil if first.empty?
+  first.includes?(':') ? first.downcase : "#{first.downcase}:27017"
 end
 
 # One mongod at `address`, same credentials as `uri`. FailPoint-off strips userinfo after this.

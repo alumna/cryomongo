@@ -172,6 +172,9 @@ module Mongo::Unified
     end
 
     private def fail_point_off_on_address(address : String) : Nil
+      # directConnection forbids multiple seeds. A comma here is a bad host list,
+      # not one mongos / mongod (GitHub sharded URI).
+      return if address.includes?(',')
       3.times do
         return if send_fail_point_off(Runner.direct_client(address), nil)
       end

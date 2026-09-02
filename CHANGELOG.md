@@ -13,6 +13,7 @@ Cause: retryable writes handshaked the URI seed while it was Unknown (GitHub 270
 - Those clients use a unique `appName`, omit URI userinfo, and poll with a 1000s heartbeat (a later hello failPoint must not pause the pool)
 - Member list includes `hello.hosts` so a secondary seed still gets `mode=off`
 - Retry `mode=off`; recreate the direct client only after retries fail
+- A sharded URI has two mongos; `mongodb_seed_address` is the first host only (`directConnection` cannot use the whole host list)
 - Live prose that talks to mongod (auth, compression, RTT, find/getMore, transaction write concern, UTF bootstrap / close) uses the same cluster lock as UTF
 
 ## 0.17.4 - 2026-09-02
