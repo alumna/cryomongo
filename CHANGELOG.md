@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.17.5 - 2026-09-02
 
 Replica-set GitHub extra `insert` events after 0.17.4 (`deprecated-options.json`, `legacy-timeouts.json`, `interruptInUse-pool-clear.json`, `rediscover-quickly-after-step-down.json`).
 
