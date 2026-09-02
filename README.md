@@ -802,7 +802,7 @@ end
 
 ## Benchmarks
 
-See [BENCHMARK.md](BENCHMARK.md). BSON tasks: `crystal run bench/driver_bench.cr`. Live tasks need `MONGODB_URI`. JSON history: [`bench/results/`](bench/results/).
+See [BENCHMARK.md](BENCHMARK.md) (how to run, then the numbers). BSON-only: `crystal run bench/driver_bench.cr`. Live tasks need `MONGODB_URI`. A number you can quote: `shards build --release driver_bench` then `BENCH_FULL=1`. JSON history: [`bench/results/`](bench/results/).
 
 ## Contributing
 

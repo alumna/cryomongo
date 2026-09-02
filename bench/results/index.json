@@ -60,6 +60,31 @@
         "WriteBench": 128.98,
         "DriverBench": 507.84
       }
+    },
+    {
+      "file": "2026-09-01T223259Z-full-replica-set.json",
+      "recorded_at": "2026-09-01T22:32:59Z",
+      "mode": "full",
+      "topology": "replica-set",
+      "release": true,
+      "composites": {
+        "BSONBench": 1017.79,
+        "SingleBench": 85.34,
+        "MultiBench": 309.17,
+        "ReadBench": 738.47,
+        "WriteBench": 131.05,
+        "DriverBench": 434.76
+      }
+    },
+    {
+      "file": "2026-09-02T112234Z-full-bson-only.json",
+      "recorded_at": "2026-09-02T11:22:34Z",
+      "mode": "full",
+      "topology": "bson-only",
+      "release": true,
+      "composites": {
+        "BSONBench": 1094.35
+      }
     }
   ]
 }

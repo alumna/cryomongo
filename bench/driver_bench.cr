@@ -27,11 +27,15 @@ module DriverBench
     recorded_at = Time.utc
     live_meta = Report::LiveMeta.new
     bson = [] of Timing::Result
+    extra = [] of Timing::Result
     live = [] of Timing::Result
     composites = {} of String => Float64
     elapsed = Time.measure do
       puts "DriverBench  min_iters=#{Timing::MIN_ITERS}  task_s=#{Timing::TASK_SECONDS}  max_s=#{Timing::MAX_SECONDS}"
-      bson = run_bson
+      corpus = bson_corpus
+      bson = run_bson(corpus)
+      extra = run_bson_side(corpus)
+      print_bson_side(bson, extra)
       live = run_live(live_meta)
       composites = Report.composites(bson, live)
       print_composites(composites)
@@ -40,46 +44,121 @@ module DriverBench
       recorded_at: recorded_at,
       elapsed_s: elapsed.total_seconds,
       bson: bson,
+      extra: extra,
       live: live,
       composites: composites,
       live_meta: live_meta
     )
   end
 
-  private def run_bson : Array(Timing::Result)
+  private record BsonCorpus,
+    flat_src : Hash(String, BSON::Value),
+    flat_bytes : Bytes,
+    deep_src : Hash(String, BSON::Value),
+    deep_bytes : Bytes,
+    full_src : Hash(String, BSON::Value),
+    full_bytes : Bytes
+
+  private def bson_corpus : BsonCorpus
+    flat_src = Datasets.flat_source
+    deep_src = Datasets.deep_source
+    full_src = Datasets.full_source
+    BsonCorpus.new(
+      flat_src,
+      BSON.new(flat_src).data,
+      deep_src,
+      BSON.new(deep_src).data,
+      full_src,
+      BSON.new(full_src).data
+    )
+  end
+
+  private def run_bson(corpus : BsonCorpus) : Array(Timing::Result)
     puts ""
     puts "== BSON =="
-    flat_src = Datasets.flat_source
-    flat_bytes = BSON.new(flat_src).data
-    deep_src = Datasets.deep_source
-    deep_bytes = BSON.new(deep_src).data
-    full_src = Datasets.full_source
-    full_bytes = BSON.new(full_src).data
     n = Datasets::BSON_REPEAT
 
     results = [] of Timing::Result
     # Encode from a Hash. Decode walks fields into a Hash (spec native document).
     # Timing.keep stops --release from dropping the loop.
     results << Timing.run("flat bson encode", Datasets::FLAT_FILE_SIZE * n) do
-      n.times { Timing.keep(BSON.new(flat_src).size.to_i64) }
+      n.times { Timing.keep(BSON.new(corpus.flat_src).size.to_i64) }
     end
     results << Timing.run("flat bson decode", Datasets::FLAT_FILE_SIZE * n) do
-      n.times { Timing.keep(BSON.new(flat_bytes).to_h.size.to_i64) }
+      n.times { Timing.keep(BSON.new(corpus.flat_bytes).to_h.size.to_i64) }
     end
     results << Timing.run("deep bson encode", Datasets::DEEP_FILE_SIZE * n) do
-      n.times { Timing.keep(BSON.new(deep_src).size.to_i64) }
+      n.times { Timing.keep(BSON.new(corpus.deep_src).size.to_i64) }
     end
     results << Timing.run("deep bson decode", Datasets::DEEP_FILE_SIZE * n) do
-      n.times { Timing.keep(BSON.new(deep_bytes).to_h.size.to_i64) }
+      n.times { Timing.keep(BSON.new(corpus.deep_bytes).to_h.size.to_i64) }
     end
     results << Timing.run("full bson encode", Datasets::FULL_FILE_SIZE * n) do
-      n.times { Timing.keep(BSON.new(full_src).size.to_i64) }
+      n.times { Timing.keep(BSON.new(corpus.full_src).size.to_i64) }
     end
     results << Timing.run("full bson decode", Datasets::FULL_FILE_SIZE * n) do
-      n.times { Timing.keep(BSON.new(full_bytes).to_h.size.to_i64) }
+      n.times { Timing.keep(BSON.new(corpus.full_bytes).to_h.size.to_i64) }
     end
     puts "BSONBench: #{Timing.mean(results.map(&.mb_s)).round(2)} MB/s"
     results
+  end
+
+  # Walk / one-field on the same byte buffers as official decode.
+  # Closer to how the driver reads a document. Not DriverBench. Not in BSONBench.
+  private def run_bson_side(corpus : BsonCorpus) : Array(Timing::Result)
+    puts ""
+    puts "== BSON walk / one-field (not DriverBench) =="
+    n = Datasets::BSON_REPEAT
+    results = [] of Timing::Result
+
+    results << Timing.run("deep bson walk", Datasets::DEEP_FILE_SIZE * n) do
+      n.times { Timing.keep(walk_field_count(BSON.new(corpus.deep_bytes))) }
+    end
+    results << Timing.run("deep bson one field", Datasets::DEEP_FILE_SIZE * n) do
+      n.times { Timing.keep(one_field_keep(BSON.new(corpus.deep_bytes), "left")) }
+    end
+    results << Timing.run("flat bson walk", Datasets::FLAT_FILE_SIZE * n) do
+      n.times { Timing.keep(walk_field_count(BSON.new(corpus.flat_bytes))) }
+    end
+    results << Timing.run("flat bson one field", Datasets::FLAT_FILE_SIZE * n) do
+      n.times { Timing.keep(one_field_keep(BSON.new(corpus.flat_bytes), "_id")) }
+    end
+    results << Timing.run("full bson walk", Datasets::FULL_FILE_SIZE * n) do
+      n.times { Timing.keep(walk_field_count(BSON.new(corpus.full_bytes))) }
+    end
+    results << Timing.run("full bson one field", Datasets::FULL_FILE_SIZE * n) do
+      n.times { Timing.keep(one_field_keep(BSON.new(corpus.full_bytes), "_id")) }
+    end
+    results
+  end
+
+  private def print_bson_side(official : Array(Timing::Result), extra : Array(Timing::Result)) : Nil
+    puts ""
+    puts "Beside to_h (walk / one-field are not DriverBench; closer to the live driver path):"
+    %w[deep flat full].each do |kind|
+      decode = official.find { |r| r.name == "#{kind} bson decode" }
+      walk = extra.find { |r| r.name == "#{kind} bson walk" }
+      one = extra.find { |r| r.name == "#{kind} bson one field" }
+      next unless decode && walk && one
+      puts "  #{kind}: to_h=#{decode.mb_s.round(2)}  walk=#{walk.mb_s.round(2)}  one-field=#{one.mb_s.round(2)} MB/s  (n=#{decode.n})"
+    end
+  end
+
+  # Recurse with each. Nested BSON is a view. Do not call to_h.
+  private def walk_field_count(bson : BSON) : Int64
+    n = 0_i64
+    bson.each do |_key, value, _code, _subtype|
+      n &+= 1
+      if value.is_a?(BSON)
+        n &+= walk_field_count(value)
+      end
+    end
+    n
+  end
+
+  private def one_field_keep(bson : BSON, key : String) : Int64
+    value = bson[key]
+    value.is_a?(BSON) ? value.size.to_i64 : 1_i64
   end
 
   private def run_live(live_meta : Report::LiveMeta) : Array(Timing::Result)

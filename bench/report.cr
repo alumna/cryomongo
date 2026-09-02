@@ -16,6 +16,12 @@ module DriverBench
 
     ROOT = File.expand_path("..", __DIR__)
 
+    # Official DriverBench BSON only. Walk / one-field extras must not enter BSONBench.
+    BSON_NAMES = {
+      "flat bson encode", "flat bson decode",
+      "deep bson encode", "deep bson decode",
+      "full bson encode", "full bson decode",
+    }
     SINGLE_NAMES = {"find one by id", "small insertOne", "large insertOne"}
     MULTI_NAMES  = {
       "find many", "small insertMany", "large insertMany",
@@ -201,6 +207,10 @@ module DriverBench
            "small client bulkWrite mixed",
            "gridfs upload", "gridfs download"
         "multi"
+      when "flat bson walk", "flat bson one field",
+           "deep bson walk", "deep bson one field",
+           "full bson walk", "full bson one field"
+        "extra"
       else
         "extra"
       end
@@ -208,8 +218,12 @@ module DriverBench
 
     def composites(bson : Array(Timing::Result), live : Array(Timing::Result)) : Hash(String, Float64)
       scores = {} of String => Float64
-      unless bson.empty?
-        scores["BSONBench"] = Timing.mean(bson.map(&.mb_s))
+      bson_scores = [] of Float64
+      bson.each do |r|
+        bson_scores << r.mb_s if official_bson?(r.name)
+      end
+      unless bson_scores.empty?
+        scores["BSONBench"] = Timing.mean(bson_scores)
       end
       return scores if live.empty?
 
@@ -236,7 +250,8 @@ module DriverBench
       bson : Array(Timing::Result),
       live : Array(Timing::Result),
       composites : Hash(String, Float64),
-      live_meta : LiveMeta
+      live_meta : LiveMeta,
+      extra : Array(Timing::Result) = [] of Timing::Result
     ) : String?
       return nil if ENV["BENCH_SAVE"]? == "0"
 
@@ -248,7 +263,7 @@ module DriverBench
       file_name = "#{stamp}-#{mode}-#{topo}.json"
       path = File.join(dir, file_name)
 
-      tasks = (bson + live).map do |r|
+      tasks = (bson + extra + live).map do |r|
         TaskRow.new(
           r.name,
           group_for(r.name),
@@ -272,7 +287,10 @@ module DriverBench
       notes << "GridFS file is #{grid_n} bytes (spec size is #{Datasets::GRIDFS_FILE_SIZE})." unless grid_n == Datasets::GRIDFS_FILE_SIZE
       notes << "Mixed collection and client bulkWrite used #{mixed_n} documents (spec size is #{Datasets::BSON_REPEAT})." unless mixed_n == Datasets::BSON_REPEAT
       notes << "BSON decode walks fields with to_h (native Hash). Encode keeps the byte size so --release cannot drop the loop."
-      notes << "Parallel small insertMany is a local extra task. It is not in WriteBench or DriverBench."
+      notes << "Walk / one-field BSON tasks are local extras (each / []). They are not in BSONBench. Official decode is still to_h." unless extra.empty?
+      unless live.empty?
+        notes << "Parallel small insertMany is a local extra task. It is not in WriteBench or DriverBench."
+      end
       has_coll = live.any? { |r| r.name == "small collection bulkWrite" }
       has_client = live.any? { |r| r.name == "small client bulkWrite" }
       if has_coll && !has_client
@@ -318,6 +336,10 @@ module DriverBench
 
     def release_build? : Bool
       {{ flag?(:release) }}
+    end
+
+    private def official_bson?(name : String) : Bool
+      BSON_NAMES.includes?(name)
     end
 
     private def round_composites(values : Hash(String, Float64)) : Hash(String, Float64)

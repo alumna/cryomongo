@@ -38,7 +38,7 @@ shards build --release driver_bench
 BENCH_FULL=1 MONGODB_URI='mongodb://localhost:27017/?replicaSet=rs0' bin/driver_bench
 ```
 
-Then point `BENCHMARK.md` at the new `full` file if that run should be the public snapshot.
+Then point `BENCHMARK.md` **Latest numbers** at the new `full` file if that run should be the public snapshot. Live DriverBench and BSON-only rematch are two snapshots; do not fold them into one table.
 
 Current files:
 
@@ -50,11 +50,13 @@ bench/results/
   2026-08-21T093500Z-short-replica-set.json      first local short run (debug build)
   2026-08-21T100223Z-full-replica-set.json       full --release, no client bulkWrite
   2026-08-23T200927Z-short-standalone.json       short --release with client bulkWrite
-  2026-08-23T203227Z-full-replica-set.json       full --release with client bulkWrite
+  2026-08-23T203227Z-full-replica-set.json       full --release with client bulkWrite (bson 0.8.1)
+  2026-09-01T223259Z-full-replica-set.json       full --release, bson 0.9.0 (current live snapshot)
+  2026-09-02T112234Z-full-bson-only.json         full --release, bson 0.9.2, BSON only
 ```
 
 Client `bulkWrite` tasks (`small client bulkWrite`, `large client bulkWrite`, `small client bulkWrite mixed`) run on MongoDB 8.0 and enter MultiBench, WriteBench, and DriverBench. Older JSON files in this folder do not have those rows; composites from those files omit the missing names.
 
 `BENCH_RESULTS_DIR` can override this folder. `BENCH_SAVE=0` skips the write (useful for a throwaway local check).
 
-BSON decode in the runner is `BSON.new(bytes).to_h`. A default `crystal run` build is not a reference; use `--release` for numbers you might compare to other drivers.
+BSON decode in the runner is `BSON.new(bytes).to_h`. Walk / one-field tasks have `"group": "extra"` and are not in BSONBench. A default `crystal run` build is not a reference; use `--release` for numbers you might compare to other drivers.

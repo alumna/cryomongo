@@ -54,8 +54,8 @@ class Mongo::Auth::Scram
       builder["mechanism"] = @mechanism_string
       builder["payload"] = client_first_payload.to_slice
       builder["db"] = auth_source
-      builder["options"] = BSON.build do |opts|
-        opts["skipEmptyExchange"] = true
+      builder.document("options") do
+        builder["skipEmptyExchange"] = true
       end
     end
   end
