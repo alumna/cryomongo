@@ -1,15 +1,17 @@
 require "../spec_helper"
 
 private def with_compressor(name : String, &)
-  base = ENV["MONGODB_URI"]
-  uri = mongodb_uri_with(base, "compressors=#{name}&serverSelectionTimeoutMS=3000")
-  client = Mongo::Client.new(uri)
-  begin
-    yield client
-  rescue e : Mongo::Error::ServerSelection
-    pending! "MongoDB is not reachable (#{e.message})"
-  ensure
-    client.close
+  Mongo::SpecCluster.exclusive do
+    base = ENV["MONGODB_URI"]
+    uri = mongodb_uri_with(base, "compressors=#{name}&serverSelectionTimeoutMS=3000")
+    client = Mongo::Client.new(uri)
+    begin
+      yield client
+    rescue e : Mongo::Error::ServerSelection
+      pending! "MongoDB is not reachable (#{e.message})"
+    ensure
+      client.close
+    end
   end
 end
 

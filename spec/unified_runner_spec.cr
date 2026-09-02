@@ -30,36 +30,40 @@ describe "Unified Test Runner" do
   end
 
   it "bootstraps the environment successfully" do
-    uri = ENV["MONGODB_URI"]
-    client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=3000"))
-    begin
-      response = client.command(Mongo::Commands::Ping)
-      if response
-        response.ok.should eq(1.0)
-      else
-        fail "Expected a response, but got nil"
+    Mongo::SpecCluster.exclusive do
+      uri = ENV["MONGODB_URI"]
+      client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=3000"))
+      begin
+        response = client.command(Mongo::Commands::Ping)
+        if response
+          response.ok.should eq(1.0)
+        else
+          fail "Expected a response, but got nil"
+        end
+      rescue e : Mongo::Error::ServerSelection
+        pending! "MongoDB is not reachable as a replica set (#{e.message}). Run: sudo scripts/mongo-topology.sh replicaset"
+      ensure
+        client.close
       end
-    rescue e : Mongo::Error::ServerSelection
-      pending! "MongoDB is not reachable as a replica set (#{e.message}). Run: sudo scripts/mongo-topology.sh replicaset"
-    ensure
-      client.close
     end
   end
 
   it "closes a client without waiting a full heartbeat" do
-    uri = mongodb_uri_direct(ENV["MONGODB_URI"])
-    client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=3000"))
-    begin
-      client.command(Mongo::Commands::Ping)
-    rescue e : Mongo::Error::ServerSelection
-      pending! "MongoDB is not reachable as a replica set (#{e.message}). Run: sudo scripts/mongo-topology.sh replicaset"
+    Mongo::SpecCluster.exclusive do
+      uri = mongodb_uri_direct(ENV["MONGODB_URI"])
+      client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=3000"))
+      begin
+        client.command(Mongo::Commands::Ping)
+      rescue e : Mongo::Error::ServerSelection
+        pending! "MongoDB is not reachable as a replica set (#{e.message}). Run: sudo scripts/mongo-topology.sh replicaset"
+      end
+      # First hello is a handshake. Wait so awaitable hello is in flight (the
+      # GitHub ~18s hang was a long-lived client, not close-right-after-ping).
+      sleep 500.milliseconds
+      started = Time.instant
+      client.close
+      (Time.instant - started).should be < 3.seconds
     end
-    # First hello is a handshake. Wait so awaitable hello is in flight (the
-    # GitHub ~18s hang was a long-lived client, not close-right-after-ping).
-    sleep 500.milliseconds
-    started = Time.instant
-    client.close
-    (Time.instant - started).should be < 3.seconds
   end
 
   # Gather all JSON files and sort them deterministically
