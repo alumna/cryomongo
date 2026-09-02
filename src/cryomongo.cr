@@ -2,7 +2,7 @@ require "log"
 require "bson"
 
 module Mongo
-  VERSION = "0.17.3"
+  VERSION = "0.17.4"
 
   Log = ::Log.for(self)
 end

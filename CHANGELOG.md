@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.17.4 - 2026-09-02
 
 Uses **bson.cr 0.9.2** (interned deep-tree keys on `to_h`). Nested handshake `os` / `env` / `container` and SCRAM `options` write into the parent Builder IO (no child `BSON.build`; that landed with 0.9.0). Full `--release` replica-set DriverBench remains [`bench/results/2026-09-01T223259Z-full-replica-set.json`](bench/results/2026-09-01T223259Z-full-replica-set.json) (bson 0.9.0). BSON-only rematch on 0.9.2: [`bench/results/2026-09-02T112234Z-full-bson-only.json`](bench/results/2026-09-02T112234Z-full-bson-only.json) (deep `to_h` 136 MB/s, BSONBench 1094). Extra walk / one-field bench tasks are not in BSONBench. Official decode stays `to_h`. Live path is still BSON / views / Builder. [`BENCHMARK.md`](BENCHMARK.md) is ordered as concepts → how to run → numbers (two current snapshots: live 0.9.0, BSON 0.9.2). Version stays 0.17.3 until tagged.
 
