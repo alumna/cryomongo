@@ -87,18 +87,25 @@ module Mongo::Handshake
           builder["application"] = {name: name}
         end
         builder["driver"] = {name: driver_name, version: driver_version}
-        os = BSON.build do |os_builder|
-          os_builder["type"] = OS_TYPE
+        builder.document("os") do
+          builder["type"] = OS_TYPE
           unless omit_os_extra
-            os_builder["name"] = os_n if os_n
-            os_builder["architecture"] = OS_ARCH
-            os_builder["version"] = os_v if os_v
+            builder["name"] = os_n if os_n
+            builder["architecture"] = OS_ARCH
+            builder["version"] = os_v if os_v
           end
         end
-        builder["os"] = os
         builder["platform"] = platform_str
         if env && !omit_env
-          builder["env"] = omit_env_extra ? env_name_only(env) : env
+          if omit_env_extra
+            if env_name = env["name"]?.try(&.as?(String))
+              builder.document("env") { builder["name"] = env_name }
+            else
+              builder["env"] = env
+            end
+          else
+            builder["env"] = env
+          end
         end
       end
 
@@ -118,14 +125,6 @@ module Mongo::Handshake
     end
   end
 
-  private def env_name_only(env : BSON) : BSON
-    if name = env["name"]?.try(&.as?(String))
-      BSON.build { |b| b["name"] = name }
-    else
-      env
-    end
-  end
-
   private def env_document : BSON?
     return @@cached_env if @@env_checked
     @@env_checked = true
@@ -140,9 +139,9 @@ module Mongo::Handshake
       builder["name"] = name if name
       add_faas_fields(builder, name) if name
       if has_container
-        builder["container"] = BSON.build do |c|
-          c["runtime"] = runtime if runtime
-          c["orchestrator"] = orchestrator if orchestrator
+        builder.document("container") do
+          builder["runtime"] = runtime if runtime
+          builder["orchestrator"] = orchestrator if orchestrator
         end
       end
     end

@@ -1,0 +1,142 @@
+{
+  "schema": 1,
+  "recorded_at": "2026-09-02T11:22:34Z",
+  "elapsed_s": 62.19,
+  "mode": "full",
+  "host": {
+    "os": "linux x86_64",
+    "cpu": "AMD Ryzen 7 5700G with Radeon Graphics",
+    "cpus": 16,
+    "ram_kib": 28627544,
+    "crystal": "1.21.0",
+    "release": true,
+    "git_commit": "7a6027c",
+    "git_branch": "master"
+  },
+  "bounds": {
+    "min_iters": 100,
+    "task_seconds": 60.0,
+    "max_seconds": 300.0
+  },
+  "datasets": {
+    "source": "generated",
+    "gridfs_bytes": 52428800,
+    "mixed_n": 10000,
+    "official_files": {
+      "tweet.json": false,
+      "small_doc.json": false,
+      "large_doc.json": false,
+      "gridfs_large.bin": false,
+      "flat_bson.json": false,
+      "deep_bson.json": false,
+      "full_bson.json": false
+    }
+  },
+  "tasks": [
+    {
+      "name": "flat bson encode",
+      "group": "bson",
+      "median_ms": 45.61,
+      "mb_s": 1651.09,
+      "n": 100,
+      "bytes": 75310000
+    },
+    {
+      "name": "flat bson decode",
+      "group": "bson",
+      "median_ms": 62.59,
+      "mb_s": 1203.28,
+      "n": 100,
+      "bytes": 75310000
+    },
+    {
+      "name": "deep bson encode",
+      "group": "bson",
+      "median_ms": 21.98,
+      "mb_s": 1038.97,
+      "n": 100,
+      "bytes": 22840000
+    },
+    {
+      "name": "deep bson decode",
+      "group": "bson",
+      "median_ms": 167.62,
+      "mb_s": 136.26,
+      "n": 100,
+      "bytes": 22840000
+    },
+    {
+      "name": "full bson encode",
+      "group": "bson",
+      "median_ms": 33.38,
+      "mb_s": 1717.95,
+      "n": 100,
+      "bytes": 57340000
+    },
+    {
+      "name": "full bson decode",
+      "group": "bson",
+      "median_ms": 70.05,
+      "mb_s": 818.58,
+      "n": 100,
+      "bytes": 57340000
+    },
+    {
+      "name": "deep bson walk",
+      "group": "extra",
+      "median_ms": 105.56,
+      "mb_s": 216.36,
+      "n": 100,
+      "bytes": 22840000
+    },
+    {
+      "name": "deep bson one field",
+      "group": "extra",
+      "median_ms": 7.54,
+      "mb_s": 3031.06,
+      "n": 100,
+      "bytes": 22840000
+    },
+    {
+      "name": "flat bson walk",
+      "group": "extra",
+      "median_ms": 54.72,
+      "mb_s": 1376.25,
+      "n": 100,
+      "bytes": 75310000
+    },
+    {
+      "name": "flat bson one field",
+      "group": "extra",
+      "median_ms": 8.46,
+      "mb_s": 8904.82,
+      "n": 100,
+      "bytes": 75310000
+    },
+    {
+      "name": "full bson walk",
+      "group": "extra",
+      "median_ms": 36.08,
+      "mb_s": 1589.35,
+      "n": 100,
+      "bytes": 57340000
+    },
+    {
+      "name": "full bson one field",
+      "group": "extra",
+      "median_ms": 4.65,
+      "mb_s": 12336.48,
+      "n": 100,
+      "bytes": 57340000
+    }
+  ],
+  "composites": {
+    "BSONBench": 1094.35
+  },
+  "notes": [
+    "Generated in-memory documents. Official files were not in bench/data/.",
+    "BSON decode walks fields with to_h (native Hash). Encode keeps the byte size so --release cannot drop the loop.",
+    "Walk / one-field BSON tasks are local extras (each / []). They are not in BSONBench. Official decode is still to_h.",
+    "Parallel small insertMany is a local extra task. It is not in WriteBench or DriverBench."
+  ]
+}

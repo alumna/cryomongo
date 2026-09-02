@@ -78,4 +78,27 @@ describe "DriverBench report" do
     c["MultiBench"].should be_close(multi, 1e-9)
     c["DriverBench"].should be_close((c["ReadBench"] + c["WriteBench"]) / 2.0, 1e-9)
   end
+
+  it "does not put walk / one-field BSON extras into BSONBench" do
+    bson = [
+      DriverBench::Timing::Result.new("flat bson encode", 1_i64, 8, 0.1, 10.0),
+      DriverBench::Timing::Result.new("flat bson decode", 1_i64, 8, 0.1, 20.0),
+      DriverBench::Timing::Result.new("deep bson walk", 1_i64, 8, 0.1, 999.0),
+      DriverBench::Timing::Result.new("deep bson one field", 1_i64, 8, 0.1, 888.0),
+      DriverBench::Timing::Result.new("flat bson walk", 1_i64, 8, 0.1, 777.0),
+    ]
+    c = DriverBench::Report.composites(bson, [] of DriverBench::Timing::Result)
+    c["BSONBench"].should be_close(15.0, 1e-9)
+  end
+
+  it "groups walk / one-field BSON tasks as extra" do
+    DriverBench::Report.group_for("deep bson walk").should eq("extra")
+    DriverBench::Report.group_for("deep bson one field").should eq("extra")
+    DriverBench::Report.group_for("flat bson walk").should eq("extra")
+    DriverBench::Report.group_for("flat bson one field").should eq("extra")
+    DriverBench::Report.group_for("full bson walk").should eq("extra")
+    DriverBench::Report.group_for("full bson one field").should eq("extra")
+    DriverBench::Report.group_for("flat bson decode").should eq("bson")
+    DriverBench::Report.group_for("parallel small insertMany").should eq("extra")
+  end
 end

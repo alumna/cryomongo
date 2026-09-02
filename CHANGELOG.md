@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+Uses **bson.cr 0.9.2** (interned deep-tree keys on `to_h`). Nested handshake `os` / `env` / `container` and SCRAM `options` write into the parent Builder IO (no child `BSON.build`; that landed with 0.9.0). Full `--release` replica-set DriverBench remains [`bench/results/2026-09-01T223259Z-full-replica-set.json`](bench/results/2026-09-01T223259Z-full-replica-set.json) (bson 0.9.0). BSON-only rematch on 0.9.2: [`bench/results/2026-09-02T112234Z-full-bson-only.json`](bench/results/2026-09-02T112234Z-full-bson-only.json) (deep `to_h` 136 MB/s, BSONBench 1094). Extra walk / one-field bench tasks are not in BSONBench. Official decode stays `to_h`. Live path is still BSON / views / Builder. [`BENCHMARK.md`](BENCHMARK.md) is ordered as concepts → how to run → numbers (two current snapshots: live 0.9.0, BSON 0.9.2). Version stays 0.17.3 until tagged.
+
 ## 0.17.3 - 2026-08-25
 
 Replica-set GitHub flaked once after v0.17.2: `logging-replicaset.json` **Failing heartbeat** (`waitForEvent` `serverHeartbeatFailedEvent` got 0 in 10s). The client uses the default 10s heartbeat. Awaitable hello does not see `failCommand` until that wait ends, and `waitForEvent` is also 10s. After a hello `closeConnection` / `errorCode` failPoint, UTF aborts in-progress monitor hello on the matching appName client when that client observes `serverHeartbeatFailedEvent`. Backpressure tests freeze monitors (`heartbeatFrequencyMS` 1000000) and are not aborted. Do not copy this failPoint to all members. `:nodoc:` helper on `Client` / `Monitor`; production call sites unchanged.
