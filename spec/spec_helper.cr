@@ -14,6 +14,9 @@ end
 # once retried writes and broke expectEvents on GitHub replica set.
 # UTF holds this lock for a whole JSON file (not one test), so killAllSessions
 # cannot run between tests of another file. CMAP holds it per cmap-format file.
+# Live prose that talks to mongod (ping, insert, RTT sleep) must use this lock
+# too: CRYSTAL_WORKERS=2 otherwise overlaps UTF failCommand and extra insert
+# retries (Wave 11 replica-set GitHub errors).
 # Timing logs after v0.17.1 showed 0 overlapping UTF files; leftover failCommand
 # on a paused / Unknown member still retried the next insert.
 module Mongo::SpecCluster
@@ -76,6 +79,34 @@ def mongodb_uri_strip_option(uri : String, name : String) : String
   kept.empty? ? base : "#{base}?#{kept.join("&")}"
 end
 
+# Drop user:pass so a leftover saslContinue failCommand cannot block
+# configureFailPoint. Spec topologies do not use --auth; SASL only runs when
+# the URI has userinfo.
+def mongodb_uri_strip_userinfo(uri : String) : String
+  parts = uri.split("://", 2)
+  return uri unless parts.size == 2
+  scheme, rest = parts
+  if at = rest.rindex('@')
+    "#{scheme}://#{rest[at + 1..]}"
+  else
+    uri
+  end
+end
+
+# Direct mongod used to turn failCommand off. No userinfo, unique appName,
+# retryWrites=false, long poll heartbeat. First handshake is before UTF sets a
+# failPoint; later calls reuse that socket. Do not use start_monitoring: false:
+# Single + Unknown never marks the pool ready, so mode=off waits out SST.
+def mongodb_uri_failpoint_off(uri : String, address : String) : String
+  built = mongodb_uri_direct_address(uri, address)
+  built = mongodb_uri_strip_userinfo(built)
+  built = mongodb_uri_strip_option(built, "retryWrites")
+  built = mongodb_uri_strip_option(built, "appname")
+  built = mongodb_uri_strip_option(built, "heartbeatFrequencyMS")
+  built = mongodb_uri_strip_option(built, "serverMonitoringMode")
+  mongodb_uri_with(built, "serverSelectionTimeoutMS=3000&retryWrites=false&appName=cryomongo-failpoint-off&heartbeatFrequencyMS=1000000&serverMonitoringMode=poll")
+end
+
 # One mongod/mongos with SDAM monitors. Load-balanced URIs have no monitors, so
 # close-timing tests use this instead of MONGODB_URI.
 def mongodb_uri_direct(uri : String) : String
@@ -87,6 +118,7 @@ def mongodb_uri_direct(uri : String) : String
 end
 
 # First host in the URI (GitHub replica set is often a secondary on 27017).
+# A sharded URI has two mongos; the host list is not one address.
 def mongodb_seed_address(uri : String) : String?
   rest = uri.split("://", 2)[1]?
   return nil unless rest
@@ -94,11 +126,12 @@ def mongodb_seed_address(uri : String) : String?
   cut = hostpart.index('/') || hostpart.index('?')
   raw = cut ? hostpart[0, cut] : hostpart
   return nil if raw.empty?
-  raw.includes?(':') ? raw.downcase : "#{raw.downcase}:27017"
+  first = raw.split(',', 2)[0]
+  return nil if first.empty?
+  first.includes?(':') ? first.downcase : "#{first.downcase}:27017"
 end
 
-# One mongod at `address`, same credentials as `uri`. A replica-set client
-# cannot turn off failCommand on an Unknown / paused member (pool cleared).
+# One mongod at `address`, same credentials as `uri`. FailPoint-off strips userinfo after this.
 def mongodb_uri_direct_address(uri : String, address : String) : String
   parts = uri.split("://", 2)
   return uri unless parts.size == 2

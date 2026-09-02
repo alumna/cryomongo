@@ -54,11 +54,20 @@ class Mongo::Client
            !session.is_transaction?
           raise original_error if original_error
           connection, owns = checkout_for_command(server_description, session, provided_connection, deadline)
+          if skip_unsuitable_retryable_write?(connection, owns, server_description, command, args, read_preference, session)
+            next
+          end
           session.pin(server_description)
           return execute_command(command, session, read_preference, server_description, connection, operation_id, end_implicit_session, deadline, owns, **args)
         end
 
         connection, owns = checkout_for_command(server_description, session, provided_connection, deadline)
+        # Handshake of Unknown can reveal a replica-set secondary (GitHub seed
+        # 27017 is often a secondary). Sending the write there retried on the
+        # primary and UTF saw two insert commandStarted events.
+        if skip_unsuitable_retryable_write?(connection, owns, server_description, command, args, read_preference, session)
+          next
+        end
         session.pin(server_description)
         overload_retry = original_error.try(&.retryable_overload?) || false
         if command.is_a?(Commands::CommitTransaction)
@@ -113,6 +122,36 @@ class Mongo::Client
         end
       end
     end
+  end
+
+  # True when checkout handshaked a server that must not take this write.
+  # Caller checks the socket in and selects again (not a retryable-write attempt).
+  private def skip_unsuitable_retryable_write?(
+    connection : Mongo::Connection,
+    owns : Bool,
+    server_description : SDAM::ServerDescription,
+    command,
+    args,
+    read_preference : ReadPreference,
+    session : Session::ClientSession,
+  ) : Bool
+    live = topology.servers.find { |s| s.address == server_description.address } || server_description
+    return false if retryable_write_target_usable?(live, command, args, read_preference)
+    release_connection(connection) if owns
+    session.unpin
+    true
+  end
+
+  # Replica-set writes need a primary. Single topology may use a secondary
+  # (directConnection). Unknown / RSGhost is not a write target.
+  private def retryable_write_target_usable?(
+    server : SDAM::ServerDescription,
+    command,
+    args,
+    read_preference : ReadPreference,
+  ) : Bool
+    return false if server.type.unknown? || server.type.rs_ghost?
+    find_suitable_servers(command, args, read_preference).any? { |s| s.address == server.address }
   end
 
   # Session pin: wait until that mongos is selectable (DRIVERS-2032). After
@@ -179,7 +218,14 @@ class Mongo::Client
     end
     if !writable
       if found = unknown
-        return found
+        # Handshake Unknown after pool clear / step-down when SDAM already
+        # knows other members. A lone Unknown seed is often a secondary
+        # (GitHub 27017); wait for a primary so the first write is not a
+        # checkout on that secondary plus a retried insert.
+        known_other = topology.servers.any? { |s|
+          s.address != found.address && !s.type.unknown? && !s.type.rs_ghost?
+        }
+        return found if known_other
       end
     end
     server_selection(command, args, read_preference, deadline, deprioritized)

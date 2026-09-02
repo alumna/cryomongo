@@ -86,14 +86,20 @@ module Mongo::Unified
     # One Single-topology client per mongod. Turning off failCommand through
     # the replica-set shared client skips Unknown / paused pools, so leftover
     # failCommand retried the next UTF insert (GitHub squash-merge flake).
+    # Long poll heartbeat: a later hello failCommand must not pause this pool
+    # (then mode=off cannot checkout). No URI userinfo: leftover saslContinue
+    # must not block the handshake. Unique appName: test failPoints do not match.
+    # Cache the client so the first handshake (before UTF failPoints) is reused.
+    # Do not use start_monitoring: false: Single + Unknown never marks the pool
+    # ready, so checkout waits out serverSelectionTimeoutMS.
     def self.direct_client(address : String) : Mongo::Client
       @@shared_lock.synchronize do
         if client = @@direct_clients[address]?
           return client
         end
       end
-      uri = mongodb_uri_direct_address(ENV["MONGODB_URI"], address)
-      opened = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=3000"))
+      uri = mongodb_uri_failpoint_off(ENV["MONGODB_URI"], address)
+      opened = Mongo::Client.new(uri)
       @@shared_lock.synchronize do
         if existing = @@direct_clients[address]?
           opened.close
@@ -104,37 +110,75 @@ module Mongo::Unified
       end
     end
 
+    def self.replace_direct_client(address : String) : Mongo::Client
+      old = nil.as(Mongo::Client?)
+      @@shared_lock.synchronize do
+        old = @@direct_clients.delete(address)
+      end
+      old.try(&.close)
+      direct_client(address)
+    end
+
     private def internal_client : Mongo::Client
       @internal_client || Runner.shared_client
     end
 
     private def disable_fail_points
-      # failCommand is per mongos / per mongod. Use the internal client for the
-      # selected server, then a directConnection client for every known address
-      # (including Unknown). A paused replica-set pool cannot send mode=off, and
-      # leftover failCommand retried insertOne in the next file.
+      # failCommand is per mongos / per mongod. The replica-set shared client
+      # skips Unknown / paused pools, so leftover failCommand retried the next
+      # UTF insert. Direct clients (long poll heartbeat, no URI userinfo) send mode=off
+      # on every member, including 27017 when it is a secondary.
       ic = internal_client
       send_fail_point_off(ic, nil)
+      unless load_balanced_topology?
+        fail_point_member_addresses.each do |address|
+          fail_point_off_on_address(address)
+        end
+      end
+      @fail_point_active = false
+    end
+
+    # Topology seeds plus hello.hosts so a member SDAM has not listed yet still
+    # gets mode=off (GitHub 27017 is often a secondary).
+    private def fail_point_member_addresses : Array(String)
       addresses = Set(String).new
+      ic = internal_client
       begin
         ic.topology.snapshot.servers.each do |server|
           next if server.type.rs_ghost?
-          addresses << server.address
-          next if server.type.unknown?
-          send_fail_point_off(ic, server)
+          addresses << server.address.downcase
         end
       rescue
       end
       if seed = mongodb_seed_address(ENV["MONGODB_URI"]? || "")
-        addresses << seed
+        addresses << seed.downcase
       end
-      unless load_balanced_topology?
-        addresses.each do |address|
-          send_fail_point_off(Runner.direct_client(address), nil)
-        rescue
+      begin
+        result = ic.command(Mongo::Commands::Hello)
+        if result.is_a?(Mongo::Commands::Hello::Result)
+          result.hosts.try(&.each { |host| addresses << host.downcase })
+          result.passives.try(&.each { |host| addresses << host.downcase })
+          result.arbiters.try(&.each { |host| addresses << host.downcase })
+          if primary = result.primary
+            addresses << primary.downcase
+          end
+          if me = result.me
+            addresses << me.downcase
+          end
         end
+      rescue
       end
-      @fail_point_active = false
+      addresses.to_a
+    end
+
+    private def fail_point_off_on_address(address : String) : Nil
+      # directConnection forbids multiple seeds. A comma here is a bad host list,
+      # not one mongos / mongod (GitHub sharded URI).
+      return if address.includes?(',')
+      3.times do
+        return if send_fail_point_off(Runner.direct_client(address), nil)
+      end
+      send_fail_point_off(Runner.replace_direct_client(address), nil)
     end
 
     private def load_balanced_topology? : Bool
@@ -156,8 +200,22 @@ module Mongo::Unified
       # Each known server already received killAllSessions above.
     end
 
-    private def send_fail_point_off(client : Mongo::Client, server : Mongo::SDAM::ServerDescription?) : Nil
-      ["failCommand", "onPrimaryTransactionalWrite", "failGetMoreAfterCursorCheckout"].each do |fp|
+    # Returns true when failCommand mode=off was sent. Other failPoints are
+    # best-effort. The caller retries when this is false.
+    private def send_fail_point_off(client : Mongo::Client, server : Mongo::SDAM::ServerDescription?) : Bool
+      fail_command_off = true
+      begin
+        client.command(
+          Mongo::Commands::ConfigureFailPoint,
+          database: "admin",
+          fail_point: "failCommand",
+          mode: "off",
+          server_description: server
+        )
+      rescue
+        fail_command_off = false
+      end
+      ["onPrimaryTransactionalWrite", "failGetMoreAfterCursorCheckout"].each do |fp|
         begin
           client.command(
             Mongo::Commands::ConfigureFailPoint,
@@ -169,6 +227,7 @@ module Mongo::Unified
         rescue
         end
       end
+      fail_command_off
     end
 
     private def parse_transaction_options(opts : JSON::Any?) : Mongo::Session::TransactionOptions?

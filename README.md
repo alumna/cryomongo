@@ -812,7 +812,7 @@ See [BENCHMARK.md](BENCHMARK.md) (how to run, then the numbers). BSON-only: `cry
 4. Push to the branch (`git push origin my-new-feature`)
 5. Create a new Pull Request
 
-Spec CI runs `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=snappy,zstd,zlib` (snappy is first, so the suite uses snappy; zlib and zstd run in compression prose). UTF holds one cluster lock per JSON file so failCommand and step-down do not overlap. Replica-set leftover failCommand is turned off with `directConnection` so an Unknown member cannot keep it.
+Spec CI runs `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=snappy,zstd,zlib` (snappy is first, so the suite uses snappy; zlib and zstd run in compression prose). UTF holds one cluster lock per JSON file so failCommand and step-down do not overlap. Live prose that talks to mongod uses the same lock. Retryable writes wait for a replica-set primary instead of sending the first write to a lone Unknown seed (GitHub 27017 is often a secondary). Replica-set leftover failCommand is turned off with `directConnection` (long poll heartbeat, no URI userinfo) so an Unknown member cannot keep it.
 
 ## Contributors
 

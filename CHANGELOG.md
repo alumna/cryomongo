@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+Replica-set GitHub extra `insert` events after 0.17.4 (`deprecated-options.json`, `legacy-timeouts.json`, `interruptInUse-pool-clear.json`, `rediscover-quickly-after-step-down.json`).
+
+Cause: retryable writes handshaked the URI seed while it was Unknown (GitHub 27017 is often a secondary), sent the insert there, then retried on the primary. Leftover `failCommand` and live prose overlapping UTF (`CRYSTAL_WORKERS=2`) can add the same extra events.
+
+### Fixed
+- After handshake, do not send a replica-set write to a member that is not a primary; check the socket in and select again (not a retryable-write attempt)
+- Do not pick a lone Unknown replica-set seed as a write target (that seed is often a secondary)
+- `disable_fail_points` sends `mode=off` on every replica-set member through a cached `directConnection` client
+- Those clients use a unique `appName`, omit URI userinfo, and poll with a 1000s heartbeat (a later hello failPoint must not pause the pool)
+- Member list includes `hello.hosts` so a secondary seed still gets `mode=off`
+- Retry `mode=off`; recreate the direct client only after retries fail
+- A sharded URI has two mongos; `mongodb_seed_address` is the first host only (`directConnection` cannot use the whole host list)
+- Live prose that talks to mongod (auth, compression, RTT, find/getMore, transaction write concern, UTF bootstrap / close) uses the same cluster lock as UTF
+
 ## 0.17.4 - 2026-09-02
 
 ### Changed
