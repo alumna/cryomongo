@@ -257,4 +257,13 @@ module Mongo
   # Is raised when performing transaction operations.
   class Error::Transaction < Error::Client
   end
+
+  # Client-side encryption (libmongocrypt) failed, or the library was not linked.
+  class Error::Crypt < Error::Client
+    getter code : UInt32
+
+    def initialize(message : String, @code : UInt32 = 0_u32)
+      super(message)
+    end
+  end
 end

@@ -89,7 +89,7 @@ Phase 3 is done. GitHub `crystal spec -Dpreview_mt -Dexecution_context` with `CR
 
 ## Remaining work (MongoDB 8.0, toward production grade)
 
-Phases 1–3 are done through **3.13.3**. GitHub Docker after the UTF file-lock / leftover failCommand `directConnection` fix: standalone **2:01 / 14 pending / 754 examples**, replica set **4:32 / 15 / 879**, sharded **6:55 / 15 / 868**, load-balanced **4:03 / 15 / 822**. 0 failures on the v0.17.2 PR and squash-merge runs. A later replica-set re-run flaked once on `logging-replicaset.json` Failing heartbeat (10s `waitForEvent` vs 10s awaitable hello); that hole is closed on this branch. Same band as 3.13.3 (2:03 / 4:33 / 7:10 / 4:23), 3.13.1 (2:02 / 4:06 / 6:49 / 4:19), and 3.12 (1:59 / 4:26 / 6:56 / 4:24). Replica set is **3** members. Remaining Crystal `pending` is newer-server / `auth: false` / extra auth env / official `skipReason`. Optional CMAP wait-queue options are 3.13.2. Live **X509** prose stays pending because CI has no TLS client certs (`MONGODB_X509_URI`); that is optional extra CI, not a driver hole and not a 3.13.4. Next numbered work is **3.14** (performance). Details of how to automate X509 CI are under **Optional CI — X509 + certs** below and in `FIXES.md`. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
+Phases 1–3 are done through **3.13.3**. GitHub Docker after the UTF file-lock / leftover failCommand `directConnection` fix: standalone **2:01 / 14 pending / 754 examples**, replica set **4:32 / 15 / 879**, sharded **6:55 / 15 / 868**, load-balanced **4:03 / 15 / 822**. 0 failures on the v0.17.2 PR and squash-merge runs. A later replica-set re-run flaked once on `logging-replicaset.json` Failing heartbeat (10s `waitForEvent` vs 10s awaitable hello); that hole is closed on this branch. Same band as 3.13.3 (2:03 / 4:33 / 7:10 / 4:23), 3.13.1 (2:02 / 4:06 / 6:49 / 4:19), and 3.12 (1:59 / 4:26 / 6:56 / 4:24). Replica set is **3** members. Remaining Crystal `pending` is newer-server / `auth: false` / extra auth env / official `skipReason`. Optional CMAP wait-queue options are 3.13.2. Live **X509** prose stays pending because CI has no TLS client certs (`MONGODB_X509_URI`); that is optional extra CI, not a driver hole and not a 3.13.4. Next workbench work is Phase 4 (CSFLE, Waves 21–25). Adapter four-topology CI is Wave 20. Phase **3.14** (performance) is later and is not in those waves. Details of how to automate X509 CI are under **Optional CI — X509 + certs** below and in `FIXES.md`. **1.0** waits on Phase 4 (CSFLE) and Phase 5 (AWS / OIDC). Un-skip a UTF file only after it passes. Each sub-phase is one conversation.
 
 ### Out of scope until the user asks
 
@@ -216,7 +216,7 @@ GitHub Docker 3.13.1 pending counts (file-level Crystal `pending`) were standalo
 - [ ] **3.13.2** Optional CMAP `waitQueueSize` / `waitQueueMultiple` (deprecated; the spec says skip if the driver does not support them). Do not start unless we want those two log tests.
 - [x] **3.13.3** DRIVERS-2032: after a handshake error on a pinned mongos, wait until that pin is selectable before retrying `commitTransaction` / `abortTransaction`. Load-balanced: drop a stale transaction pin. `retryable-commit-handshake.json` and `retryable-abort-handshake.json` run. GitHub Docker: standalone **2:03 / 14 / 754**, replica set **4:33 / 15 / 879**, sharded **7:10 / 15 / 868**, load-balanced **4:23 / 15 / 822**. 0 failures.
 - [x] Audit leftover skips from Phases 1–3 that should not have stayed skipped.
-- [x] Audit Crystal `pending` on every topology after omit (GitHub 3.13.3: **14 / 15 / 15 / 15**). No extra 8.0 driver hole for a **3.13.4**. Remaining pending is extra auth env, Phase 5, MongoDB 8.1+, `auth: false`, old `maxServerVersion`, or server `skipReason`. **3.13.3** closed the last 8.0 hole on that list. Next is **3.14**. Details: `FIXES.md`.
+- [x] Audit Crystal `pending` on every topology after omit (GitHub 3.13.3: **14 / 15 / 15 / 15**). No extra 8.0 driver hole for a **3.13.4**. Remaining pending is extra auth env, Phase 5, MongoDB 8.1+, `auth: false`, old `maxServerVersion`, or server `skipReason`. **3.13.3** closed the last 8.0 hole on that list. Next workbench work is Phase 4 (CSFLE). Phase **3.14** is later. Details: `FIXES.md`.
 - [ ] **Optional CI — X509 + certs.** Do not start unless the user asks. Not a driver hole and not Phase 5. The four GitHub jobs stay SCRAM-without-TLS. Add a **separate** standalone TLS job that creates a CA / server / client cert with `openssl`, starts Community `mongo:8.0` with `net.tls`, creates a `$external` user from the client subject DN, sets `MONGODB_X509_URI`, and un-pends `spec/prose/auth_spec.cr` “authenticates with MONGODB-X509”. Full recipe: the section below and `FIXES.md`.
 
 ### Optional CI — X509 + certs (not started)
@@ -336,9 +336,14 @@ Not a spec hole. Review every hot path after 3.1–3.13: allocations, `insertOne
 
 ## Phase 4: Client-side encryption (Post-1.0)
 
-In scope for production-grade completeness. Not AWS / OIDC / MongoDB 8.1+. Start only when the user asks.
+In scope for production-grade completeness. Not AWS / OIDC / MongoDB 8.1+. Planned as workbench Waves **21–25** (`/home/coghi/Projects/mongodb/WAVES.md`). Adapter four-topology CI is Wave 20. Do **not** start Phase **3.14** from those waves.
 
-- [ ] **Client-Side Field Level Encryption (CSFLE / Queryable Encryption):** Crystal bindings for `libmongocrypt`, intercept queries, encrypt fields locally, official CSFLE suite (224 files, none copied).
+- [ ] **Client-Side Field Level Encryption (CSFLE / Queryable Encryption):** Crystal bindings for `libmongocrypt`, intercept queries, encrypt fields locally, official CSFLE suite (224 files, none copied). Split across workbench Waves **21–25**.
+  - [x] Wave 21: `libmongocrypt` bindings + explicit `create_data_key` / `encrypt` / `decrypt` (local KMS)
+  - [ ] Wave 22: auto-encryption (`schemaMap`)
+  - [ ] Wave 23: Queryable Encryption (`encryptedFieldsMap`)
+  - [ ] Wave 24: first official UTF / prose batch (local + 8.0)
+  - [ ] Wave 25: remaining official local / 8.0 tests
 
 ## Phase 5: Cloud and External Authentication
 

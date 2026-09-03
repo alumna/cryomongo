@@ -9,7 +9,7 @@
 
 <hr/>
 
-A MongoDB driver in Crystal (no mongo-c-driver). Tested against **MongoDB 8.0**. zstd wire compression links libzstd.
+A MongoDB driver in Crystal (no mongo-c-driver). Tested against **MongoDB 8.0**. zstd wire compression links libzstd. Explicit client-side encryption links libmongocrypt when that library is installed.
 
 > If you are looking for a higher-level object-document mapper, see [`moongoon`](https://github.com/elbywan/moongoon).
 
@@ -26,6 +26,7 @@ A MongoDB driver in Crystal (no mongo-c-driver). Tested against **MongoDB 8.0**.
 - [Bulk operations](#bulk-operations)
 - [Indexes](#indexes)
 - [GridFS](#gridfs)
+- [Client-side encryption](#client-side-encryption)
 - [Change streams](#change-streams)
 - [Raw commands](#raw-commands)
 - [Concerns and preference](#concerns-and-preference)
@@ -40,7 +41,7 @@ A MongoDB driver in Crystal (no mongo-c-driver). Tested against **MongoDB 8.0**.
 
 `alumna/cryomongo` is a fork of [`elbywan/cryomongo`](https://github.com/elbywan/cryomongo). The work here is for **MongoDB 8.0** (max wire version **25**, OP_MSG-only) and **Crystal 1.21**. It is meant to merge into the upstream repository.
 
-The driver is **0.x**. Phases 1–3 of [ROADMAP.md](ROADMAP.md) are done (CRUD, sessions, transactions, CSOT, load balancer, CMAP/SDAM, compression). Next is Phase **3.14** (performance). **1.0** waits on client-side encryption (Phase 4). Cloud auth (Phase 5: AWS / OIDC) is after 1.0.
+The driver is **0.x**. Phases 1–3 of [ROADMAP.md](ROADMAP.md) are done (CRUD, sessions, transactions, CSOT, load balancer, CMAP/SDAM, compression). Phase 4 Wave 21 ships explicit encryption with local KMS. **1.0** still waits on the rest of client-side encryption (Waves 22–25) and cloud auth (Phase 5: AWS / OIDC). Phase **3.14** (performance) is later and is not in those waves.
 
 Not in this fork: Atlas Search, MongoDB newer than 8.0, `MONGODB-AWS`, `MONGODB-OIDC`. Open work: [ROADMAP.md](ROADMAP.md).
 
@@ -53,6 +54,7 @@ Not in this fork: Atlas Search, MongoDB newer than 8.0, `MONGODB-AWS`, `MONGODB-
 - **[TLS](https://docs.mongodb.com/manual/core/security-transport-encryption/)** - `tlsCertificateKeyFilePassword`; stapled OCSP unless `tlsDisableCertificateRevocationCheck`
 - **[Indexes](https://docs.mongodb.com/manual/indexes/index.html)**
 - **[GridFS](https://docs.mongodb.com/manual/core/gridfs/index.html)** - `session:`, `delete_by_name` / `rename_by_name`, `drop`
+- **Explicit client-side encryption** - local KMS; `create_data_key` / `encrypt` / `decrypt`; needs libmongocrypt (auto-encryption is later)
 - **[Change streams](https://docs.mongodb.com/manual/changeStreams/index.html)** - `#next` waits; `#try_next` polls; resume after a labeled getMore error
 - **[Tailable cursors](https://docs.mongodb.com/manual/core/tailable-cursors/index.html)** and **[collation](https://docs.mongodb.com/manual/reference/collation/index.html)**
 - **Standalone, [replica set](https://docs.mongodb.com/manual/replication/), [sharded](https://docs.mongodb.com/manual/sharding/), load-balanced**
@@ -79,6 +81,8 @@ dependencies:
 2. Run `shards install`
 
 zstd wire compression links **libzstd**. On Debian/Ubuntu: `sudo apt-get install libzstd-dev`. snappy is pure Crystal. zlib is in the Crystal stdlib.
+
+Explicit client-side encryption links **libmongocrypt** when `pkg-config --exists libmongocrypt`. On Debian/Ubuntu: `sudo apt-get install libmongocrypt-dev`. GitHub CI installs that package and runs the explicit-encryption spec. Compile with `-Dwithout_libmongocrypt` to skip the link. Then `Mongo::ClientEncryption` raises a clear error, and the live encrypt/decrypt spec does not run. Auto-encryption is not in this version.
 
 ## Usage
 
@@ -503,6 +507,41 @@ gridfs.drop
 **Links**
 
 - [Mongo::GridFS::Bucket](docs/Mongo/GridFS/Bucket.html)
+
+## Client-side encryption
+
+Needs **libmongocrypt**. Local KMS only in this version. The local master key is 96 bytes. Encrypted values are BSON binary subtype `0x06`. Auto-encryption (`schemaMap`) is not here yet.
+
+```crystal
+require "cryomongo"
+require "random/secure"
+
+client = Mongo::Client.new
+master_key = Random::Secure.random_bytes(96)
+kms = BSON.build do |bson|
+  bson.document("local") do
+    bson["key"] = BSON::Binary.new(:generic, master_key)
+  end
+end
+
+encryption = Mongo::ClientEncryption.new(
+  client,
+  key_vault_namespace: "keyvault.datakeys",
+  kms_providers: kms
+)
+
+key_id = encryption.create_data_key("local")
+encrypted = encryption.encrypt(
+  "secret",
+  algorithm: Mongo::ClientEncryption::ALGORITHM_RANDOM,
+  key_id: key_id
+)
+plain = encryption.decrypt(encrypted) # => "secret"
+encryption.close
+client.close
+```
+
+The deterministic algorithm is `Mongo::ClientEncryption::ALGORITHM_DETERMINISTIC`. Same plaintext then gives the same ciphertext.
 
 ## Change streams
 

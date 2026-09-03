@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Explicit client-side encryption (`Mongo::ClientEncryption`), local KMS only
+  - System `libmongocrypt` bindings (`pkg-config`; link `-lmongocrypt` only)
+  - `create_data_key`, `encrypt`, `decrypt`
+  - Encrypted values are BSON binary subtype `0x06`
+  - Compile `-Dwithout_libmongocrypt` skips the link; the type then raises
+  - Specs skip the live encrypt path when the library is missing
+  - GitHub CI installs `libmongocrypt-dev` so that spec runs
+
+### Changed
+- **docs:** Phase 4 (CSFLE) is Waves 21–25.
+  Wave 21 is bindings plus explicit local KMS.
+  Auto-encryption is Wave 22.
+  Adapter CI four-topology matrix is Wave 20.
+  Phase 3.14 (performance) is later and is not in those waves.
+
 ## 0.17.5 - 2026-09-02
 
 Replica-set GitHub extra `insert` events after 0.17.4 (`deprecated-options.json`, `legacy-timeouts.json`, `interruptInUse-pool-clear.json`, `rediscover-quickly-after-step-down.json`).

@@ -8,6 +8,9 @@ crystal: ">= 1.20.0"
 
 license: MIT
 
+# CSFLE links -lmongocrypt when pkg-config finds libmongocrypt.
+# Compile with -Dwithout_libmongocrypt to skip. Do not vendor the C library.
+
 dependencies:
   bson:
     github: alumna/bson.cr
