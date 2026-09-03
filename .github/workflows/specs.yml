@@ -45,7 +45,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y libzstd-dev
+          sudo apt-get install -y libzstd-dev libmongocrypt-dev
           shards install
 
       - name: Run Specs
