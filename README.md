@@ -510,7 +510,7 @@ gridfs.drop
 
 ## Client-side encryption
 
-Needs **libmongocrypt**. Local KMS only in this version. The local master key is 96 bytes. Encrypted values are BSON binary subtype `0x06`. Auto-encryption (`schemaMap`) is not here yet.
+Needs **libmongocrypt**. Local KMS only in this version. The local master key is 96 bytes. Encrypted values are BSON binary subtype `0x06`. Always call `#close`. The GC does not free the libmongocrypt handle. Auto-encryption (`schemaMap`) is not here yet.
 
 ```crystal
 require "cryomongo"

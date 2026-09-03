@@ -22,7 +22,8 @@ require "sync"
   # link. Compile with `-Dlibmongocrypt` to require the link.
   #
   # This slice is local KMS only: `create_data_key`, `encrypt`, and `decrypt`.
-  # Encrypted values are BSON binary subtype `0x06`.
+  # Encrypted values are BSON binary subtype `0x06`. Always call `#close`.
+  # There is no GC `finalize` that frees libmongocrypt (see `#close`).
   class Mongo::ClientEncryption
     LIB_LINKED = {{ linked }}
   end
@@ -173,20 +174,18 @@ require "sync"
     end
 
     # Free the libmongocrypt handle. Does not close the key-vault client.
+    #
+    # Call this from the owning fiber. Do not add a GC `finalize` that calls
+    # `mongocrypt_destroy`: finalize runs on a GC thread during `GC_malloc`
+    # (same rule as `Cursor#finalize`). libmongocrypt uses libc malloc/free, so
+    # destroy-from-GC double-frees or SIGSEGV (`_mongocrypt_buffer_cleanup`).
     def close : Nil
       {% if linked %}
         @lock.synchronize do
           return unless @closed.compare_and_set(false, true)
           LibMongoCrypt.crypt_destroy(@crypt)
+          @crypt = Pointer(Void).null.as(LibMongoCrypt::Crypt)
         end
-      {% end %}
-    end
-
-    # Last resort if the caller skips `#close`. Do not take work from this path.
-    def finalize
-      {% if linked %}
-        return unless @closed.compare_and_set(false, true)
-        LibMongoCrypt.crypt_destroy(@crypt)
       {% end %}
     end
 

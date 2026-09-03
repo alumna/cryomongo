@@ -69,6 +69,25 @@ describe Mongo::ClientEncryption do
       end
     end
 
+    it "does not crash the GC after close" do
+      Mongo::SpecCluster.exclusive do
+        client = Mongo::Client.new(mongodb_uri_with(ENV["MONGODB_URI"], "serverSelectionTimeoutMS=5000"))
+        begin
+          master_key = Random::Secure.random_bytes(Mongo::ClientEncryption::LOCAL_KEY_BYTES)
+          enc = Mongo::ClientEncryption.new(
+            client,
+            key_vault_namespace: "csfle_explicit.datakeys",
+            kms_providers: local_kms_providers(master_key)
+          )
+          enc.close
+          enc = nil
+          8.times { GC.collect }
+        ensure
+          client.close
+        end
+      end
+    end
+
     it "raises when the local master key is not 96 bytes" do
       Mongo::SpecCluster.exclusive do
         client = Mongo::Client.new(mongodb_uri_with(ENV["MONGODB_URI"], "serverSelectionTimeoutMS=5000"))

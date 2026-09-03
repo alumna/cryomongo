@@ -11,6 +11,11 @@
   - Specs skip the live encrypt path when the library is missing
   - GitHub CI installs `libmongocrypt-dev` so that spec runs
 
+### Fixed
+- Do not call `mongocrypt_destroy` from `ClientEncryption` GC finalize
+  - Finalize runs during `GC_malloc`; libmongocrypt uses libc free
+  - GitHub four-topology CI crashed (double free / SIGSEGV)
+
 ### Changed
 - **docs:** Phase 4 (CSFLE) is Waves 21–25.
   Wave 21 is bindings plus explicit local KMS.
