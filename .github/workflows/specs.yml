@@ -23,6 +23,9 @@ on:
 # Ubuntu 26.04 / 26.04-arm are preview. GitHub images ship Docker (Azure
 # kernel 7.0.0, not this LXC's zabbly kernel). No ubuntu2604 crypt_shared
 # tarball: download script uses the ubuntu2404 package on 26.04.
+# Ubuntu 26.04 dropped PCRE1. Those cells install Crystal 1.21.x from the
+# official GitHub tarball (scripts/ci-install-crystal.sh, libpcre2-dev).
+# 22.04 / 24.04 keep crystal-lang/install-crystal@v1. macOS keeps that action.
 #
 # macOS cells (Wave 29). Pin macos-15 and macos-26 (arm64). Skip macos-14
 # (deprecated). Skip intel macos-*-large / macos-*-intel (paid larger runners).
@@ -68,10 +71,20 @@ jobs:
           spec/support/run-load-balancer.sh start
           cat tmp/lb-uri.env
 
+      # 22.04 / 24.04 still have PCRE1. The action is fine there.
       - name: Install Crystal
+        if: matrix.os != 'ubuntu-26.04' && matrix.os != 'ubuntu-26.04-arm'
         uses: crystal-lang/install-crystal@v1
         with:
           crystal: latest
+
+      # Ubuntu 26.04 dropped PCRE1. Official 1.21.x tarball + libpcre2-dev.
+      # The script never apt-installs the PCRE1 -dev package.
+      - name: Install Crystal (Ubuntu 26.04)
+        if: matrix.os == 'ubuntu-26.04' || matrix.os == 'ubuntu-26.04-arm'
+        run: |
+          set -euo pipefail
+          scripts/ci-install-crystal.sh
 
       - name: Install dependencies
         run: |
@@ -172,6 +185,14 @@ jobs:
           export HOMEBREW_NO_AUTO_UPDATE=1
           brew install zstd pkgconf
           echo "PKG_CONFIG_PATH=$(brew --prefix zstd)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+          # Crystal links Homebrew openssl@3 (pkg-config). Apple /usr/bin/openssl
+          # is LibreSSL. tls_spec `openssl rsa -traditional` needs OpenSSL 3.
+          # macos-15 failed that example; macos-26 did not. Do not skip it.
+          if OPENSSL_PREFIX="$(pkg-config --variable=prefix openssl 2>/dev/null)" && [[ -x "${OPENSSL_PREFIX}/bin/openssl" ]]; then
+            echo "${OPENSSL_PREFIX}/bin" >> "$GITHUB_PATH"
+          elif OPENSSL_PREFIX="$(brew --prefix openssl@3 2>/dev/null)" && [[ -x "${OPENSSL_PREFIX}/bin/openssl" ]]; then
+            echo "${OPENSSL_PREFIX}/bin" >> "$GITHUB_PATH"
+          fi
 
       - name: Install HAProxy (load-balanced)
         if: matrix.topology == 'load-balanced'

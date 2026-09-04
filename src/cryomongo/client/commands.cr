@@ -224,14 +224,22 @@ class Mongo::Client
     database_name = ""
     want_apm = @commands_observable.has_subscribers?
     want_log = want_command_logs?
+    wrapped_csot_io = false
 
     deadline.try(&.check!)
-    remaining = if (d = deadline) && !d.infinite?
-                  d.remaining
-                else
-                  nil
-                end
-    connection.apply_timeout(remaining || @options.socket_timeout)
+    if (d = deadline) && !d.infinite?
+      left = d.remaining
+      if left <= Time::Span.zero
+        raise Error::Timeout.new("Operation exceeded timeoutMS")
+      end
+      # Do not set leftover timeoutMS as one socket wait. Darwin kqueue can
+      # fire that wait early (bulkWrite UTF then sees two inserts, not three).
+      # Slices retry a premature IO::TimeoutError until the CSOT deadline.
+      connection.apply_timeout(nil)
+      wrapped_csot_io = connection.wrap_deadline_io(Time.instant + left)
+    else
+      connection.apply_timeout(Mongo::Connection.uri_timeout(@options.socket_timeout))
+    end
 
     # Load-balanced transactions keep this socket even if this command fails
     # with a non-transient error.
@@ -514,7 +522,7 @@ class Mongo::Client
       )
     end
     if error.is_a?(NetworkError)
-      keep_pin = error.is_a?(IO::TimeoutError) &&
+      keep_pin = io_timeout?(error) &&
                  !owns_connection &&
                  @options.load_balanced &&
                  connection.awaiting_reply? &&
@@ -537,7 +545,7 @@ class Mongo::Client
       else
         # After handshake, a socket timeout is a slow operation, not a dead server.
         # closeConnection / reset still mark Unknown and clear the pool.
-        kind = error.is_a?(IO::TimeoutError) ? SDAM::ApplicationError::Kind::Timeout : SDAM::ApplicationError::Kind::Network
+        kind = io_timeout?(error) ? SDAM::ApplicationError::Kind::Timeout : SDAM::ApplicationError::Kind::Network
         action = SDAM::ApplicationError.decide(kind, SDAM::ApplicationError::Phase::AfterHandshake, stale: false)
         unless action.ignore? || keep_pin
           # After handshake, a non-timeout network error marks Unknown and
@@ -552,8 +560,7 @@ class Mongo::Client
       end
       session.try &.dirty = true
       if (d = deadline) && !d.infinite? && !error.is_a?(Error::PoolCleared)
-        cause = error.cause
-        if d.expired? || cause.is_a?(IO::TimeoutError)
+        if d.expired? || io_timeout?(error)
           error = Error::Timeout.new("socket timeout: #{error.message}", cause: error)
         end
       end
@@ -591,6 +598,7 @@ class Mongo::Client
 
     raise error
   ensure
+    connection.unwrap_deadline_io if wrapped_csot_io
     session.majority_commit_wc = false
     release_connection(connection) if connection && owns_connection
     if end_implicit_session && !keeps_implicit_session?(result)
@@ -658,6 +666,17 @@ class Mongo::Client
     end
     return unless applied
     @monitors.find(&.server_description.address.== desc.address).try &.cancel_check
+  end
+
+  # Darwin may surface ETIMEDOUT as Socket::Error, not IO::TimeoutError.
+  private def io_timeout?(error : Exception?) : Bool
+    return false unless error
+    return true if error.is_a?(IO::TimeoutError)
+    if error.responds_to?(:os_error)
+      os = error.os_error
+      return true if os == Errno::ETIMEDOUT
+    end
+    io_timeout?(error.cause)
   end
 
   private def resolve_deadline(deadline : Mongo::Deadline?, session : Session::ClientSession?) : Mongo::Deadline?

@@ -66,6 +66,14 @@ describe Mongo::Options do
     deadline.try(&.infinite?).should be_true
   end
 
+  it "maps connectTimeoutMS=0 to a nil Crystal socket timeout" do
+    _, options, _, _ = Mongo::URI.parse("mongodb://localhost/?connectTimeoutMS=0", Mongo::Options.new)
+    options.connect_timeout.should eq Time::Span.zero
+    Mongo::Connection.uri_timeout(options.connect_timeout).should be_nil
+    Mongo::Connection.uri_timeout(10.seconds).should eq 10.seconds
+    Mongo::Connection.uri_timeout(nil).should be_nil
+  end
+
   it "rejects negative timeoutMS" do
     expect_raises(Mongo::Error, /timeoutMS/) do
       Mongo::URI.parse("mongodb://localhost/?timeoutMS=-1", Mongo::Options.new)

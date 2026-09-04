@@ -93,6 +93,8 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
   end
 
   # Copy BSON out of the receive buffer so the Channel pool can take it back.
+  # BSON.new(Bytes) clones top-level bytes. Nested []? is still a BSON.view of
+  # that parent. error? / Error must clone nested docs they store.
   private def own_payload : Nil
     owned = Array(Part).new(@sections.size)
     @sections.each do |section|
@@ -173,20 +175,28 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
     err_label_set = labels_from(cached_body["errorLabels"]?)
 
     if cached_body["ok"] == 1
-      topology_version = cached_body["topologyVersion"]?.try(&.as(BSON))
+      # Do not clone topologyVersion on ok:1 with no write errors (hello / ping).
       if errors = cached_body["writeErrors"]?
-        Mongo::Error::CommandWrite.new(errors.as(BSON), error_labels: err_label_set, topology_version: topology_version)
+        Mongo::Error::CommandWrite.new(
+          Mongo::Error.own_document(errors.as(BSON)),
+          error_labels: err_label_set,
+          topology_version: Mongo::Error.own_document?(cached_body["topologyVersion"]?)
+        )
       elsif write_error = cached_body["writeConcernError"]?
-        wc = write_error.as(BSON)
+        wc = Mongo::Error.own_document(write_error.as(BSON))
         labels_from(wc["errorLabels"]?).each { |label| err_label_set << label }
-        Mongo::Error::WriteConcern.new(wc, error_labels: err_label_set, topology_version: topology_version)
+        Mongo::Error::WriteConcern.new(
+          wc,
+          error_labels: err_label_set,
+          topology_version: Mongo::Error.own_document?(cached_body["topologyVersion"]?)
+        )
       end
     else
       err_msg = cached_body["errmsg"]?.try(&.as(String))
       err_code_name = cached_body["codeName"]?.try(&.as(String))
       err_code = cached_body["code"]?
-      details = cached_body["errInfo"]?.try(&.as(BSON))
-      topology_version = cached_body["topologyVersion"]?.try(&.as(BSON))
+      details = Mongo::Error.own_document?(cached_body["errInfo"]?)
+      topology_version = Mongo::Error.own_document?(cached_body["topologyVersion"]?)
       base_backoff_ms = cached_body["baseBackoffMS"]?.try { |v|
         v.as?(Int) ? v.as(Int).to_i64 : nil
       }
@@ -195,9 +205,10 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
   end
 
   # failCommand may put labels on the reply or inside writeConcernError.
+  # Clone first: the labels array is a nested view of the parent reply.
   private def labels_from(value) : Set(String)
     labels = Set(String).new
-    if bson = value.as?(BSON)
+    if bson = Mongo::Error.own_document?(value)
       bson.each do |_, item|
         labels << item if item.is_a?(String)
       end

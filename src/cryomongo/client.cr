@@ -864,9 +864,15 @@ class Mongo::Client
   ) : {Mongo::Connection, Bool}
     deadline.try(&.check!)
     timeout = if d = deadline
-                d.infinite? ? @options.socket_timeout : d.remaining
+                if d.infinite?
+                  Mongo::Connection.uri_timeout(@options.socket_timeout)
+                else
+                  left = d.remaining
+                  raise Mongo::Error::Timeout.new("Operation exceeded timeoutMS") if left <= Time::Span.zero
+                  left
+                end
               else
-                @options.socket_timeout
+                Mongo::Connection.uri_timeout(@options.socket_timeout)
               end
     if provided
       provided.apply_timeout(timeout)

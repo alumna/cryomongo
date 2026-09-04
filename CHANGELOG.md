@@ -61,6 +61,23 @@ Client-Side Field Level Encryption (CSFLE)
   `keyAltName` is resolved (`fle2v2-InsertFind-keyAltName`)
 - Vendored macOS libmongocrypt also writes `libmongocrypt.0.dylib`
   (dyld runtime ID; Crystal `-lmongocrypt` links `libmongocrypt.dylib`)
+- OP_MSG `error?` clones nested BSON stored on Command / CommandWrite /
+  WriteConcern (`BSON.new(bytes)`, not `BSON.new(bson)`)
+  - Nested `[]?` is a view; BufferPool reuse after checkin must not
+    SIGSEGV/SIGBUS (GitHub arm/macOS standalone, UTF `disable_fail_points`)
+  - Clone only when constructing an error, not on ok:1 hello / ping
+- Darwin CSOT: wait for timeoutMS in short socket slices so a kqueue
+  `IO::TimeoutError` does not win before the CSOT deadline
+  (getMore / bulkWrite / GridFS UTF). Do not lengthen official waits.
+- `connectTimeoutMS=0` passes nil into `TCPSocket` (Crystal `0` is
+  immediate on Darwin kqueue)
+- GitHub macOS `tls_spec` uses Homebrew OpenSSL 3 from pkg-config for
+  `openssl rsa -traditional` (macos-15 LibreSSL). Do not skip macos-26.
+- UTF drops Queryable Encryption ESC / ECOC only when the collection
+  has encryptedFields (not on every file)
+  - Blind `enxcol_.*` majority drops inflated old files on mongos /
+    load-balanced (PR 37 vs PR 35; D50)
+  - After CSFLE UTF, drop leftover `enxcol_.*` in databases that file used
 
 ### Changed
 - Default CSFLE link is official libmongocrypt **1.20.4** (`scripts/vendor-libmongocrypt.sh`).
@@ -78,11 +95,15 @@ Client-Side Field Level Encryption (CSFLE)
   `-e GLIBC_TUNABLES=glibc.pthread.rseq=1` so Ubuntu 26.04 Docker
   `mongo:8.0` can start (SERVER-121912). 22.04/24.04 inherit it. Use
   `rseq=1`, not `rseq=0`. Do not set this env on macOS jobs.
+  Ubuntu 26.04 / 26.04-arm install Crystal from the official 1.21.x
+  tarball (`scripts/ci-install-crystal.sh`) with libpcre2-dev (no
+  libpcre3-dev). 22.04/24.04 keep `crystal-lang/install-crystal@v1`.
 - GitHub macOS CI: four topologies on **macos-15** and **macos-26** (arm64)
   using native Community MongoDB **8.0.29** (not Docker). Pin labels; do
   not use `macos-latest`. Skip **macos-14** (deprecated) and intel
   `macos-*-large`. HAProxy via Homebrew for load-balanced.
   Vendor writes `libmongocrypt.0.dylib` next to `libmongocrypt.dylib`.
+  Put Homebrew OpenSSL 3 from pkg-config on PATH (`tls_spec` PEM).
   Windows GitHub is leftover: the driver does not compile (`LibC::SHUT_RDWR`,
   zstd.cr bash `pkg-libs.sh`, no `mongocrypt.lib` in the 1.20.4 tarball).
   `windows-11-arm` has no libmongocrypt 1.20.4 tarball.
@@ -101,6 +122,12 @@ Client-Side Field Level Encryption (CSFLE)
   Wave 28 is Linux OS/arch four-topology GitHub CI.
   Wave 29 is macOS arm64 four-topology GitHub CI (native mongod).
   Wave 31 vendors the macOS `libmongocrypt.0.dylib` compat name.
+  Wave 32 installs Crystal 1.21.x from the official tarball on
+  Ubuntu 26.04 / 26.04-arm (libpcre2-dev; no libpcre3-dev).
+  Wave 34 is Darwin CSOT slices, `connectTimeoutMS=0` as nil, and
+  Homebrew OpenSSL 3 for macOS `tls_spec` PEM.
+  Wave 35 tears down CSFLE UTF so old files stay near PR 35
+  (drop `enxcol_.*` only when encryptedFields is set).
   Windows GitHub is leftover (driver does not compile).
   Adapter CI four-topology matrix is Wave 20.
   Phase 3.14 (performance) is later and is not in those waves.

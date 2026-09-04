@@ -330,8 +330,12 @@ module Mongo::Unified
 
             # Drop leftover collections on the internal client. The test client
             # must keep an empty pool (CMAP) and an unused session pool (txnNumber).
+            # Pass encryptedFields when this file's initialData has them so QE
+            # ESC / ECOC go away. Ordinary files pass nil (no enxcol_ drops).
             @registry.collections.each_value do |coll|
-              drop_utf_collection(internal_client[coll.database.name], coll.name.to_s, nil)
+              db_name = coll.database.name
+              coll_name = coll.name.to_s
+              drop_utf_collection(internal_client[db_name], coll_name, utf_encrypted_fields_for(db_name, coll_name))
             end
 
             setup_initial_data(@test_file.initialData)
@@ -366,6 +370,8 @@ module Mongo::Unified
           ensure
             disable_fail_points
             kill_all_sessions
+            # CSFLE only: leftover enxcol_.* on mongos must not follow the next file.
+            drop_csfle_utf_leftovers
             @registry.close_all
             @registry = Registry.new
           end
@@ -1004,22 +1010,72 @@ module Mongo::Unified
       nil
     end
 
-    # Drop data collection plus Queryable Encryption ESC / ECOC leftovers.
+    # Drop the data collection. Drop Queryable Encryption ESC / ECOC only when
+    # this collection has encryptedFields. Blind enxcol_.* drops on every UTF
+    # file added majority round-trips on mongos / load-balanced (D50: PR 37
+    # old-file inflation; backpressure-retry-loop 18s → 58s on 24.04 x64 LB).
     private def drop_utf_collection(db : Mongo::Database, name : String, encrypted_fields : BSON?) : Nil
       majority = Mongo::WriteConcern.new(w: "majority")
       db.command(Mongo::Commands::Drop, name: name, write_concern: majority) rescue nil
+      if ef = encrypted_fields
+        drop_qe_state_collections(db, name, ef, majority)
+      end
+    end
+
+    private def drop_qe_state_collections(db : Mongo::Database, name : String, encrypted_fields : BSON, majority : Mongo::WriteConcern) : Nil
       esc = "enxcol_.#{name}.esc"
       ecoc = "enxcol_.#{name}.ecoc"
-      if ef = encrypted_fields
-        if s = string_bson_field(ef, "escCollection")
-          esc = s
-        end
-        if s = string_bson_field(ef, "ecocCollection")
-          ecoc = s
-        end
+      if s = string_bson_field(encrypted_fields, "escCollection")
+        esc = s
+      end
+      if s = string_bson_field(encrypted_fields, "ecocCollection")
+        ecoc = s
       end
       db.command(Mongo::Commands::Drop, name: esc, write_concern: majority) rescue nil
       db.command(Mongo::Commands::Drop, name: ecoc, write_concern: majority) rescue nil
+    end
+
+    private def utf_encrypted_fields_for(db_name : String, coll_name : String) : BSON?
+      @test_file.initialData.try &.each do |data|
+        if data.databaseName == db_name && data.collectionName == coll_name
+          return utf_create_encrypted_fields(data.createOptions)
+        end
+      end
+      nil
+    end
+
+    private def csfle_utf_file? : Bool
+      @file_path.includes?("/client-side-encryption/")
+    end
+
+    # After CSFLE UTF, leftover ESC / ECOC on mongos can slow later files.
+    # Ordinary UTF must not list or drop enxcol_.* (D50).
+    private def drop_csfle_utf_leftovers : Nil
+      return unless csfle_utf_file?
+      majority = Mongo::WriteConcern.new(w: "majority")
+      ic = internal_client
+      utf_touched_database_names.each do |db_name|
+        db = ic[db_name]
+        begin
+          db.list_collections(name_only: true).each do |info|
+            raw = info["name"]?
+            next unless raw
+            n = raw.as?(String)
+            next unless n
+            next unless n.starts_with?("enxcol_.")
+            db.command(Mongo::Commands::Drop, name: n, write_concern: majority) rescue nil
+          end
+        rescue
+        end
+      end
+    end
+
+    private def utf_touched_database_names : Set(String)
+      names = Set(String).new
+      @registry.collections.each_value { |c| names << c.database.name }
+      @registry.databases.each_value { |d| names << d.name }
+      @test_file.initialData.try &.each { |data| names << data.databaseName }
+      names
     end
 
     private def string_bson_field(doc : BSON, name : String) : String?

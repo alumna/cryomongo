@@ -41,9 +41,19 @@ class Mongo::Connection
   @awaiting_reply = false
   # Receive timed out with no frame bytes. The next send drains the late reply.
   @pending_reply = false
+  # Socket under AwaitReadIO while a CSOT / awaitable-hello deadline is active.
+  @deadline_inner : IO? = nil
 
   def self.next_id : Int64
     @@next_connection_id.add(1)
+  end
+
+  # URI connectTimeoutMS / socketTimeoutMS 0 means no timeout.
+  # Crystal Time::Span.zero is an immediate timeout on Darwin kqueue.
+  def self.uri_timeout(span : Time::Span?) : Time::Span?
+    return nil unless span
+    return nil if span <= Time::Span.zero
+    span
   end
 
   def initialize(@server_description : SDAM::ServerDescription, @credentials : Mongo::Credentials, @options : Mongo::Options, is_monitor : Bool = false, connection_id : Int64? = nil)
@@ -67,17 +77,16 @@ class Mongo::Connection
       clean_host = host.starts_with?('[') && host.ends_with?(']') ? host.byte_slice(1, host.bytesize - 2) : host
       tls_hostname = clean_host
 
-      tcp = TCPSocket.new(clean_host, port, dns_timeout: @options.connect_timeout, connect_timeout: @options.connect_timeout)
+      # connectTimeoutMS=0 must be nil. Darwin kqueue treats 0 as now.
+      connect_span = Mongo::Connection.uri_timeout(@options.connect_timeout)
+      tcp = TCPSocket.new(clean_host, port, dns_timeout: connect_span, connect_timeout: connect_span)
       tcp.tcp_nodelay = true
       raw = tcp
     end
     @raw_socket = raw
 
     timeout = is_monitor ? @options.connect_timeout : @options.socket_timeout
-
-    if timeout && timeout.total_milliseconds == 0
-      timeout = nil
-    end
+    timeout = Mongo::Connection.uri_timeout(timeout)
 
     raw.read_timeout = timeout
     raw.write_timeout = timeout
@@ -243,16 +252,32 @@ class Mongo::Connection
   # (streaming exhaust). receive() would wait for the next exhaust reply and
   # miss connectTimeoutMS + heartbeatFrequencyMS.
   private def receive_awaitable(started : Time::Instant)
-    overall = @raw_socket.read_timeout
-    deadline = overall ? started + overall : nil
-    inner = @socket
-    @socket = AwaitReadIO.new(inner, @raw_socket, deadline, self)
+    overall = Mongo::Connection.uri_timeout(@raw_socket.read_timeout)
+    expire_at = overall ? started + overall : nil
+    wrap_deadline_io(expire_at)
     begin
       receive_one
     ensure
-      @socket = inner
+      unwrap_deadline_io
       apply_timeout(overall)
     end
+  end
+
+  # Slice waits until *expire_at*. Nil means no deadline (connectTimeoutMS=0).
+  # Returns false when the socket is already wrapped (nested command).
+  def wrap_deadline_io(expire_at : Time::Instant?) : Bool
+    return false if @socket.is_a?(AwaitReadIO)
+    inner = @socket
+    @deadline_inner = inner
+    @socket = AwaitReadIO.new(inner, @raw_socket, expire_at, self)
+    true
+  end
+
+  def unwrap_deadline_io : Nil
+    inner = @deadline_inner
+    return unless inner
+    @socket = inner
+    @deadline_inner = nil
   end
 
   private def receive_one
@@ -540,66 +565,4 @@ class Mongo::Connection
   end
 end
 
-# :nodoc:
-# Wait for data in 100ms slices. IO::TimeoutError stays inside read(), so
-# Message.new does not unwind after a partial header or body.
-class Mongo::Connection::AwaitReadIO < IO
-  def initialize(@inner : IO, @raw : ::Socket, @deadline : Time::Instant?, @connection : Mongo::Connection)
-  end
-
-  def read(slice : Bytes) : Int32
-    slice_cap = 100.milliseconds
-    loop do
-      if @connection.interrupted? || @inner.closed?
-        raise IO::Error.new("Closed stream")
-      end
-      if deadline = @deadline
-        left = deadline - Time.instant
-        raise IO::TimeoutError.new("Read timed out") if left <= Time::Span.zero
-        wait = left < slice_cap ? left : slice_cap
-      else
-        wait = slice_cap
-      end
-      if @connection.interrupted?
-        wait = 1.millisecond
-      end
-      @raw.read_timeout = wait
-      @raw.write_timeout = wait
-      inner = @inner
-      unless inner.same?(@raw)
-        if inner.responds_to?(:read_timeout=)
-          inner.read_timeout = wait
-        end
-        if inner.responds_to?(:write_timeout=)
-          inner.write_timeout = wait
-        end
-      end
-      # interrupt() may have set 1ms, then this loop wrote 100ms back. Recheck
-      # so close does not start another full slice.
-      if @connection.interrupted? || @inner.closed?
-        raise IO::Error.new("Closed stream")
-      end
-      begin
-        return @inner.read(slice)
-      rescue IO::TimeoutError
-        next
-      end
-    end
-  end
-
-  def write(slice : Bytes) : Nil
-    @inner.write(slice)
-  end
-
-  def flush
-    @inner.flush
-  end
-
-  def close
-    @inner.close
-  end
-
-  def closed? : Bool
-    @inner.closed?
-  end
-end
+require "./io/await_read_io"

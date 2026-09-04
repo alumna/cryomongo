@@ -5,6 +5,19 @@ module Mongo
   class Error < Exception
     getter error_labels : Set(String) = Set(String).new
 
+    # Nested BSON from `[]?` / `each` is a view of the parent bytes.
+    # `BSON.new(BSON)` is a no-op. Clone via the Bytes path so the parent
+    # document and the receive BufferPool can die.
+    def self.own_document(bson : BSON) : BSON
+      BSON.new(bson.data)
+    end
+
+    def self.own_document?(value) : BSON?
+      if bson = value.as?(BSON)
+        BSON.new(bson.data)
+      end
+    end
+
     def add_error_label(label : String) : Nil
       @error_labels << label
     end
@@ -138,9 +151,13 @@ module Mongo
     # CursorNotFound (43) is always resumable for change streams.
     RESUMABLE_CODES = {43, 63, 150, 234, 13388, 133} + RETRYABLE_CODES
 
-    def initialize(code, @code_name, message, @details, *, @error_labels = Set(String).new, @topology_version : BSON? = nil, @base_backoff_ms : Int64? = nil, @reply : BSON? = nil)
+    def initialize(code, @code_name, message, details : BSON? = nil, *, @error_labels = Set(String).new, topology_version : BSON? = nil, @base_backoff_ms : Int64? = nil, reply : BSON? = nil)
       @code = code.try &.as(Int32) || 0
       @message = message.try(&.as(String)) || ""
+      # Nested []? is a view. Clone bytes so the parent / pool can die.
+      @details = Error.own_document?(details)
+      @topology_version = Error.own_document?(topology_version)
+      @reply = Error.own_document?(reply)
     end
 
     def message : String
@@ -198,13 +215,16 @@ module Mongo
     getter errors = [] of Error::Command
 
     def initialize(errors : BSON, *, @error_labels = Set(String).new, topology_version : BSON? = nil)
-      errors.each { |_, error|
+      # Walk an owned copy: each write error is still a nested view of *errors*.
+      owned = Error.own_document(errors)
+      owned_tv = Error.own_document?(topology_version)
+      owned.each { |_, error|
         error = error.as(BSON)
         err_code = error["code"]?
         err_code_name = error["codeName"]?.try &.as(String)
         err_msg = error["errmsg"]?.try &.as(String)
-        details = error["errInfo"]?.try &.as(BSON)
-        @errors << Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: @error_labels, topology_version: topology_version)
+        details = Error.own_document?(error["errInfo"]?)
+        @errors << Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: @error_labels, topology_version: owned_tv)
       }
     end
 
@@ -226,11 +246,13 @@ module Mongo
     getter details : BSON?
 
     def initialize(error : BSON, *, @error_labels = Set(String).new, topology_version : BSON? = nil)
-      @code = error["code"]?.try(&.as(Int).to_i32) || 0
-      @code_name = error["codeName"]?.try(&.as(String))
-      @message = error["errmsg"]?.try(&.as(String)) || ""
-      @details = error["errInfo"]?.try &.as(BSON)
-      @topology_version = topology_version || error["topologyVersion"]?.try(&.as(BSON))
+      # Walk an owned copy so nested errInfo / topologyVersion can be cloned.
+      owned = Error.own_document(error)
+      @code = owned["code"]?.try(&.as(Int).to_i32) || 0
+      @code_name = owned["codeName"]?.try(&.as(String))
+      @message = owned["errmsg"]?.try(&.as(String)) || ""
+      @details = Error.own_document?(owned["errInfo"]?)
+      @topology_version = Error.own_document?(topology_version) || Error.own_document?(owned["topologyVersion"]?)
     end
 
     def failed_or_timeout?
