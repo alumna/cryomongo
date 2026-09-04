@@ -234,7 +234,8 @@ class Mongo::Client
       end
       # Do not set leftover timeoutMS as one socket wait. Darwin kqueue can
       # fire that wait early (bulkWrite UTF then sees two inserts, not three).
-      # Slices retry a premature IO::TimeoutError until the CSOT deadline.
+      # Slices retry a premature IO::TimeoutError or ETIMEDOUT until the
+      # CSOT deadline.
       connection.apply_timeout(nil)
       wrapped_csot_io = connection.wrap_deadline_io(Time.instant + left)
     else
@@ -560,7 +561,10 @@ class Mongo::Client
       end
       session.try &.dirty = true
       if (d = deadline) && !d.infinite? && !error.is_a?(Error::PoolCleared)
-        if d.expired? || io_timeout?(error)
+        # A leaked Darwin slice is io_timeout? while the CSOT deadline still
+        # has time. Raise Timeout only when the deadline has passed. Linux
+        # CSOT already waits until expiry, so d.expired? is true there.
+        if d.expired?
           error = Error::Timeout.new("socket timeout: #{error.message}", cause: error)
         end
       end

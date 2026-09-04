@@ -93,7 +93,7 @@ jobs:
           shards install
 
       - name: Cache libmongocrypt 1.20.4
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: vendor/libmongocrypt
           key: libmongocrypt-1.20.4-${{ matrix.os }}-${{ runner.arch }}-nocrypto
@@ -102,7 +102,7 @@ jobs:
         run: scripts/vendor-libmongocrypt.sh
 
       - name: Cache crypt_shared
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: tmp/mongo_crypt_v1.so
           key: crypt-shared-8.0.29-${{ matrix.os }}-${{ runner.arch }}
@@ -150,7 +150,7 @@ jobs:
 
       - name: Upload UTF timing log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: utf-timing-${{ matrix.os }}-${{ matrix.topology }}
           path: tmp/utf-timing.log
@@ -179,20 +179,21 @@ jobs:
         with:
           crystal: latest
 
-      - name: Install zstd (wire compression)
+      - name: Install zstd and openssl@3
         run: |
           set -euo pipefail
           export HOMEBREW_NO_AUTO_UPDATE=1
-          brew install zstd pkgconf
-          echo "PKG_CONFIG_PATH=$(brew --prefix zstd)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
-          # Crystal links Homebrew openssl@3 (pkg-config). Apple /usr/bin/openssl
-          # is LibreSSL. tls_spec `openssl rsa -traditional` needs OpenSSL 3.
-          # macos-15 failed that example; macos-26 did not. Do not skip it.
-          if OPENSSL_PREFIX="$(pkg-config --variable=prefix openssl 2>/dev/null)" && [[ -x "${OPENSSL_PREFIX}/bin/openssl" ]]; then
-            echo "${OPENSSL_PREFIX}/bin" >> "$GITHUB_PATH"
-          elif OPENSSL_PREFIX="$(brew --prefix openssl@3 2>/dev/null)" && [[ -x "${OPENSSL_PREFIX}/bin/openssl" ]]; then
-            echo "${OPENSSL_PREFIX}/bin" >> "$GITHUB_PATH"
+          brew install zstd pkgconf openssl@3
+          OPENSSL_PREFIX="$(brew --prefix openssl@3)"
+          if [[ ! -x "${OPENSSL_PREFIX}/bin/openssl" ]]; then
+            echo "Homebrew openssl@3 missing at ${OPENSSL_PREFIX}/bin/openssl" >&2
+            exit 1
           fi
+          # Crystal links Homebrew openssl. tls_spec `openssl rsa -traditional`
+          # needs OpenSSL 3. macos-15 pkg-config openssl is 1.1; macos-26 is 3.
+          # Prefer openssl@3 so macos-15 never picks 1.1. Do not skip macos-15.
+          echo "${OPENSSL_PREFIX}/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=${OPENSSL_PREFIX}/lib/pkgconfig:$(brew --prefix zstd)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Install HAProxy (load-balanced)
         if: matrix.topology == 'load-balanced'
@@ -203,7 +204,7 @@ jobs:
           haproxy -v
 
       - name: Cache MongoDB Community 8.0.29
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: tmp/mongodb
           key: mongodb-community-8.0.29-mongosh-2.10.0-${{ matrix.os }}-${{ runner.arch }}
@@ -227,7 +228,7 @@ jobs:
         run: shards install
 
       - name: Cache libmongocrypt 1.20.4
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: vendor/libmongocrypt
           key: libmongocrypt-1.20.4-${{ matrix.os }}-${{ runner.arch }}-universal
@@ -236,7 +237,7 @@ jobs:
         run: scripts/vendor-libmongocrypt.sh
 
       - name: Cache crypt_shared
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: tmp/mongo_crypt_v1.dylib
           key: crypt-shared-8.0.29-${{ matrix.os }}-${{ runner.arch }}
@@ -284,7 +285,7 @@ jobs:
 
       - name: Upload UTF timing log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: utf-timing-${{ matrix.os }}-${{ matrix.topology }}
           path: tmp/utf-timing.log

@@ -69,10 +69,17 @@ Client-Side Field Level Encryption (CSFLE)
 - Darwin CSOT: wait for timeoutMS in short socket slices so a kqueue
   `IO::TimeoutError` does not win before the CSOT deadline
   (getMore / bulkWrite / GridFS UTF). Do not lengthen official waits.
+- Darwin CSOT slices also retry `Socket::Error` / `ETIMEDOUT`
+  (not only `IO::TimeoutError`). Raise `Error::Timeout` only when
+  the CSOT deadline has passed. Hello / handshake uses the same
+  slices until connectTimeoutMS so a 1ms `socketTimeoutMS` cannot
+  beat timeoutMS. Do not retry ECONNRESET.
 - `connectTimeoutMS=0` passes nil into `TCPSocket` (Crystal `0` is
   immediate on Darwin kqueue)
-- GitHub macOS `tls_spec` uses Homebrew OpenSSL 3 from pkg-config for
-  `openssl rsa -traditional` (macos-15 LibreSSL). Do not skip macos-26.
+- GitHub macOS `tls_spec` uses Homebrew openssl@3 (PATH and pkg-config)
+  for `openssl rsa -traditional`. macos-15 `pkg-config openssl` is 1.1;
+  prefer openssl@3 over a generic openssl package. Reject 1.1 / LibreSSL
+  for that conversion. Do not skip macos-15 or macos-26.
 - UTF drops Queryable Encryption ESC / ECOC only when the collection
   has encryptedFields (not on every file)
   - Blind `enxcol_.*` majority drops inflated old files on mongos /
@@ -103,7 +110,8 @@ Client-Side Field Level Encryption (CSFLE)
   not use `macos-latest`. Skip **macos-14** (deprecated) and intel
   `macos-*-large`. HAProxy via Homebrew for load-balanced.
   Vendor writes `libmongocrypt.0.dylib` next to `libmongocrypt.dylib`.
-  Put Homebrew OpenSSL 3 from pkg-config on PATH (`tls_spec` PEM).
+  Put Homebrew openssl@3 first on PATH and PKG_CONFIG_PATH
+  (`tls_spec` PEM). macos-15 `pkg-config openssl` is 1.1.
   Windows GitHub is leftover: the driver does not compile (`LibC::SHUT_RDWR`,
   zstd.cr bash `pkg-libs.sh`, no `mongocrypt.lib` in the 1.20.4 tarball).
   `windows-11-arm` has no libmongocrypt 1.20.4 tarball.
@@ -128,6 +136,8 @@ Client-Side Field Level Encryption (CSFLE)
   Homebrew OpenSSL 3 for macOS `tls_spec` PEM.
   Wave 35 tears down CSFLE UTF so old files stay near PR 35
   (drop `enxcol_.*` only when encryptedFields is set).
+  Wave 36 prefers Homebrew openssl@3 on macos-15 `tls_spec`
+  (`rsa -traditional`; pkg-config openssl there is 1.1).
   Windows GitHub is leftover (driver does not compile).
   Adapter CI four-topology matrix is Wave 20.
   Phase 3.14 (performance) is later and is not in those waves.

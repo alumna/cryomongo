@@ -1,11 +1,13 @@
 # :nodoc:
-# Wait for data in 100ms slices. IO::TimeoutError stays inside read(), so
+# Wait for data in 100ms slices. A slice timeout stays inside read(), so
 # Message.new does not unwind after a partial header or body.
 #
 # Darwin kqueue can fire a single long socket timeout early (CSOT bulkWrite
 # then sees two inserts instead of three). A slice timeout is retried until
-# *deadline*. When the deadline has passed, raise IO::TimeoutError so CSOT
-# maps it to Error::Timeout. Do not lengthen official timeoutMS waits.
+# *deadline*. Darwin often raises Socket::Error / ETIMEDOUT instead of
+# IO::TimeoutError. Retry that errno here too. Do not retry ECONNRESET.
+# When the deadline has passed, raise IO::TimeoutError so CSOT maps it to
+# Error::Timeout. Do not lengthen official timeoutMS waits.
 class Mongo::Connection::AwaitReadIO < IO
   SLICE = 100.milliseconds
 
@@ -45,11 +47,17 @@ class Mongo::Connection::AwaitReadIO < IO
       end
       begin
         return @inner.read(slice)
-      rescue IO::TimeoutError
-        # Darwin may fire this slice early. Yield so a tight 0ms timer does
-        # not spin the worker until the CSOT deadline.
-        Fiber.yield
-        next
+      rescue error : IO::Error
+        # IO::TimeoutError is an IO::Error. Darwin kqueue may instead raise
+        # IO::Error / Socket::Error with os_error ETIMEDOUT. os_error is nil
+        # on a plain TimeoutError; do not use .not_nil!.
+        if error.is_a?(IO::TimeoutError) || error.os_error == Errno::ETIMEDOUT
+          # Darwin may fire this slice early. Yield so a tight 0ms timer does
+          # not spin the worker until the CSOT deadline.
+          Fiber.yield
+          next
+        end
+        raise error
       end
     end
   end

@@ -117,14 +117,20 @@ class Mongo::Connection
   end
 
   def handshake(*, send_metadata = false, appname = nil, legacy = false, client_metadata : BSON? = nil, load_balanced : Bool = false)
-    run_hello(
-      send_metadata: send_metadata,
-      appname: appname,
-      legacy: legacy,
-      client_metadata: client_metadata,
-      load_balanced: load_balanced,
-      first: true
-    )
+    # Darwin kqueue fires a 1ms socketTimeoutMS wait at once. Hello then
+    # fails before CSOT timeoutMS can ignore socketTimeoutMS (UTF
+    # "socketTimeoutMS is ignored if timeoutMS is set"). Slice until
+    # connectTimeoutMS so hello can finish. Restore socketTimeoutMS after.
+    wrap_connect_deadline do
+      run_hello(
+        send_metadata: send_metadata,
+        appname: appname,
+        legacy: legacy,
+        client_metadata: client_metadata,
+        load_balanced: load_balanced,
+        first: true
+      )
+    end
   end
 
   # Later monitor / RTT hello. No client metadata. Optional awaitable fields for streaming.
@@ -280,6 +286,21 @@ class Mongo::Connection
     @deadline_inner = nil
   end
 
+  # Handshake / hello: slice until connectTimeoutMS. Nested wrap is a no-op
+  # (already AwaitReadIO). Restore the usual socket timeout after.
+  private def wrap_connect_deadline
+    connect_span = Mongo::Connection.uri_timeout(@options.connect_timeout)
+    expire_at = connect_span ? Time.instant + connect_span : nil
+    wrapped = wrap_deadline_io(expire_at)
+    begin
+      yield
+    ensure
+      unwrap_deadline_io if wrapped
+      restore = @monitor ? connect_span : Mongo::Connection.uri_timeout(@options.socket_timeout)
+      apply_timeout(restore)
+    end
+  end
+
   private def receive_one
     message = Mongo::Messages::Message.new(socket)
     op_msg = message.contents.as(Messages::OpMsg)
@@ -342,43 +363,47 @@ class Mongo::Connection
 
   def authenticate
     # see: https://github.com/mongodb/specifications/blob/master/source/auth/auth.rst#authentication-handshake
+    # Darwin 1ms socketTimeoutMS can also fire during SASL after hello.
+    # Slice until connectTimeoutMS, same as handshake.
     return if server_description.type.rs_arbiter?
     return if @credentials.username.nil? && @credentials.password.nil? && @credentials.mechanism.nil?
 
-    if reply = @speculative_reply
-      if scram = @speculative_scram
-        scram.continue_from_hello(self, reply)
-        clear_speculative_auth
-        return
-      elsif @speculative_x509
-        clear_speculative_auth
-        return
+    wrap_connect_deadline do
+      if reply = @speculative_reply
+        if scram = @speculative_scram
+          scram.continue_from_hello(self, reply)
+          clear_speculative_auth
+          next
+        elsif @speculative_x509
+          clear_speculative_auth
+          next
+        end
       end
-    end
-    clear_speculative_auth
+      clear_speculative_auth
 
-    mechanism = if m = @credentials.mechanism
-                  Auth.parse_mechanism(m)
-                elsif mechs = @sasl_supported_mechs
-                  if mechs.any? { |name| name.upcase.gsub(/[-_]/, "") == "SCRAMSHA256" }
-                    Auth::Mechanism::ScramSha256
+      mechanism = if m = @credentials.mechanism
+                    Auth.parse_mechanism(m)
+                  elsif mechs = @sasl_supported_mechs
+                    if mechs.any? { |name| name.upcase.gsub(/[-_]/, "") == "SCRAMSHA256" }
+                      Auth::Mechanism::ScramSha256
+                    else
+                      Auth::Mechanism::ScramSha1
+                    end
                   else
                     Auth::Mechanism::ScramSha1
                   end
-                else
-                  Auth::Mechanism::ScramSha1
-                end
 
-    case mechanism
-    when .scram_sha1?, .scram_sha256?
-      scram = Mongo::Auth::Scram.new(mechanism, @credentials)
-      scram.authenticate(self)
-    when .mongodb_x509?
-      Mongo::Auth::X509.authenticate(self, @credentials)
-    when .plain?
-      Mongo::Auth::Plain.authenticate(self, @credentials)
-    else
-      raise Mongo::Error.new "Authentication mechanism not supported: #{mechanism}"
+      case mechanism
+      when .scram_sha1?, .scram_sha256?
+        scram = Mongo::Auth::Scram.new(mechanism, @credentials)
+        scram.authenticate(self)
+      when .mongodb_x509?
+        Mongo::Auth::X509.authenticate(self, @credentials)
+      when .plain?
+        Mongo::Auth::Plain.authenticate(self, @credentials)
+      else
+        raise Mongo::Error.new "Authentication mechanism not supported: #{mechanism}"
+      end
     end
   end
 
