@@ -13,8 +13,8 @@ This phase focuses on ensuring the driver is safe, doesn't leak resources, and p
 ### Testing Infrastructure
 - [x] **Strict UTF Dispatcher:** Unknown operations raise `SKIP_TEST` (no silent pass).
 - [x] **Topology CI Matrix:** GitHub Actions runs standalone, replica set, sharded, and load-balanced. Push a PR to run that matrix.
-- [x] **Linux OS/arch CI:** Ubuntu 22.04, 24.04, and 26.04 (preview) on x64 and arm64, four topologies each (Wave 28). Pin labels; no `ubuntu-latest`. Skip `ubuntu-slim`.
-- [x] **macOS CI:** macos-15 and macos-26 (arm64), four topologies each, native Community MongoDB 8.0 (Wave 29). Pin labels; no `macos-latest`. Skip macos-14 and intel `macos-*-large`. Windows GitHub is leftover (driver does not compile).
+- [x] **Linux OS/arch CI:** Ubuntu 22.04, 24.04, and 26.04 (preview) on x64 and arm64, four topologies each (Wave 28). Pin labels; no `ubuntu-latest`. Skip `ubuntu-slim`. PR 37: 22.04 and 24.04 are green (16 cells). Ubuntu 26.04 Docker start is Wave 30 (SERVER-121912).
+- [x] **macOS CI jobs:** macos-15 and macos-26 (arm64), four topologies each, native Community MongoDB 8.0 (Wave 29). Pin labels; no `macos-latest`. Skip macos-14 and intel `macos-*-large`. Windows GitHub is leftover (driver does not compile). PR 37: native mongod starts; specs need `libmongocrypt.0.dylib` (Wave 31).
 - [x] **Dynamic Test Skipping:** `runOnRequirements` uses live topology or `TOPOLOGY`. Files that still skip because a feature is missing are listed under Remaining work (not AWS / OIDC / MongoDB 8.1+).
 
 ### Core Specifications (JSON & Legacy)
@@ -348,6 +348,8 @@ In scope for production-grade completeness. Not AWS / OIDC / MongoDB 8.1+.
   - [x] remaining official local / 8.0 tests (leftover listed: cloud KMS, 8.2+ text)
   - [x] vendor official libmongocrypt **1.20.4** (optional system lib >= 1.20.0)
   - [x] Linux GitHub CI: Ubuntu 22.04 / 24.04 / 26.04 (preview) × x64 / arm64 × four topologies (Wave 28)
+  - [ ] GitHub Ubuntu 26.04: `GLIBC_TUNABLES` on Docker `mongo:8.0` (Wave 30, SERVER-121912)
+  - [ ] GitHub macOS: vendor `libmongocrypt.0.dylib` (Wave 31)
 
 ## Phase 5: Cloud and External Authentication
 

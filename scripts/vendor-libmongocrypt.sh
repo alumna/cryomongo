@@ -35,6 +35,7 @@ file_sha256() {
 have_lib() {
   [[ -e "${VENDOR}/lib/libmongocrypt.so" ||
     -e "${VENDOR}/lib/libmongocrypt.dylib" ||
+    -e "${VENDOR}/lib/libmongocrypt.0.dylib" ||
     -e "${VENDOR}/lib/mongocrypt.dll" ]]
 }
 
@@ -112,18 +113,28 @@ tar zxf "$tarball" -C "$tmp_dir"
 
 so="$(find "$tmp_dir" -name 'libmongocrypt.so' | head -n 1)"
 dylib="$(find "$tmp_dir" -name 'libmongocrypt.dylib' | head -n 1)"
+# dyld loads this compat name (@rpath/libmongocrypt.0.dylib). 1.20.4 macos
+# ships only libmongocrypt.dylib; we then symlink.
+dylib0="$(find "$tmp_dir" -name 'libmongocrypt.0.dylib' | head -n 1)"
 dll="$(find "$tmp_dir" -name 'mongocrypt.dll' | head -n 1)"
 
 rm -f "${VENDOR}/lib/libmongocrypt.so" "${VENDOR}/lib/libmongocrypt.so.0" \
-  "${VENDOR}/lib/libmongocrypt.dylib" "${VENDOR}/lib/mongocrypt.dll" \
-  "${VENDOR}/lib/libmongocrypt.dll"
+  "${VENDOR}/lib/libmongocrypt.dylib" "${VENDOR}/lib/libmongocrypt.0.dylib" \
+  "${VENDOR}/lib/mongocrypt.dll" "${VENDOR}/lib/libmongocrypt.dll"
 
 if [[ -n "$so" ]]; then
   # SONAME is libmongocrypt.so.0; the tarball ships only libmongocrypt.so.
   cp -a "$so" "${VENDOR}/lib/libmongocrypt.so"
   ln -sfn libmongocrypt.so "${VENDOR}/lib/libmongocrypt.so.0"
 elif [[ -n "$dylib" ]]; then
+  # Runtime ID is libmongocrypt.0.dylib; Crystal -lmongocrypt links this file.
   cp -a "$dylib" "${VENDOR}/lib/libmongocrypt.dylib"
+  if [[ -n "$dylib0" ]]; then
+    # Tarball already has the compat name. Keep a file at that name.
+    cp -a "$dylib0" "${VENDOR}/lib/libmongocrypt.0.dylib"
+  else
+    ln -sfn libmongocrypt.dylib "${VENDOR}/lib/libmongocrypt.0.dylib"
+  fi
 elif [[ -n "$dll" ]]; then
   cp -a "$dll" "${VENDOR}/lib/mongocrypt.dll"
   # MinGW -lmongocrypt looks for libmongocrypt.dll.

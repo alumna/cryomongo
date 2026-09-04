@@ -9,8 +9,12 @@ on:
 # Labels from actions/runner-images Available Images (2026-09-04).
 # fail-fast is false. Do not use ubuntu-latest or macos-latest.
 #
-# Linux cells (Wave 28). Skip ubuntu-slim. No GLIBC_TUNABLES.
+# Linux cells (Wave 28). Skip ubuntu-slim.
 # 6 images × 4 topologies = 24 jobs. Docker MongoDB 8.0 (docker-topology.sh).
+# GitHub Ubuntu 26.04 needs GLIBC_TUNABLES=glibc.pthread.rseq=1 on the
+# container (SERVER-121912, kernel 6.19+ / Azure 7.0.0). The topology
+# script always sets that env, so 22.04 and 24.04 inherit it. Do not set
+# this env on macOS jobs (native mongod, ci-native-topology.sh).
 #
 #   ubuntu-22.04       ubuntu-24.04       ubuntu-26.04         (x64)
 #   ubuntu-22.04-arm   ubuntu-24.04-arm   ubuntu-26.04-arm     (arm64)

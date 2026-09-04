@@ -59,6 +59,8 @@ Client-Side Field Level Encryption (CSFLE)
 - UTF simple `createCollection` / `dropCollection` use `Database#create_collection`
   and `Collection#drop` so Queryable Encryption creates ESC / ECOC and
   `keyAltName` is resolved (`fle2v2-InsertFind-keyAltName`)
+- Vendored macOS libmongocrypt also writes `libmongocrypt.0.dylib`
+  (dyld runtime ID; Crystal `-lmongocrypt` links `libmongocrypt.dylib`)
 
 ### Changed
 - Default CSFLE link is official libmongocrypt **1.20.4** (`scripts/vendor-libmongocrypt.sh`).
@@ -72,11 +74,15 @@ Client-Side Field Level Encryption (CSFLE)
   (`ubuntu-22.04`, `ubuntu-24.04`, `ubuntu-26.04`, `ubuntu-22.04-arm`,
   `ubuntu-24.04-arm`, `ubuntu-26.04-arm`). Do not use `ubuntu-latest`.
   Skip `ubuntu-slim`. Cache keys include OS and arch. `fail-fast: false`.
-  No `GLIBC_TUNABLES` on GitHub.
+  `scripts/docker-topology.sh` always passes
+  `-e GLIBC_TUNABLES=glibc.pthread.rseq=1` so Ubuntu 26.04 Docker
+  `mongo:8.0` can start (SERVER-121912). 22.04/24.04 inherit it. Use
+  `rseq=1`, not `rseq=0`. Do not set this env on macOS jobs.
 - GitHub macOS CI: four topologies on **macos-15** and **macos-26** (arm64)
   using native Community MongoDB **8.0.29** (not Docker). Pin labels; do
   not use `macos-latest`. Skip **macos-14** (deprecated) and intel
   `macos-*-large`. HAProxy via Homebrew for load-balanced.
+  Vendor writes `libmongocrypt.0.dylib` next to `libmongocrypt.dylib`.
   Windows GitHub is leftover: the driver does not compile (`LibC::SHUT_RDWR`,
   zstd.cr bash `pkg-libs.sh`, no `mongocrypt.lib` in the 1.20.4 tarball).
   `windows-11-arm` has no libmongocrypt 1.20.4 tarball.
@@ -94,6 +100,7 @@ Client-Side Field Level Encryption (CSFLE)
   Wave 27 vendors official libmongocrypt 1.20.4 (GitHub apt was too old).
   Wave 28 is Linux OS/arch four-topology GitHub CI.
   Wave 29 is macOS arm64 four-topology GitHub CI (native mongod).
+  Wave 31 vendors the macOS `libmongocrypt.0.dylib` compat name.
   Windows GitHub is leftover (driver does not compile).
   Adapter CI four-topology matrix is Wave 20.
   Phase 3.14 (performance) is later and is not in those waves.

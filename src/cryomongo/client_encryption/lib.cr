@@ -29,6 +29,7 @@
         # cannot win at runtime.
         @[Link(ldflags: "-Wl,--disable-new-dtags")]
       {% end %}
+      # Darwin runtime ID is libmongocrypt.0.dylib (vendor script places it).
       @[Link(ldflags: {{ "-Wl,-rpath,#{libdir}" }})]
     {% end %}
   {% end %}
