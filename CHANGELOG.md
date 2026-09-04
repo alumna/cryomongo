@@ -6,7 +6,7 @@ Client-Side Field Level Encryption (CSFLE)
 
 ### Added
 - Explicit client-side encryption (`Mongo::ClientEncryption`), local KMS only
-  - System `libmongocrypt` bindings (`pkg-config`; link `-lmongocrypt` only)
+  - libmongocrypt bindings (official **1.20.4** vendored by default)
   - `create_data_key`, `encrypt`, `decrypt`
   - Key vault: `get_key`, `get_keys`, `delete_key`,
     `add_key_alt_name`, `remove_key_alt_name`, `get_key_by_alt_name`
@@ -14,7 +14,8 @@ Client-Side Field Level Encryption (CSFLE)
   - Encrypted values are BSON binary subtype `0x06`
   - Compile `-Dwithout_libmongocrypt` skips the link; the type then raises
   - Specs skip the live encrypt path when the library is missing
-  - GitHub CI installs `libmongocrypt-dev` so that spec runs
+  - GitHub CI runs `scripts/vendor-libmongocrypt.sh` (does not install `libmongocrypt-dev`)
+  - Linux official tarball is nocrypto; OpenSSL AES / HMAC / SHA / RAND hooks fill that gap
 - Auto-encryption on `Mongo::Client` (`Mongo::AutoEncryption`, FLE1 `schemaMap`)
   - Local KMS only; crypt_shared (`mongo_crypt_v1.so`) for query analysis
   - `extraOptions.cryptSharedLibPath` or `CRYPT_SHARED_LIB_PATH`
@@ -55,14 +56,45 @@ Client-Side Field Level Encryption (CSFLE)
   - GitHub four-topology CI crashed (double free / SIGSEGV)
 - `Insert.with_ids` keeps BSON binary subtype when it generates `_id`
   - `[]=` of `Bytes` wrote generic `0x00` and dropped FLE `0x06`
+- UTF simple `createCollection` / `dropCollection` use `Database#create_collection`
+  and `Collection#drop` so Queryable Encryption creates ESC / ECOC and
+  `keyAltName` is resolved (`fle2v2-InsertFind-keyAltName`)
 
 ### Changed
-- **docs:** Phase 4 (CSFLE) is Waves 21–25.
+- Default CSFLE link is official libmongocrypt **1.20.4** (`scripts/vendor-libmongocrypt.sh`).
+  `USE_SYSTEM_LIBMONGOCRYPT=true` uses pkg-config (needs >= 1.20.0).
+  GitHub Ubuntu 24.04 `libmongocrypt-dev` does not export
+  `mongocrypt_setopt_key_expiration`,
+  `mongocrypt_setopt_use_need_mongo_collinfo_with_db_state`, or
+  `mongocrypt_ctx_mongo_db` (PR 37). Default vendor so apt cannot win.
+- GitHub Linux CI: four topologies on Ubuntu **22.04**, **24.04**, and
+  **26.04** (preview) for both x64 and arm64 (24 cells). Pin image labels
+  (`ubuntu-22.04`, `ubuntu-24.04`, `ubuntu-26.04`, `ubuntu-22.04-arm`,
+  `ubuntu-24.04-arm`, `ubuntu-26.04-arm`). Do not use `ubuntu-latest`.
+  Skip `ubuntu-slim`. Cache keys include OS and arch. `fail-fast: false`.
+  No `GLIBC_TUNABLES` on GitHub.
+- GitHub macOS CI: four topologies on **macos-15** and **macos-26** (arm64)
+  using native Community MongoDB **8.0.29** (not Docker). Pin labels; do
+  not use `macos-latest`. Skip **macos-14** (deprecated) and intel
+  `macos-*-large`. HAProxy via Homebrew for load-balanced.
+  Windows GitHub is leftover: the driver does not compile (`LibC::SHUT_RDWR`,
+  zstd.cr bash `pkg-libs.sh`, no `mongocrypt.lib` in the 1.20.4 tarball).
+  `windows-11-arm` has no libmongocrypt 1.20.4 tarball.
+- `scripts/download-crypt-shared.sh` picks linux **x86_64** or **aarch64**
+  and ubuntu2204 (22.04) or ubuntu2404 (24.04 and 26.04), plus official
+  macos **arm64** / **x86_64** `.dylib` and windows x86_64 `.zip`. Official
+  8.0.29 aarch64 and macos-arm64 packages exist. There is no ubuntu2604
+  crypt_shared tarball. Windows CI jobs are not added.
+- **docs:** Phase 4 (CSFLE) is Waves 21–25 plus Wave 27 (vendor 1.20.4).
   Wave 21 is bindings plus explicit local KMS.
   Wave 22 is auto-encryption (`schemaMap`).
   Wave 23 is Queryable Encryption (`encryptedFieldsMap`, 8.0 equality).
   Official CSFLE tests are Waves 24–25 (local KMS + 8.0 done;
   leftover is cloud KMS and 8.2+ text).
+  Wave 27 vendors official libmongocrypt 1.20.4 (GitHub apt was too old).
+  Wave 28 is Linux OS/arch four-topology GitHub CI.
+  Wave 29 is macOS arm64 four-topology GitHub CI (native mongod).
+  Windows GitHub is leftover (driver does not compile).
   Adapter CI four-topology matrix is Wave 20.
   Phase 3.14 (performance) is later and is not in those waves.
 

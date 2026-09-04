@@ -65,8 +65,8 @@ module Mongo::Unified::Csfle
     if p = Mongo::AutoEncryption.crypt_shared_lib_path
       return p if File.file?(p)
     end
-    {"tmp/mongo_crypt_v1.so", "/usr/local/lib/mongo_crypt_v1.so"}.each do |p|
-      return File.expand_path(p) if File.file?(p)
+    if (p = spec_crypt_shared_path)
+      return p
     end
     nil
   end

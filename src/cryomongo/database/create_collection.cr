@@ -48,6 +48,31 @@ class Mongo::Database
     self[name].create_index({__safeContent__: 1}, session: session, timeout_ms: timeout_ms)
   end
 
+  # Drop ESC and ECOC for a Queryable Encryption collection. Ignores missing
+  # namespaces (code 26). The data collection is dropped by the caller.
+  # :nodoc:
+  def drop_queryable_encryption_state(
+    name : String,
+    encrypted_fields : BSON,
+    session : Session::ClientSession? = nil,
+    timeout_ms : Int64? = nil,
+    deadline : Mongo::Deadline? = nil,
+  ) : Nil
+    drop_ignore_missing(qe_state_collection(encrypted_fields, "escCollection", name, "esc"), session, timeout_ms, deadline)
+    drop_ignore_missing(qe_state_collection(encrypted_fields, "ecocCollection", name, "ecoc"), session, timeout_ms, deadline)
+  end
+
+  private def drop_ignore_missing(
+    name : String,
+    session : Session::ClientSession?,
+    timeout_ms : Int64?,
+    deadline : Mongo::Deadline?,
+  ) : Nil
+    self.command(Commands::Drop, name: name, session: session, timeout_ms: timeout_ms, deadline: deadline)
+  rescue e : Mongo::Error::Command
+    raise e unless e.code == 26
+  end
+
   private def qe_state_collection(encrypted_fields : BSON, field : String, name : String, suffix : String) : String
     encrypted_fields.each do |key, value, _code|
       next unless key == field

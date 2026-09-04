@@ -1,0 +1,4 @@
+cee0e82d1005f59cf953a34f905310350f5dc8484c1bf4eeb53198347c798931  libmongocrypt-linux-x86_64-glibc_2_7-nocrypto-1.20.4.tar.gz
+0ed63bb3400a427343e8bac18b76ac95920d47ef13e577ca63aa28c582d6043e  libmongocrypt-linux-arm64-glibc_2_17-nocrypto-1.20.4.tar.gz
+57d022ade2fef9b673d7bc07e6e47343e402b97de226e0651250618d9ac24001  libmongocrypt-macos-universal-1.20.4.tar.gz
+8f3bb7743dce619e33c3af1977ae81c2dc1c27786db4efc3fb59e5d8ef3ddfa5  libmongocrypt-windows-x86_64-1.20.4.tar.gz

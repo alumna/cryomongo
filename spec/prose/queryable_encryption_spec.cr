@@ -10,11 +10,7 @@ private def local_kms_providers(master_key : Bytes) : BSON
 end
 
 private def crypt_shared_lib_path : String?
-  if p = ENV["CRYPT_SHARED_LIB_PATH"]?
-    return p if File.file?(p)
-  end
-  candidate = File.expand_path("../../tmp/mongo_crypt_v1.so", __DIR__)
-  File.file?(candidate) ? candidate : nil
+  spec_crypt_shared_path
 end
 
 private def qe_encrypted_fields : BSON

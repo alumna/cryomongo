@@ -351,25 +351,31 @@ module Mongo::Unified::Operations
     max = json_i64(args["max"]?)
     validator = args["validator"]?.try { |v| json_to_bson(v) }
     db = target.as(Mongo::Database)
-    db.command(Mongo::Commands::Create, name: coll_name, session: session, timeout_ms: op_timeout_ms(args), options: {
-      view_on:                           view_on,
-      pipeline:                          pipeline,
-      clustered_index:                   clustered,
-      timeseries:                        timeseries,
-      expire_after_seconds:              expire,
-      change_stream_pre_and_post_images: pre_post,
-      capped:                            capped,
-      size:                              size,
-      max:                               max,
-      validator:                         validator,
-    })
+    extra = view_on || pipeline || clustered || timeseries || expire || pre_post || capped || size || max || validator
+    if extra
+      db.command(Mongo::Commands::Create, name: coll_name, session: session, timeout_ms: op_timeout_ms(args), options: {
+        view_on:                           view_on,
+        pipeline:                          pipeline,
+        clustered_index:                   clustered,
+        timeseries:                        timeseries,
+        expire_after_seconds:              expire,
+        change_stream_pre_and_post_images: pre_post,
+        capped:                            capped,
+        size:                              size,
+        max:                               max,
+        validator:                         validator,
+      })
+    else
+      # Queryable Encryption create expands ESC / ECOC and resolves keyAltName.
+      db.create_collection(coll_name, session: session, timeout_ms: op_timeout_ms(args))
+    end
     db[coll_name]
   end
 
   private def execute_drop_collection(args, target, session)
     raise "Missing arguments" unless args
     coll_name = args["collection"].as_s
-    target.as(Mongo::Database).command(Mongo::Commands::Drop, name: coll_name, session: session, options: NamedTuple.new) rescue nil
+    target.as(Mongo::Database)[coll_name].drop(session: session)
   end
 
   private def execute_drop_database(args, target, session)

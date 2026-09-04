@@ -6,8 +6,9 @@ end
 
 # Public auto-encryption options. This type has no libmongocrypt C handles (D36).
 #
-# Automatic encryption needs MongoDB Enterprise **crypt_shared** (`mongo_crypt_v1.so`)
-# or, in other drivers, mongocryptd. This driver uses crypt_shared only.
+# Automatic encryption needs MongoDB Enterprise **crypt_shared**
+# (`mongo_crypt_v1.so` / `.dylib` / `.dll`) or, in other drivers, mongocryptd.
+# This driver uses crypt_shared only.
 # Set `extra_options["cryptSharedLibPath"]` or `CRYPT_SHARED_LIB_PATH`.
 #
 # A local `schema_map` is safer than a schema from the server. It only configures
@@ -57,7 +58,7 @@ class Mongo::AutoEncryption
     @key_expiration_ms = key_expiration_ms
   end
 
-  # Absolute path to `mongo_crypt_v1.so` from the environment, if set.
+  # Absolute path to crypt_shared from the environment, if set.
   def self.crypt_shared_lib_path : String?
     if p = ENV["CRYPT_SHARED_LIB_PATH"]?
       return p unless p.empty?
@@ -90,7 +91,7 @@ class Mongo::AutoEncryption
   def self.open_engine(client : Mongo::Client, opts : Mongo::AutoEncryption) : Engine
     builder = @@engine_builder
     unless builder
-      raise Mongo::Error::Crypt.new("Auto-encryption needs libmongocrypt. Install libmongocrypt-dev, then rebuild without -Dwithout_libmongocrypt.")
+      raise Mongo::Error::Crypt.new("Auto-encryption needs libmongocrypt. Run scripts/vendor-libmongocrypt.sh, then rebuild without -Dwithout_libmongocrypt.")
     end
     builder.call(client, opts)
   end

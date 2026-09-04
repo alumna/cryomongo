@@ -3,23 +3,17 @@ require "sync"
 {% begin %}
   {% linked = false %}
   {% unless flag?(:without_libmongocrypt) %}
-    {% if flag?(:libmongocrypt) %}
-      {% linked = true %}
-    {% else %}
-      {% linked = `pkg-config --exists libmongocrypt 2>/dev/null && printf yes || printf no`.stringify.includes?("yes") %}
-    {% end %}
-  {% end %}
-
-  {% if linked %}
     require "./client_encryption/lib"
+    {% linked = true %}
   {% end %}
 
   # Explicit client-side field level encryption (CSFLE).
   #
-  # Needs system **libmongocrypt**. When that library is missing, the rest of the
-  # driver still compiles. Creating a `ClientEncryption` then raises
-  # `Mongo::Error::Crypt`. Compile with `-Dwithout_libmongocrypt` to skip the
-  # link. Compile with `-Dlibmongocrypt` to require the link.
+  # Needs **libmongocrypt**. Default is the official 1.20.4 library from
+  # `scripts/vendor-libmongocrypt.sh`. `USE_SYSTEM_LIBMONGOCRYPT=true` links a
+  # system library (>= 1.20.0). Compile with `-Dwithout_libmongocrypt` to skip
+  # the link. Then creating a `ClientEncryption` raises `Mongo::Error::Crypt`.
+  # Compile with `-Dlibmongocrypt` to require the link (default already does).
   #
   # This slice is local KMS only: `create_data_key`, `encrypt`, `decrypt`,
   # key-vault helpers, `rewrap_many_data_key`, and `create_encrypted_collection`.
@@ -30,11 +24,12 @@ require "sync"
   # (see `#close`).
   class Mongo::ClientEncryption
     LIB_LINKED = {{ linked }}
-    MISSING_LIB = "ClientEncryption needs libmongocrypt. Install libmongocrypt-dev, then rebuild without -Dwithout_libmongocrypt. Specs skip when the library is missing."
+    MISSING_LIB = "ClientEncryption needs libmongocrypt. Run scripts/vendor-libmongocrypt.sh, then rebuild without -Dwithout_libmongocrypt. Distro packages: USE_SYSTEM_LIBMONGOCRYPT=true (needs >= 1.20.0). Specs skip when the library is missing."
   end
 
   {% if linked %}
     require "./client_encryption/c_binary"
+    require "./client_encryption/crypto_hooks"
     require "./client_encryption/kms"
     require "./client_encryption/context"
     require "./client_encryption/auto"
@@ -109,6 +104,7 @@ require "sync"
           raise Mongo::Error::Crypt.new("mongocrypt_new failed.")
         end
         begin
+          CryptoHooks.install(crypt)
           Kms.apply(crypt, kms_providers)
           if ms = key_expiration_ms
             unless ms >= 0

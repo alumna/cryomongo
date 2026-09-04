@@ -29,6 +29,7 @@ class Mongo::ClientEncryption::Auto < Mongo::AutoEncryption::Engine
     end
 
     begin
+      CryptoHooks.install(crypt)
       Kms.apply(crypt, opts.kms_providers)
       if ms = opts.key_expiration_ms
         unless ms >= 0
@@ -70,7 +71,7 @@ class Mongo::ClientEncryption::Auto < Mongo::AutoEncryption::Engine
       end
       unless @skip_encrypt || opts.bypass_query_analysis
         unless crypt_shared_loaded?(crypt)
-          raise Mongo::Error::Crypt.new("crypt_shared was not loaded. Set extraOptions.cryptSharedLibPath or CRYPT_SHARED_LIB_PATH to mongo_crypt_v1.so. mongocryptd is not implemented.")
+          raise Mongo::Error::Crypt.new("crypt_shared was not loaded. Set extraOptions.cryptSharedLibPath or CRYPT_SHARED_LIB_PATH to mongo_crypt_v1.so (linux), .dylib (macos), or .dll (windows). mongocryptd is not implemented.")
         end
       end
     rescue ex
