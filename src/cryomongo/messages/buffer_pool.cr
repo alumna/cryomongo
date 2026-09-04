@@ -1,7 +1,8 @@
-# Reusable receive buffers. After a successful OP_MSG / OP_REPLY parse, BSON
-# is copied and the buffer returns here. Failed reads also return it.
-# Compression staging on Connection uses its own IO::Memory and does not need
-# this pool.
+# Reusable receive staging buffers. Socket code checkouts, reads, copies
+# *used* bytes, then checkins (copy_and_checkin). Parse BSON.view of the
+# copy only. Nested []? must not alias a buffer another fiber can overwrite
+# after checkin (preview_mt). Failed reads also return the buffer.
+# Compression inflate uses its own Bytes and does not use this pool.
 module Mongo::Messages::BufferPool
   extend self
 
@@ -29,6 +30,21 @@ module Mongo::Messages::BufferPool
     select
     when @@channel.send(buf)
     else
+    end
+  end
+
+  # One memcpy of the frame, then the staging buffer goes back to the pool.
+  # Same copy cost as the old per-document own_payload clone. Do not checkin
+  # the returned slice (that would let a later checkout overwrite views).
+  def copy_and_checkin(pool_buf : Bytes, used : Int32) : Bytes
+    begin
+      owned = Bytes.new(used)
+      # copy_to(Slice) requires target.size >= source.size. The pool buffer
+      # is often 16KiB; *used* is the frame. Copy only that prefix.
+      owned.copy_from(pool_buf[0, used])
+      owned
+    ensure
+      checkin(pool_buf)
     end
   end
 end

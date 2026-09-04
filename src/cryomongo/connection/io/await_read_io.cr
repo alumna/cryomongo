@@ -1,5 +1,5 @@
 # :nodoc:
-# Wait for data in 100ms slices. A slice timeout stays inside read(), so
+# Wait for data in short slices. A slice timeout stays inside read(), so
 # Message.new does not unwind after a partial header or body.
 #
 # Darwin kqueue can fire a single long socket timeout early (CSOT bulkWrite
@@ -7,9 +7,20 @@
 # *deadline*. Darwin often raises Socket::Error / ETIMEDOUT instead of
 # IO::TimeoutError. Retry that errno here too. Do not retry ECONNRESET.
 # When the deadline has passed, raise IO::TimeoutError so CSOT maps it to
-# Error::Timeout. Do not lengthen official timeoutMS waits.
+# Error::Timeout. A failPoint blockConnection must hit that deadline
+# (legacy socketTimeoutMS or leftover timeoutMS), not be retried until
+# connectTimeoutMS. Do not lengthen official timeoutMS waits.
+#
+# On Darwin a premature kqueue timeout still consumes the slice of leftover
+# timeoutMS. A 100ms slice burns a 200ms budget before getMore / the 3rd
+# insert. Darwin slices are 10ms. Linux stays at 100ms. A single wait until
+# the remaining deadline is the Wave 34 hole (kqueue fires early).
 class Mongo::Connection::AwaitReadIO < IO
-  SLICE = 100.milliseconds
+  {% if flag?(:darwin) %}
+    SLICE = 10.milliseconds
+  {% else %}
+    SLICE = 100.milliseconds
+  {% end %}
 
   def initialize(@inner : IO, @raw : ::Socket, @deadline : Time::Instant?, @connection : Mongo::Connection)
   end
@@ -40,8 +51,8 @@ class Mongo::Connection::AwaitReadIO < IO
           inner.write_timeout = wait
         end
       end
-      # interrupt() may have set 1ms, then this loop wrote 100ms back. Recheck
-      # so close does not start another full slice.
+      # interrupt() may have set 1ms, then this loop wrote the slice back.
+      # Recheck so close does not start another full slice.
       if @connection.interrupted? || @inner.closed?
         raise IO::Error.new("Closed stream")
       end

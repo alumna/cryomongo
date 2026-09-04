@@ -56,6 +56,16 @@ class Mongo::Connection
     span
   end
 
+  # Handshake wait. Unset connectTimeoutMS is 10s (URI spec). 0 is infinite.
+  # Do not treat unset as infinite: wrap would retry failPoint hello forever
+  # and never mark Unknown.
+  def self.handshake_timeout(options : Mongo::Options) : Time::Span?
+    span = uri_timeout(options.connect_timeout)
+    return span if span
+    return nil if options.connect_timeout
+    10.seconds
+  end
+
   def initialize(@server_description : SDAM::ServerDescription, @credentials : Mongo::Credentials, @options : Mongo::Options, is_monitor : Bool = false, connection_id : Int64? = nil)
     @monitor = is_monitor
     tls_hostname = nil.as(String?)
@@ -120,7 +130,9 @@ class Mongo::Connection
     # Darwin kqueue fires a 1ms socketTimeoutMS wait at once. Hello then
     # fails before CSOT timeoutMS can ignore socketTimeoutMS (UTF
     # "socketTimeoutMS is ignored if timeoutMS is set"). Slice until
-    # connectTimeoutMS so hello can finish. Restore socketTimeoutMS after.
+    # connectTimeoutMS (10s if unset) so hello can finish. A failPoint
+    # hello block longer than that still times out. Restore socketTimeoutMS
+    # after. Do not drop this wrap.
     wrap_connect_deadline do
       run_hello(
         send_metadata: send_metadata,
@@ -260,11 +272,13 @@ class Mongo::Connection
   private def receive_awaitable(started : Time::Instant)
     overall = Mongo::Connection.uri_timeout(@raw_socket.read_timeout)
     expire_at = overall ? started + overall : nil
-    wrap_deadline_io(expire_at)
+    # Nested wrap is a no-op. Only unwrap if this call wrapped, or a
+    # handshake wrap would be stripped mid-hello.
+    wrapped = wrap_deadline_io(expire_at)
     begin
       receive_one
     ensure
-      unwrap_deadline_io
+      unwrap_deadline_io if wrapped
       apply_timeout(overall)
     end
   end
@@ -286,10 +300,11 @@ class Mongo::Connection
     @deadline_inner = nil
   end
 
-  # Handshake / hello: slice until connectTimeoutMS. Nested wrap is a no-op
-  # (already AwaitReadIO). Restore the usual socket timeout after.
+  # Handshake / SASL: slice until connectTimeoutMS. Unset is 10s, not
+  # infinite. Nested wrap is a no-op (already AwaitReadIO). Restore the
+  # usual socket timeout after so a later command uses socketTimeoutMS.
   private def wrap_connect_deadline
-    connect_span = Mongo::Connection.uri_timeout(@options.connect_timeout)
+    connect_span = Mongo::Connection.handshake_timeout(@options)
     expire_at = connect_span ? Time.instant + connect_span : nil
     wrapped = wrap_deadline_io(expire_at)
     begin
@@ -364,7 +379,7 @@ class Mongo::Connection
   def authenticate
     # see: https://github.com/mongodb/specifications/blob/master/source/auth/auth.rst#authentication-handshake
     # Darwin 1ms socketTimeoutMS can also fire during SASL after hello.
-    # Slice until connectTimeoutMS, same as handshake.
+    # Slice until connectTimeoutMS (10s if unset), same as handshake.
     return if server_description.type.rs_arbiter?
     return if @credentials.username.nil? && @credentials.password.nil? && @credentials.mechanism.nil?
 

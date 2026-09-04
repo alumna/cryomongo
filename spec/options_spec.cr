@@ -74,6 +74,14 @@ describe Mongo::Options do
     Mongo::Connection.uri_timeout(nil).should be_nil
   end
 
+  it "uses 10s for handshake when connectTimeoutMS is unset, nil when 0" do
+    Mongo::Connection.handshake_timeout(Mongo::Options.new).should eq 10.seconds
+    _, zero, _, _ = Mongo::URI.parse("mongodb://localhost/?connectTimeoutMS=0", Mongo::Options.new)
+    Mongo::Connection.handshake_timeout(zero).should be_nil
+    _, set, _, _ = Mongo::URI.parse("mongodb://localhost/?connectTimeoutMS=250", Mongo::Options.new)
+    Mongo::Connection.handshake_timeout(set).should eq 250.milliseconds
+  end
+
   it "rejects negative timeoutMS" do
     expect_raises(Mongo::Error, /timeoutMS/) do
       Mongo::URI.parse("mongodb://localhost/?timeoutMS=-1", Mongo::Options.new)

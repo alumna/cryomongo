@@ -39,34 +39,25 @@ struct Mongo::Messages::OpReply < Mongo::Messages::Part
       Messages::BufferPool.checkin(msg_bytes)
       raise error
     end
-    initialize(msg_bytes, header, used: size)
+    # Same receive pattern as OpMsg: copy, checkin, then BSON.view the copy.
+    initialize(Messages::BufferPool.copy_and_checkin(msg_bytes, size), header, used: size)
   end
 
+  # *msg_bytes* must stay valid for the life of this message. Do not checkin
+  # here (the IO path already returned the staging buffer after the copy).
   def initialize(msg_bytes : Bytes, header : Messages::Header, used : Int32 = msg_bytes.size)
-    begin
-      view_bytes = msg_bytes[0, used]
-      msg_view = IO::Memory.new(view_bytes, writable: false)
+    view_bytes = msg_bytes[0, used]
+    msg_view = IO::Memory.new(view_bytes, writable: false)
 
-      @response_flags = ResponseFlags.from_value(msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian))
-      @cursor_id = msg_view.read_bytes(Int64, IO::ByteFormat::LittleEndian)
-      @starting_from = msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian)
-      @number_returned = msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian)
+    @response_flags = ResponseFlags.from_value(msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian))
+    @cursor_id = msg_view.read_bytes(Int64, IO::ByteFormat::LittleEndian)
+    @starting_from = msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian)
+    @number_returned = msg_view.read_bytes(Int32, IO::ByteFormat::LittleEndian)
 
-      @documents = [] of BSON
+    @documents = [] of BSON
 
-      while msg_view.pos < used
-        @documents << Messages.read_bson_view(view_bytes, msg_view)
-      end
-      own_payload
-    ensure
-      Messages::BufferPool.checkin(msg_bytes)
+    while msg_view.pos < used
+      @documents << Messages.read_bson_view(view_bytes, msg_view)
     end
-  end
-
-  # Copy BSON out of the receive buffer so the Channel pool can take it back.
-  private def own_payload : Nil
-    owned = Array(BSON).new(@documents.size)
-    @documents.each { |doc| owned << BSON.new(doc.data) }
-    @documents = owned
   end
 end

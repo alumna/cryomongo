@@ -61,11 +61,14 @@ Client-Side Field Level Encryption (CSFLE)
   `keyAltName` is resolved (`fle2v2-InsertFind-keyAltName`)
 - Vendored macOS libmongocrypt also writes `libmongocrypt.0.dylib`
   (dyld runtime ID; Crystal `-lmongocrypt` links `libmongocrypt.dylib`)
-- OP_MSG `error?` clones nested BSON stored on Command / CommandWrite /
-  WriteConcern (`BSON.new(bytes)`, not `BSON.new(bson)`)
-  - Nested `[]?` is a view; BufferPool reuse after checkin must not
-    SIGSEGV/SIGBUS (GitHub arm/macOS standalone, UTF `disable_fail_points`)
-  - Clone only when constructing an error, not on ok:1 hello / ping
+- OP_MSG / OP_REPLY receive copies the frame, then BufferPool checkin,
+  then `BSON.view` of that copy (not view-then-`own_payload`)
+  - Nested `[]?` stays valid after another fiber checkouts the pool
+    (`preview_mt` SIGSEGV/SIGBUS in `error?` / UTF `disable_fail_points`)
+  - Pool stays a read staging buffer (one memcpy). Do not clone every
+    ok:1 hello in `error?`. `BSON.new(BSON)` is a no-op
+  - Command / CommandWrite / WriteConcern still `BSON.new(bytes)` for
+    nested docs stored on the error
 - Darwin CSOT: wait for timeoutMS in short socket slices so a kqueue
   `IO::TimeoutError` does not win before the CSOT deadline
   (getMore / bulkWrite / GridFS UTF). Do not lengthen official waits.
@@ -73,7 +76,13 @@ Client-Side Field Level Encryption (CSFLE)
   (not only `IO::TimeoutError`). Raise `Error::Timeout` only when
   the CSOT deadline has passed. Hello / handshake uses the same
   slices until connectTimeoutMS so a 1ms `socketTimeoutMS` cannot
-  beat timeoutMS. Do not retry ECONNRESET.
+  beat timeoutMS. Unset connectTimeoutMS is 10s for that wrap
+  (not infinite). Command I/O drops a leaked handshake wrap, then
+  slices until leftover timeoutMS or (Darwin) socketTimeoutMS so a
+  failPoint `blockConnection` still expires. Do not retry ECONNRESET.
+- Darwin CSOT leftover: 10ms socket slices on Darwin so a premature
+  kqueue timeout does not burn 100ms of timeoutMS before getMore /
+  the 3rd insert. Linux stays at 100ms. Do not lengthen official waits.
 - `connectTimeoutMS=0` passes nil into `TCPSocket` (Crystal `0` is
   immediate on Darwin kqueue)
 - GitHub macOS `tls_spec` uses Homebrew openssl@3 (PATH and pkg-config)

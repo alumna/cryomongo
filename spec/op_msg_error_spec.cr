@@ -2,7 +2,8 @@ require "./spec_helper"
 
 # GitHub arm/macOS standalone SIGSEGV/SIGBUS in OpMsg#error? after BufferPool
 # checkin (UTF disable_fail_points / ConfigureFailPoint mode=off). Nested []?
-# is a BSON.view. BSON.new(BSON) does not copy.
+# is a BSON.view. BSON.new(BSON) does not copy. Wave 33 scribbled AFTER parse
+# on one fiber and did not prove preview_mt pool reuse.
 
 private def serialize_op_msg(doc : BSON) : Bytes
   msg = Mongo::Messages::OpMsg.new(doc)
@@ -20,14 +21,83 @@ private def op_msg_header(body_size : Int32) : Mongo::Messages::Header
   )
 end
 
-# Larger than BufferPool.checkin max so a scribbled slice is not shared.
-private def parse_op_msg_scribble(doc : BSON) : Mongo::Messages::OpMsg
+private def op_reply_header(body_size : Int32) : Mongo::Messages::Header
+  Mongo::Messages::Header.new(
+    message_length: 16 + body_size,
+    request_id: 1,
+    response_to: 1,
+    op_code: Mongo::Messages::OpCode::Reply
+  )
+end
+
+# IO receive path: pool checkout, copy, checkin, then BSON.view of the copy.
+private def parse_op_msg_via_pool(doc : BSON) : Mongo::Messages::OpMsg
   body = serialize_op_msg(doc)
-  buf = Bytes.new(1_048_577)
-  body.copy_to(buf[0, body.size])
-  msg = Mongo::Messages::OpMsg.new(buf, op_msg_header(body.size), used: body.size)
-  buf.fill(0xFF)
+  Mongo::Messages::OpMsg.new(IO::Memory.new(body), op_msg_header(body.size))
+end
+
+# Hold every pooled slot, fill 0xFF, then checkin. A view of the staging
+# buffer would die. The owned copy must still parse.
+private def scribble_pooled_buffers : Nil
+  n = Mongo::Messages::BufferPool::POOL_SIZE
+  held = Array(Bytes).new(n)
+  n.times do
+    held << Mongo::Messages::BufferPool.checkout(Mongo::Messages::BufferPool::DEFAULT_SIZE)
+  end
+  held.each do |buf|
+    buf.fill(0xFF)
+    Mongo::Messages::BufferPool.checkin(buf)
+  end
+end
+
+private def parse_op_msg_scribble(doc : BSON) : Mongo::Messages::OpMsg
+  msg = parse_op_msg_via_pool(doc)
+  scribble_pooled_buffers
   msg
+end
+
+private def serialize_op_reply(docs : Array(BSON)) : Bytes
+  reply = Mongo::Messages::OpReply.new(
+    Mongo::Messages::OpReply::ResponseFlags::None,
+    0_i64,
+    0,
+    docs.size,
+    docs
+  )
+  io = IO::Memory.new
+  reply.to_io(io)
+  io.to_slice.clone
+end
+
+private def ok1_with_topology : BSON
+  BSON.build do |b|
+    b["ok"] = 1.0
+    b.document("topologyVersion") do
+      b["processId"] = BSON::ObjectId.new
+      b["counter"] = 1_i64
+    end
+  end
+end
+
+# Walk the same nested []? path error? uses. Raise so a spawned fiber can
+# send the exception (spec DSL in spawn does not fail the example).
+private def walk_op_msg_error(msg : Mongo::Messages::OpMsg, expect_command : Bool) : Nil
+  err = msg.error?
+  if expect_command
+    raise "expected Command, got #{err.inspect}" unless err.is_a?(Mongo::Error::Command)
+    details = err.details
+    raise "expected errInfo" unless details
+    reason = details["reason"]
+    raise "expected nested reason, got #{reason.inspect}" unless reason == "nested"
+  else
+    raise "expected no error, got #{err.inspect}" if err
+    ok = msg.body["ok"]
+    raise "expected ok 1.0, got #{ok.inspect}" unless ok == 1.0
+    tv = msg.body["topologyVersion"]?
+    raise "expected topologyVersion BSON" unless tv.is_a?(BSON)
+    counter = tv["counter"]
+    raise "expected counter 1, got #{counter.inspect}" unless counter == 1_i64
+  end
 end
 
 describe Mongo::Messages::OpMsg do
@@ -146,15 +216,95 @@ describe Mongo::Messages::OpMsg do
 
   it "reuses BufferPool-sized receive buffers for error?" do
     doc = BSON.new({"ok" => 1.0})
-    body = serialize_op_msg(doc)
-    header = op_msg_header(body.size)
     n = Mongo::Messages::BufferPool::POOL_SIZE * 4
     n.times do
-      buf = Bytes.new(Mongo::Messages::BufferPool::DEFAULT_SIZE)
-      body.copy_to(buf[0, body.size])
-      msg = Mongo::Messages::OpMsg.new(buf, header, used: body.size)
+      msg = parse_op_msg_via_pool(doc)
       msg.error?.should be_nil
       msg.body["ok"].should eq 1.0
+    end
+  end
+
+  # preview_mt: another fiber checkouts and overwrites while parse / error?
+  # still run. Cooperative spawn still covers copy-then-checkin when the
+  # scribble fiber runs between parse and the nested walk.
+  it "walks error? while another fiber overwrites BufferPool buffers" do
+    ok_doc = ok1_with_topology
+    err_doc = BSON.build do |b|
+      b["ok"] = 0.0
+      b["errmsg"] = "failed"
+      b["code"] = 123
+      b.document("errInfo") { b["reason"] = "nested" }
+    end
+    ok_body = serialize_op_msg(ok_doc)
+    err_body = serialize_op_msg(err_doc)
+    ok_header = op_msg_header(ok_body.size)
+    err_header = op_msg_header(err_body.size)
+    n = Mongo::Messages::BufferPool::POOL_SIZE * 8
+
+    stop = Channel(Nil).new(1)
+    started = Channel(Nil).new(1)
+    stopped = Channel(Nil).new(1)
+    spawn do
+      started.send(nil)
+      loop do
+        select
+        when stop.receive
+          break
+        else
+          buf = Mongo::Messages::BufferPool.checkout(Mongo::Messages::BufferPool::DEFAULT_SIZE)
+          buf.fill(0xFF)
+          Mongo::Messages::BufferPool.checkin(buf)
+          Fiber.yield
+        end
+      end
+      stopped.send(nil)
+    end
+    started.receive
+
+    failures = Channel(Exception?).new(2)
+    2.times do
+      spawn do
+        begin
+          n.times do
+            ok_msg = Mongo::Messages::OpMsg.new(IO::Memory.new(ok_body), ok_header)
+            walk_op_msg_error(ok_msg, false)
+            err_msg = Mongo::Messages::OpMsg.new(IO::Memory.new(err_body), err_header)
+            walk_op_msg_error(err_msg, true)
+          end
+          failures.send(nil)
+        rescue e
+          failures.send(e)
+        end
+      end
+    end
+
+    2.times do
+      result = failures.receive
+      result.should be_nil
+    end
+    stop.send(nil)
+    stopped.receive
+  end
+end
+
+describe Mongo::Messages::OpReply do
+  it "keeps documents after BufferPool reuse" do
+    nested = BSON.build do |b|
+      b["ok"] = 1.0
+      b.document("cursor") { b["id"] = 0_i64 }
+    end
+    body = serialize_op_reply([nested])
+    msg = Mongo::Messages::OpReply.new(IO::Memory.new(body), op_reply_header(body.size))
+    scribble_pooled_buffers
+    first = msg.documents.first?
+    first.should_not be_nil
+    if first
+      first["ok"].should eq 1.0
+      cursor = first["cursor"]?
+      cursor.should be_a(BSON)
+      if cursor.is_a?(BSON)
+        cursor["id"].should eq 0_i64
+      end
     end
   end
 end
@@ -163,7 +313,7 @@ describe "ConfigureFailPoint mode=off then another command" do
   it "does not SIGSEGV after BufferPool reuse" do
     Mongo::SpecCluster.exclusive do
       uri = mongodb_uri_direct(ENV["MONGODB_URI"])
-      client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=5000&appName=wave33-failpoint-off"))
+      client = Mongo::Client.new(mongodb_uri_with(uri, "serverSelectionTimeoutMS=5000&appName=wave38-failpoint-off"))
       begin
         begin
           client.command(Mongo::Commands::Ping)

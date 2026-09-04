@@ -227,20 +227,10 @@ class Mongo::Client
     wrapped_csot_io = false
 
     deadline.try(&.check!)
-    if (d = deadline) && !d.infinite?
-      left = d.remaining
-      if left <= Time::Span.zero
-        raise Error::Timeout.new("Operation exceeded timeoutMS")
-      end
-      # Do not set leftover timeoutMS as one socket wait. Darwin kqueue can
-      # fire that wait early (bulkWrite UTF then sees two inserts, not three).
-      # Slices retry a premature IO::TimeoutError or ETIMEDOUT until the
-      # CSOT deadline.
-      connection.apply_timeout(nil)
-      wrapped_csot_io = connection.wrap_deadline_io(Time.instant + left)
-    else
-      connection.apply_timeout(Mongo::Connection.uri_timeout(@options.socket_timeout))
-    end
+    # Drop a leaked handshake wrap so this command uses timeoutMS or
+    # socketTimeoutMS, not connectTimeoutMS / an infinite slice retry.
+    connection.unwrap_deadline_io
+    wrapped_csot_io = wrap_command_io(connection, deadline)
 
     # Load-balanced transactions keep this socket even if this command fails
     # with a non-transient error.
@@ -670,6 +660,34 @@ class Mongo::Client
     end
     return unless applied
     @monitors.find(&.server_description.address.== desc.address).try &.cancel_check
+  end
+
+  # CSOT: slice until leftover timeoutMS. Darwin without CSOT: slice until
+  # socketTimeoutMS (or until data if unset) so a false kqueue timeout is
+  # retried but a failPoint blockConnection still expires. Linux without
+  # CSOT keeps a single socket wait (hot path).
+  private def wrap_command_io(connection : Mongo::Connection, deadline : Mongo::Deadline?) : Bool
+    if (d = deadline) && !d.infinite?
+      left = d.remaining
+      if left <= Time::Span.zero
+        raise Error::Timeout.new("Operation exceeded timeoutMS")
+      end
+      # Do not set leftover timeoutMS as one socket wait. Darwin kqueue can
+      # fire that wait early (bulkWrite UTF then sees two inserts, not three).
+      # Slices retry a premature IO::TimeoutError or ETIMEDOUT until the
+      # CSOT deadline.
+      connection.apply_timeout(nil)
+      return connection.wrap_deadline_io(Time.instant + left)
+    end
+    sock = Mongo::Connection.uri_timeout(@options.socket_timeout)
+    {% if flag?(:darwin) %}
+      connection.apply_timeout(nil)
+      expire_at = sock ? Time.instant + sock : nil
+      connection.wrap_deadline_io(expire_at)
+    {% else %}
+      connection.apply_timeout(sock)
+      false
+    {% end %}
   end
 
   # Darwin may surface ETIMEDOUT as Socket::Error, not IO::TimeoutError.
