@@ -1,6 +1,7 @@
 require "socket"
 require "wait_group"
 require "sync/exclusive"
+require "./auto_encryption"
 require "./database"
 require "./messages/**"
 require "./commands/**"
@@ -75,6 +76,8 @@ class Mongo::Client
   @pending_setup_lock = Sync::Mutex.new
   @fiber_sessions = {} of Fiber => Session::ClientSession
   @fiber_sessions_lock = Sync::Mutex.new
+  # Nil when auto-encryption is off. Command path is one pointer check and no extra alloc.
+  @auto_encryption : Mongo::AutoEncryption::Engine?
 
   # The default auth database is optionally provided as a part of the connection string uri.
   #
@@ -88,12 +91,13 @@ class Mongo::Client
   #
   # client = Mongo::Client.new "mongodb://127.0.0.1/?appname=client-example"
   # ```
-  def initialize(connection_string : String = "mongodb://localhost:27017", options : Mongo::Options = Mongo::Options.new)
-    initialize(connection_string: connection_string, options: options, start_monitoring: true)
+  def initialize(connection_string : String = "mongodb://localhost:27017", options : Mongo::Options = Mongo::Options.new, auto_encryption : Mongo::AutoEncryption? = nil)
+    initialize(connection_string: connection_string, options: options, start_monitoring: true, auto_encryption: auto_encryption)
   end
 
   # :nodoc:
-  def initialize(connection_string : String = "mongodb://localhost:27017", *, options : Mongo::Options = Mongo::Options.new, start_monitoring = true)
+  def initialize(connection_string : String = "mongodb://localhost:27017", *, options : Mongo::Options = Mongo::Options.new, start_monitoring = true, auto_encryption : Mongo::AutoEncryption? = nil)
+    @auto_encryption = nil
     seeds, @options, @credentials, @default_auth_db = Mongo::URI.parse(connection_string, options)
     @monitoring_enabled = start_monitoring
     @defer_sdam_events = !start_monitoring
@@ -175,11 +179,24 @@ class Mongo::Client
     # Later topology events must reach subscribers (legacy SDAM JSON). Constructor
     # events stay in @pending_sdam_events until start_sdam_monitoring.
     @defer_sdam_events = false
+
+    if ae = auto_encryption
+      begin
+        @auto_encryption = Mongo::AutoEncryption.open_engine(self, ae)
+      rescue ex
+        close
+        raise ex
+      end
+    end
   end
 
   # Frees all the resources associated with a client.
   def close
     @closing.set(true)
+    if auto = @auto_encryption
+      @auto_encryption = nil
+      auto.close
+    end
     @srv_poller.try(&.close)
 
     # End sessions while pools are still open. EndSessions needs a socket.

@@ -423,3 +423,6 @@ class Mongo::Database
     self.command(Commands::DbStats, options: {scale: scale})
   end
 end
+
+require "./database/create_collection"
+

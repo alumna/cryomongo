@@ -282,6 +282,18 @@ class Mongo::Client
 
     flag_bits = unacknowledged ? Messages::OpMsg::Flags::MoreToCome : Messages::OpMsg::Flags::None
 
+    # Auto-encryption: one nil check. No extra alloc when it is off.
+    # Encrypt before session fields so lsid / txnNumber are appended after.
+    # Key-vault and listCollections set a per-fiber bypass (no re-entry).
+    if auto = @auto_encryption
+      unless auto.bypassing?
+        unless auto.skip_encrypt?
+          body = auto.encrypt_command(body, sequences)
+          sequences = nil
+        end
+      end
+    end
+
     # Apply session rules, then retry extras, then Server API.
     session.mark_used
     body = apply_session_fields(body, session, unacknowledged, command, server_description, **args)
@@ -441,8 +453,17 @@ class Mongo::Client
       raise wrap_csot_timeout(error, deadline)
     end
 
+    # Decrypt after APM CommandSucceeded (spec). Skip when this fiber is
+    # fetching keys or collection info. Still decrypt when bypass_auto_encryption.
+    result_body = op_msg.body
+    if auto = @auto_encryption
+      unless auto.bypassing?
+        result_body = auto.decrypt_reply(result_body)
+      end
+    end
+
     # Parse and return the body as a custom Result type.
-    result = command.result(op_msg.body)
+    result = command.result(result_body)
     session.last_operation_server = server_description
 
     # APM already recorded Succeeded for bulkWrite ok:1 + writeConcernError.

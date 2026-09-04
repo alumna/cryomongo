@@ -5,6 +5,7 @@ module Mongo::Unified
     property collections = Hash(String, Mongo::Collection).new
     property buckets = Hash(String, Mongo::GridFS::Bucket).new
     property sessions = Hash(String, Mongo::Session::ClientSession).new
+    property client_encryptions = Hash(String, Mongo::ClientEncryption).new
     property cursors = Hash(String, Mongo::Cursor).new
     property entities = Hash(String, BSON::Value).new
     property topology_descriptions = Hash(String, Mongo::SDAM::TopologyDescription).new
@@ -61,6 +62,11 @@ module Mongo::Unified
         session.end
       rescue
       end
+      # Close encryption before the key-vault client.
+      client_encryptions.each_value do |enc|
+        enc.close
+      rescue
+      end
       clients.each_value(&.close)
     end
 
@@ -73,6 +79,7 @@ module Mongo::Unified
         buckets[object_id]? ||
         sessions[object_id]? ||
         cursors[object_id]? ||
+        client_encryptions[object_id]? ||
         raise "Target entity not found: #{object_id}"
     end
   end

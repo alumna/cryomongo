@@ -45,9 +45,21 @@ lib LibMongoCrypt
 
   fun crypt_new = mongocrypt_new : Crypt
   fun setopt_kms_provider_local = mongocrypt_setopt_kms_provider_local(crypt : Crypt, key : Binary) : Bool
+  # BSON map of provider name → credentials. Needed for named local (`local:name`).
+  fun setopt_kms_providers = mongocrypt_setopt_kms_providers(crypt : Crypt, kms_providers : Binary) : Bool
+  # Data-key cache TTL in milliseconds. Zero means the cache does not expire.
+  fun setopt_key_expiration = mongocrypt_setopt_key_expiration(crypt : Crypt, cache_expiration_ms : UInt64) : Bool
+  fun setopt_schema_map = mongocrypt_setopt_schema_map(crypt : Crypt, schema_map : Binary) : Bool
+  fun setopt_encrypted_field_config_map = mongocrypt_setopt_encrypted_field_config_map(crypt : Crypt, efc_map : Binary) : Bool
+  fun setopt_append_crypt_shared_lib_search_path = mongocrypt_setopt_append_crypt_shared_lib_search_path(crypt : Crypt, path : LibC::Char*)
+  fun setopt_set_crypt_shared_lib_path_override = mongocrypt_setopt_set_crypt_shared_lib_path_override(crypt : Crypt, path : LibC::Char*)
+  fun setopt_bypass_query_analysis = mongocrypt_setopt_bypass_query_analysis(crypt : Crypt)
+  # Opt in so bulkWrite on admin can listCollections on the op namespace db.
+  fun setopt_use_need_mongo_collinfo_with_db_state = mongocrypt_setopt_use_need_mongo_collinfo_with_db_state(crypt : Crypt)
   fun init = mongocrypt_init(crypt : Crypt) : Bool
   fun status = mongocrypt_status(crypt : Crypt, status : Status) : Bool
   fun crypt_destroy = mongocrypt_destroy(crypt : Crypt)
+  fun crypt_shared_lib_version_string = mongocrypt_crypt_shared_lib_version_string(crypt : Crypt, len : UInt32*) : LibC::Char*
 
   fun ctx_new = mongocrypt_ctx_new(crypt : Crypt) : Ctx
   fun ctx_status = mongocrypt_ctx_status(ctx : Ctx, status : Status) : Bool
@@ -55,11 +67,17 @@ lib LibMongoCrypt
   fun ctx_setopt_key_alt_name = mongocrypt_ctx_setopt_key_alt_name(ctx : Ctx, key_alt_name : Binary) : Bool
   fun ctx_setopt_algorithm = mongocrypt_ctx_setopt_algorithm(ctx : Ctx, algorithm : LibC::Char*, len : LibC::Int) : Bool
   fun ctx_setopt_masterkey_local = mongocrypt_ctx_setopt_masterkey_local(ctx : Ctx) : Bool
+  fun ctx_setopt_key_encryption_key = mongocrypt_ctx_setopt_key_encryption_key(ctx : Ctx, bin : Binary) : Bool
+  fun ctx_setopt_key_material = mongocrypt_ctx_setopt_key_material(ctx : Ctx, key_material : Binary) : Bool
   fun ctx_datakey_init = mongocrypt_ctx_datakey_init(ctx : Ctx) : Bool
+  fun ctx_rewrap_many_datakey_init = mongocrypt_ctx_rewrap_many_datakey_init(ctx : Ctx, filter : Binary) : Bool
+  fun ctx_encrypt_init = mongocrypt_ctx_encrypt_init(ctx : Ctx, db : LibC::Char*, db_len : Int32, cmd : Binary) : Bool
   fun ctx_explicit_encrypt_init = mongocrypt_ctx_explicit_encrypt_init(ctx : Ctx, msg : Binary) : Bool
+  fun ctx_decrypt_init = mongocrypt_ctx_decrypt_init(ctx : Ctx, doc : Binary) : Bool
   fun ctx_explicit_decrypt_init = mongocrypt_ctx_explicit_decrypt_init(ctx : Ctx, msg : Binary) : Bool
   fun ctx_state = mongocrypt_ctx_state(ctx : Ctx) : CtxState
   fun ctx_mongo_op = mongocrypt_ctx_mongo_op(ctx : Ctx, op_bson : Binary) : Bool
+  fun ctx_mongo_db = mongocrypt_ctx_mongo_db(ctx : Ctx) : LibC::Char*
   fun ctx_mongo_feed = mongocrypt_ctx_mongo_feed(ctx : Ctx, reply : Binary) : Bool
   fun ctx_mongo_done = mongocrypt_ctx_mongo_done(ctx : Ctx) : Bool
   fun ctx_finalize = mongocrypt_ctx_finalize(ctx : Ctx, out : Binary) : Bool

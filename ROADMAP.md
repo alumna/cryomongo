@@ -336,14 +336,14 @@ Not a spec hole. Review every hot path after 3.1–3.13: allocations, `insertOne
 
 ## Phase 4: Client-side encryption (Post-1.0)
 
-In scope for production-grade completeness. Not AWS / OIDC / MongoDB 8.1+. Planned as workbench Waves **21–25** (`/home/coghi/Projects/mongodb/WAVES.md`). Adapter four-topology CI is Wave 20. Do **not** start Phase **3.14** from those waves.
+In scope for production-grade completeness. Not AWS / OIDC / MongoDB 8.1+.
 
-- [ ] **Client-Side Field Level Encryption (CSFLE / Queryable Encryption):** Crystal bindings for `libmongocrypt`, intercept queries, encrypt fields locally, official CSFLE suite (224 files, none copied). Split across workbench Waves **21–25**.
-  - [x] Wave 21: `libmongocrypt` bindings + explicit `create_data_key` / `encrypt` / `decrypt` (local KMS)
-  - [ ] Wave 22: auto-encryption (`schemaMap`)
-  - [ ] Wave 23: Queryable Encryption (`encryptedFieldsMap`)
-  - [ ] Wave 24: first official UTF / prose batch (local + 8.0)
-  - [ ] Wave 25: remaining official local / 8.0 tests
+- [x] **Client-Side Field Level Encryption (CSFLE / Queryable Encryption):** Crystal bindings for `libmongocrypt`, intercept queries, encrypt fields locally, official CSFLE suite that can run on MongoDB 8.0 + local KMS (77 UTF files). Cloud KMS and 8.2+ text stay leftover. Split across implementation phases.
+  - [x] `libmongocrypt` bindings + explicit `create_data_key` / `encrypt` / `decrypt` (local KMS)
+  - [x] auto-encryption (`schemaMap`)
+  - [x] Queryable Encryption (`encryptedFieldsMap`)
+  - [x] first official UTF / prose batch (local + 8.0)
+  - [x] remaining official local / 8.0 tests (leftover listed: cloud KMS, 8.2+ text)
 
 ## Phase 5: Cloud and External Authentication
 

@@ -21,16 +21,29 @@ require "sync"
   # `Mongo::Error::Crypt`. Compile with `-Dwithout_libmongocrypt` to skip the
   # link. Compile with `-Dlibmongocrypt` to require the link.
   #
-  # This slice is local KMS only: `create_data_key`, `encrypt`, and `decrypt`.
-  # Encrypted values are BSON binary subtype `0x06`. Always call `#close`.
-  # There is no GC `finalize` that frees libmongocrypt (see `#close`).
+  # This slice is local KMS only: `create_data_key`, `encrypt`, `decrypt`,
+  # key-vault helpers, `rewrap_many_data_key`, and `create_encrypted_collection`.
+  # Named local (`local:name`) is included. Auto-encryption (`Mongo::AutoEncryption`
+  # on `Mongo::Client`) uses the same bindings, including Queryable Encryption
+  # `encryptedFieldsMap`. Encrypted values are BSON binary subtype `0x06`.
+  # Always call `#close`. There is no GC `finalize` that frees libmongocrypt
+  # (see `#close`).
   class Mongo::ClientEncryption
     LIB_LINKED = {{ linked }}
+    MISSING_LIB = "ClientEncryption needs libmongocrypt. Install libmongocrypt-dev, then rebuild without -Dwithout_libmongocrypt. Specs skip when the library is missing."
   end
 
   {% if linked %}
     require "./client_encryption/c_binary"
+    require "./client_encryption/kms"
     require "./client_encryption/context"
+    require "./client_encryption/auto"
+    require "./client_encryption/encrypted_collection"
+    require "./client_encryption/key_management"
+  {% else %}
+    Mongo::AutoEncryption.engine_builder = ->(client : Mongo::Client, opts : Mongo::AutoEncryption) : Mongo::AutoEncryption::Engine {
+      raise Mongo::Error::Crypt.new(Mongo::ClientEncryption::MISSING_LIB)
+    }
   {% end %}
 
   class Mongo::ClientEncryption
@@ -41,10 +54,27 @@ require "sync"
 
     LOCAL_KEY_BYTES = 96
 
-    MISSING_LIB = "ClientEncryption needs libmongocrypt. Install libmongocrypt-dev, then rebuild without -Dwithout_libmongocrypt. Specs skip when the library is missing."
+    # Result of `#rewrap_many_data_key`. Nil bulk_write_result means no key matched.
+    class RewrapManyDataKeyResult
+      getter bulk_write_result : Mongo::Bulk::WriteResult?
+
+      def initialize(@bulk_write_result : Mongo::Bulk::WriteResult? = nil)
+      end
+    end
 
     def self.lib_linked? : Bool
       LIB_LINKED
+    end
+
+    # libmongocrypt version string, or nil when the library is not linked.
+    def self.lib_version : String?
+      {% if linked %}
+        ptr = LibMongoCrypt.version(Pointer(UInt32).null)
+        return nil if ptr.null?
+        String.new(ptr)
+      {% else %}
+        nil
+      {% end %}
     end
 
     {% if linked %}
@@ -54,18 +84,20 @@ require "sync"
       @closed = Atomic(Bool).new(false)
     {% end %}
 
-    # *key_vault_namespace* is `"database.collection"`. *kms_providers* must be
-    # BSON `{ "local" => { "key" => <96-byte binary> } }`.
+    # *key_vault_namespace* is `"database.collection"`. *kms_providers* is local
+    # KMS only: `{ "local" => { "key" => <96-byte binary or base64> } }` or a
+    # named provider `{ "local:name" => { "key" => ... } }`.
+    # *key_expiration_ms* is the data-key cache TTL. Nil keeps the lib default.
     def initialize(
       key_vault_client : Mongo::Client,
       *,
       key_vault_namespace : String,
       kms_providers : BSON,
+      key_expiration_ms : Int64? = nil,
     )
       {% unless linked %}
         raise Mongo::Error::Crypt.new(MISSING_LIB)
       {% else %}
-        master_key = local_master_key(kms_providers)
         db_name, coll_name = split_namespace(key_vault_namespace)
         vault = key_vault_client[db_name][coll_name]
         vault.write_concern = Mongo::WriteConcern.new(w: "majority")
@@ -76,36 +108,49 @@ require "sync"
         if crypt.null?
           raise Mongo::Error::Crypt.new("mongocrypt_new failed.")
         end
-        CBinary.with_bytes(master_key) do |bin|
-          unless LibMongoCrypt.setopt_kms_provider_local(crypt, bin)
-            message, code = CBinary.crypt_message(crypt)
-            LibMongoCrypt.crypt_destroy(crypt)
-            raise Mongo::Error::Crypt.new(message, code: code)
+        begin
+          Kms.apply(crypt, kms_providers)
+          if ms = key_expiration_ms
+            unless ms >= 0
+              raise Mongo::Error::Crypt.new("key_expiration_ms must be >= 0.")
+            end
+            unless LibMongoCrypt.setopt_key_expiration(crypt, ms.to_u64)
+              CBinary.raise_crypt(crypt)
+            end
           end
-        end
-        unless LibMongoCrypt.init(crypt)
-          message, code = CBinary.crypt_message(crypt)
+          unless LibMongoCrypt.init(crypt)
+            CBinary.raise_crypt(crypt)
+          end
+        rescue ex
           LibMongoCrypt.crypt_destroy(crypt)
-          raise Mongo::Error::Crypt.new(message, code: code)
+          raise ex
         end
         @crypt = crypt
       {% end %}
     end
 
     # Create a data key in the key vault. Returns the `_id` UUID (subtype 0x04).
-    def create_data_key(kms_provider : String, *, key_alt_names : Array(String)? = nil) : BSON::Binary
+    # *kms_provider* is `local` or `local:name`. *key_material* is 96 bytes when set.
+    def create_data_key(
+      kms_provider : String,
+      *,
+      key_alt_names : Array(String)? = nil,
+      key_material : BSON::Binary | Bytes | Nil = nil,
+      master_key : BSON? = nil,
+    ) : BSON::Binary
       {% unless linked %}
         raise Mongo::Error::Crypt.new(MISSING_LIB)
       {% else %}
-        unless kms_provider == "local"
-          raise Mongo::Error::Crypt.new("create_data_key only supports local KMS in this version. Got #{kms_provider}.")
+        unless Kms.local_provider?(kms_provider)
+          raise Mongo::Error::Crypt.new("create_data_key only supports local KMS (including named local:name). Got #{kms_provider}.")
         end
         @lock.synchronize do
           check_open
           ctx = new_ctx
           begin
-            CBinary.raise_ctx(ctx) unless LibMongoCrypt.ctx_setopt_masterkey_local(ctx)
+            set_master_key(ctx, kms_provider, master_key)
             set_key_alt_names(ctx, key_alt_names)
+            set_key_material(ctx, key_material)
             CBinary.raise_ctx(ctx) unless LibMongoCrypt.ctx_datakey_init(ctx)
             key_doc = Context.run(ctx, @key_vault)
             @key_vault.insert_one(key_doc)
@@ -173,6 +218,47 @@ require "sync"
       {% end %}
     end
 
+    {% unless linked %}
+      # Create a Queryable Encryption collection. Generates data keys for null keyId.
+      def create_encrypted_collection(
+        database : Mongo::Database,
+        name : String,
+        *,
+        encrypted_fields : BSON,
+        kms_provider : String,
+      ) : {Mongo::Collection, BSON}
+        raise Mongo::Error::Crypt.new(MISSING_LIB)
+      end
+
+      def get_key(_id : BSON::Binary) : BSON?
+        raise Mongo::Error::Crypt.new(MISSING_LIB)
+      end
+
+      def get_keys : Array(BSON)
+        raise Mongo::Error::Crypt.new(MISSING_LIB)
+      end
+
+      def delete_key(_id : BSON::Binary) : Commands::Common::DeleteResult?
+        raise Mongo::Error::Crypt.new(MISSING_LIB)
+      end
+
+      def add_key_alt_name(_id : BSON::Binary, _key_alt_name : String) : BSON?
+        raise Mongo::Error::Crypt.new(MISSING_LIB)
+      end
+
+      def remove_key_alt_name(_id : BSON::Binary, _key_alt_name : String) : BSON?
+        raise Mongo::Error::Crypt.new(MISSING_LIB)
+      end
+
+      def get_key_by_alt_name(_key_alt_name : String) : BSON?
+        raise Mongo::Error::Crypt.new(MISSING_LIB)
+      end
+
+      def rewrap_many_data_key(_filter : BSON, *, provider : String? = nil, master_key : BSON? = nil) : RewrapManyDataKeyResult
+        raise Mongo::Error::Crypt.new(MISSING_LIB)
+      end
+    {% end %}
+
     # Free the libmongocrypt handle. Does not close the key-vault client.
     #
     # Call this from the owning fiber. Do not add a GC `finalize` that calls
@@ -213,13 +299,46 @@ require "sync"
         end
       end
 
-      private def set_key_alt_names(ctx : LibMongoCrypt::Ctx, names : Array(String)?) : Nil
+      private       def set_key_alt_names(ctx : LibMongoCrypt::Ctx, names : Array(String)?) : Nil
         return unless names
         names.each do |name|
           alt = BSON.build { |bson| bson["keyAltName"] = name }
           CBinary.with_bytes(alt.data) do |bin|
             CBinary.raise_ctx(ctx) unless LibMongoCrypt.ctx_setopt_key_alt_name(ctx, bin)
           end
+        end
+      end
+
+      # `{ provider: "local" }` or `{ provider: "local:name" }`. Extra masterKey
+      # fields are copied when present (unused for local).
+      def set_master_key(ctx : LibMongoCrypt::Ctx, kms_provider : String, master_key : BSON?) : Nil
+        kek = BSON.build do |bson|
+          bson["provider"] = kms_provider
+          if mk = master_key
+            mk.each do |key, value, code, subtype|
+              next if key == "provider"
+              append_cloned(bson, key, value, code, subtype)
+            end
+          end
+        end
+        CBinary.with_bytes(kek.data) do |bin|
+          CBinary.raise_ctx(ctx) unless LibMongoCrypt.ctx_setopt_key_encryption_key(ctx, bin)
+        end
+      end
+
+      def set_key_material(ctx : LibMongoCrypt::Ctx, key_material : BSON::Binary | Bytes | Nil) : Nil
+        return unless key_material
+        bytes = case key_material
+                when BSON::Binary
+                  key_material.data
+                else
+                  key_material
+                end
+        doc = BSON.build do |bson|
+          bson["keyMaterial"] = BSON::Binary.new(BSON::Binary::SubType::Generic, bytes)
+        end
+        CBinary.with_bytes(doc.data) do |bin|
+          CBinary.raise_ctx(ctx) unless LibMongoCrypt.ctx_setopt_key_material(ctx, bin)
         end
       end
 
@@ -270,35 +389,6 @@ require "sync"
           end
         end
         raise Mongo::Error::Crypt.new("decrypt result has no v field.")
-      end
-
-      private def local_master_key(kms_providers : BSON) : Bytes
-        kms_providers.each do |name, _value, _code|
-          unless name == "local"
-            raise Mongo::Error::Crypt.new("ClientEncryption only supports local KMS in this version. Got #{name}.")
-          end
-        end
-        local = kms_providers["local"]?
-        unless local.is_a?(BSON)
-          raise Mongo::Error::Crypt.new("kms_providers.local must be a document with a 96-byte key.")
-        end
-        key_bytes : Bytes? = nil
-        local.each do |key, value, _code, _subtype|
-          next unless key == "key"
-          if value.is_a?(Bytes)
-            key_bytes = value.clone
-          else
-            raise Mongo::Error::Crypt.new("kms_providers.local.key must be binary.")
-          end
-        end
-        bytes = key_bytes
-        unless bytes
-          raise Mongo::Error::Crypt.new("kms_providers.local.key is required.")
-        end
-        unless bytes.size == LOCAL_KEY_BYTES
-          raise Mongo::Error::Crypt.new("Local master key must be #{LOCAL_KEY_BYTES} bytes. Got #{bytes.size}.")
-        end
-        bytes
       end
 
       private def split_namespace(ns : String) : {String, String}

@@ -266,4 +266,16 @@ module Mongo
       super(message)
     end
   end
+
+  # createEncryptedCollection failed after some data keys may already exist.
+  # *encrypted_fields* is the document so far (null keyIds that were filled stay filled).
+  class Error::EncryptedCollection < Error::Crypt
+    getter encrypted_fields : BSON
+
+    def initialize(message : String, *, encrypted_fields : BSON, code : UInt32 = 0_u32, cause : Exception? = nil)
+      super(message, code)
+      @encrypted_fields = encrypted_fields
+      @cause = cause
+    end
+  end
 end

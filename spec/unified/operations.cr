@@ -3,8 +3,12 @@ require "./parse"
 module Mongo::Unified::Operations
   # --- Helpers ---
 
+  def json_to_bson(json : JSON::Any) : BSON
+    Parse.json_to_bson(json)
+  end
+
   def json_to_bson_value(json : JSON::Any)
-    BSON.from_json(%({"v": #{json.to_json}}))["v"]
+    json_to_bson(JSON::Any.new({"v" => json}))["v"]
   end
 
   def json_i64(value : JSON::Any?) : Int64?
@@ -22,9 +26,9 @@ module Mongo::Unified::Operations
 
   def parse_update_arg(update_json : JSON::Any)
     if update_json.as_a?
-      update_json.as_a.map { |u| BSON.from_json(u.to_json) }
+      update_json.as_a.map { |u| json_to_bson(u) }
     else
-      BSON.from_json(update_json.to_json)
+      json_to_bson(update_json)
     end
   end
 
@@ -48,7 +52,7 @@ module Mongo::Unified::Operations
   end
 
   private def op_let(args : JSON::Any?) : BSON?
-    args.try(&.["let"]?).try { |v| BSON.from_json(v.to_json) }
+    args.try(&.["let"]?).try { |v| json_to_bson(v) }
   end
 
   # --- Operation Implementations ---
@@ -57,7 +61,7 @@ module Mongo::Unified::Operations
     raise "Missing arguments" unless args
     if client_name = args["client"]?.try(&.as_s)
       if client = registry.clients[client_name]?
-        fail_point = BSON.from_json(args["failPoint"].to_json)
+        fail_point = json_to_bson(args["failPoint"])
         name = fail_point["configureFailPoint"].as(String)
         mode = fail_point["mode"]
         data = fail_point["data"]?
@@ -259,7 +263,7 @@ module Mongo::Unified::Operations
       if session_ent = registry.sessions[session_id]?
         if server_desc = session_ent.server_description
           if fail_point_arg = args["failPoint"]?
-            fail_point = BSON.from_json(fail_point_arg.to_json)
+            fail_point = json_to_bson(fail_point_arg)
             session_ent.client.command(
               Mongo::Commands::ConfigureFailPoint,
               database: "admin",
@@ -337,14 +341,15 @@ module Mongo::Unified::Operations
     raise "Missing arguments" unless args
     coll_name = args["collection"].as_s
     view_on = args["viewOn"]?.try(&.as_s)
-    pipeline = args["pipeline"]?.try(&.as_a).try { |stages| stages.map { |s| BSON.from_json(s.to_json) } }
-    clustered = args["clusteredIndex"]?.try { |v| BSON.from_json(v.to_json) }
-    timeseries = args["timeseries"]?.try { |v| BSON.from_json(v.to_json) }
+    pipeline = args["pipeline"]?.try(&.as_a).try { |stages| stages.map { |s| json_to_bson(s) } }
+    clustered = args["clusteredIndex"]?.try { |v| json_to_bson(v) }
+    timeseries = args["timeseries"]?.try { |v| json_to_bson(v) }
     expire = args["expireAfterSeconds"]?.try { |v| v.as_i64? || v.as_i?.try(&.to_i64) }
-    pre_post = args["changeStreamPreAndPostImages"]?.try { |v| BSON.from_json(v.to_json) }
+    pre_post = args["changeStreamPreAndPostImages"]?.try { |v| json_to_bson(v) }
     capped = args["capped"]?.try(&.as_bool)
     size = json_i64(args["size"]?)
     max = json_i64(args["max"]?)
+    validator = args["validator"]?.try { |v| json_to_bson(v) }
     db = target.as(Mongo::Database)
     db.command(Mongo::Commands::Create, name: coll_name, session: session, timeout_ms: op_timeout_ms(args), options: {
       view_on:                           view_on,
@@ -356,6 +361,7 @@ module Mongo::Unified::Operations
       capped:                            capped,
       size:                              size,
       max:                               max,
+      validator:                         validator,
     })
     db[coll_name]
   end
@@ -374,7 +380,7 @@ module Mongo::Unified::Operations
 
   private def execute_create_index(args, target, session)
     raise "Missing arguments" unless args
-    keys = BSON.from_json(args["keys"].to_json)
+    keys = json_to_bson(args["keys"])
     opts_bson = BSON.new
     args.as_h.each do |k, v|
       next if k == "keys" || k == "session" || k == "rawData" || k == "timeoutMS" || k == "maxTimeMS" || k == "timeoutMode"
@@ -391,8 +397,8 @@ module Mongo::Unified::Operations
     validator = args["validator"]? ? json_to_bson_value(args["validator"]) : nil
     validation_level = args["validationLevel"]? ? args["validationLevel"].as_s : nil
     validation_action = args["validationAction"]? ? args["validationAction"].as_s : nil
-    pre_post = args["changeStreamPreAndPostImages"]?.try { |v| BSON.from_json(v.to_json) }
-    index = args["index"]?.try { |v| BSON.from_json(v.to_json) }
+    pre_post = args["changeStreamPreAndPostImages"]?.try { |v| json_to_bson(v) }
+    index = args["index"]?.try { |v| json_to_bson(v) }
 
     target.as(Mongo::Database).command(
       Mongo::Commands::CollMod,
@@ -410,7 +416,7 @@ module Mongo::Unified::Operations
 
   private def execute_insert_one(args, target, session)
     raise "Missing arguments" unless args
-    doc = BSON.from_json(args["document"].to_json)
+    doc = json_to_bson(args["document"])
     doc["_id"] = BSON::ObjectId.new unless doc.has_key?("_id")
     comment = args["comment"]?
     bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
@@ -420,7 +426,7 @@ module Mongo::Unified::Operations
 
   private def execute_insert_many(args, target, session)
     raise "Missing arguments" unless args
-    docs = args["documents"].as_a.map { |d| BSON.from_json(d.to_json) }
+    docs = args["documents"].as_a.map { |d| json_to_bson(d) }
     ordered = args["ordered"]?.try(&.as_bool)
     ordered = true if ordered.nil?
     comment = args["comment"]?.try { |c| json_to_bson_value(c) }
@@ -437,14 +443,14 @@ module Mongo::Unified::Operations
 
   private def execute_update_one(args, target, session)
     raise "Missing arguments" unless args
-    filter = BSON.from_json(args["filter"].to_json)
+    filter = json_to_bson(args["filter"])
     update = parse_update_arg(args["update"])
     upsert = args["upsert"]?.try(&.as_bool) || false
-    array_filters = args["arrayFilters"]?.try { |af| af.as_a.map { |f| BSON.from_json(f.to_json) } }
-    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-    hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+    array_filters = args["arrayFilters"]?.try { |af| af.as_a.map { |f| json_to_bson(f) } }
+    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
+    hint = args["hint"]?.try { |h| h.as_s? || json_to_bson(h) }
     comment = args["comment"]?.try { |c| json_to_bson_value(c) }
-    sort = args["sort"]?.try { |s| BSON.from_json(s.to_json) }
+    sort = args["sort"]?.try { |s| json_to_bson(s) }
     bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
     result = target.as(Mongo::Collection).update_one(filter, update, upsert: upsert, array_filters: array_filters, collation: collation, hint: hint, comment: comment, sort: sort, bypass_document_validation: bypass, let: op_let(args), session: session, timeout_ms: op_timeout_ms(args))
     utf_update_result(result)
@@ -452,12 +458,12 @@ module Mongo::Unified::Operations
 
   private def execute_update_many(args, target, session)
     raise "Missing arguments" unless args
-    filter = BSON.from_json(args["filter"].to_json)
+    filter = json_to_bson(args["filter"])
     update = parse_update_arg(args["update"])
     upsert = args["upsert"]?.try(&.as_bool) || false
-    array_filters = args["arrayFilters"]?.try { |af| af.as_a.map { |f| BSON.from_json(f.to_json) } }
-    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-    hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+    array_filters = args["arrayFilters"]?.try { |af| af.as_a.map { |f| json_to_bson(f) } }
+    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
+    hint = args["hint"]?.try { |h| h.as_s? || json_to_bson(h) }
     comment = args["comment"]?.try { |c| json_to_bson_value(c) }
     bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
     result = target.as(Mongo::Collection).update_many(filter, update, upsert: upsert, array_filters: array_filters, collation: collation, hint: hint, comment: comment, bypass_document_validation: bypass, let: op_let(args), session: session, timeout_ms: op_timeout_ms(args))
@@ -466,13 +472,13 @@ module Mongo::Unified::Operations
 
   private def execute_replace_one(args, target, session)
     raise "Missing arguments" unless args
-    filter = BSON.from_json(args["filter"].to_json)
-    replacement = BSON.from_json(args["replacement"].to_json)
+    filter = json_to_bson(args["filter"])
+    replacement = json_to_bson(args["replacement"])
     upsert = args["upsert"]?.try(&.as_bool) || false
-    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-    hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
+    hint = args["hint"]?.try { |h| h.as_s? || json_to_bson(h) }
     comment = args["comment"]?.try { |c| json_to_bson_value(c) }
-    sort = args["sort"]?.try { |s| BSON.from_json(s.to_json) }
+    sort = args["sort"]?.try { |s| json_to_bson(s) }
     bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
     result = target.as(Mongo::Collection).replace_one(filter, replacement, upsert: upsert, collation: collation, hint: hint, comment: comment, sort: sort, bypass_document_validation: bypass, let: op_let(args), session: session, timeout_ms: op_timeout_ms(args))
     utf_update_result(result)
@@ -480,9 +486,9 @@ module Mongo::Unified::Operations
 
   private def execute_delete_one(args, target, session)
     raise "Missing arguments" unless args
-    filter = BSON.from_json(args["filter"].to_json)
-    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-    hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+    filter = json_to_bson(args["filter"])
+    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
+    hint = args["hint"]?.try { |h| h.as_s? || json_to_bson(h) }
     comment = args["comment"]?.try { |c| json_to_bson_value(c) }
     result = target.as(Mongo::Collection).delete_one(filter, collation: collation, hint: hint, comment: comment, let: op_let(args), session: session, timeout_ms: op_timeout_ms(args))
     {"deletedCount" => result.try(&.n) || 0}
@@ -490,9 +496,9 @@ module Mongo::Unified::Operations
 
   private def execute_delete_many(args, target, session)
     raise "Missing arguments" unless args
-    filter = BSON.from_json(args["filter"].to_json)
-    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-    hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+    filter = json_to_bson(args["filter"])
+    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
+    hint = args["hint"]?.try { |h| h.as_s? || json_to_bson(h) }
     comment = args["comment"]?.try { |c| json_to_bson_value(c) }
     result = target.as(Mongo::Collection).delete_many(filter, collation: collation, hint: hint, comment: comment, let: op_let(args), session: session, timeout_ms: op_timeout_ms(args))
     {"deletedCount" => result.try(&.n) || 0}
@@ -500,7 +506,7 @@ module Mongo::Unified::Operations
 
   private def execute_find(args, target, session)
     if target.is_a?(Mongo::GridFS::Bucket)
-      filter = args && args["filter"]? ? BSON.from_json(args["filter"].to_json) : BSON.new
+      filter = args && args["filter"]? ? json_to_bson(args["filter"]) : BSON.new
       skip = args.try(&.["skip"]?).try(&.as_i)
       limit = args.try(&.["limit"]?).try(&.as_i)
       batch_size = args.try(&.["batchSize"]?).try(&.as_i)
@@ -511,22 +517,22 @@ module Mongo::Unified::Operations
   end
 
   private def execute_find_one(args, target, session)
-    filter = args && args["filter"]? ? BSON.from_json(args["filter"].to_json) : BSON.new
-    sort = args && args["sort"]? ? BSON.from_json(args["sort"].to_json) : nil
+    filter = args && args["filter"]? ? json_to_bson(args["filter"]) : BSON.new
+    sort = args && args["sort"]? ? json_to_bson(args["sort"]) : nil
     skip = args && args["skip"]? ? args["skip"].as_i : nil
-    collation = args && args["collation"]? ? Mongo::Collation.from_bson(BSON.from_json(args["collation"].to_json)) : nil
-    hint = args && args["hint"]? ? (args["hint"].as_s? || BSON.from_json(args["hint"].to_json)) : nil
+    collation = args && args["collation"]? ? Mongo::Collation.from_bson(json_to_bson(args["collation"])) : nil
+    hint = args && args["hint"]? ? (args["hint"].as_s? || json_to_bson(args["hint"])) : nil
     target.as(Mongo::Collection).find_one(filter, sort: sort, skip: skip, collation: collation, hint: hint, let: op_let(args), session: session, timeout_ms: op_timeout_ms(args))
   end
 
   private def execute_list_collections(args, target, session)
-    filter = args && args["filter"]? ? BSON.from_json(args["filter"].to_json) : nil
+    filter = args && args["filter"]? ? json_to_bson(args["filter"]) : nil
     batch_size = args.try(&.["batchSize"]?).try(&.as_i)
     target.as(Mongo::Database).list_collections(filter: filter, batch_size: batch_size, session: session, timeout_ms: op_timeout_ms(args), timeout_mode: op_timeout_mode(args)).to_a
   end
 
   private def execute_list_collection_names(args, target, session)
-    filter = args && args["filter"]? ? BSON.from_json(args["filter"].to_json) : nil
+    filter = args && args["filter"]? ? json_to_bson(args["filter"]) : nil
     target.as(Mongo::Database).list_collections(filter: filter, name_only: true, session: session, timeout_ms: op_timeout_ms(args)).map { |c| c["name"].as(String) }.to_a
   end
 
@@ -553,8 +559,8 @@ module Mongo::Unified::Operations
 
   private def execute_run_command(args, target, session)
     raise "Missing arguments" unless args
-    command_bson = BSON.from_json(args["command"].to_json)
-    read_preference = args["readPreference"]?.try { |rp| Mongo::ReadPreference.from_bson(BSON.from_json(rp.to_json)) }
+    command_bson = json_to_bson(args["command"])
+    read_preference = args["readPreference"]?.try { |rp| Mongo::ReadPreference.from_bson(json_to_bson(rp)) }
     target.as(Mongo::Database).run_command(command_bson, session: session, read_preference: read_preference, timeout_ms: op_timeout_ms(args))
   end
 
@@ -577,8 +583,8 @@ module Mongo::Unified::Operations
 
   private def command_cursor(args, target, session)
     raise "Missing arguments" unless args
-    command_bson = BSON.from_json(args["command"].to_json)
-    read_preference = args["readPreference"]?.try { |rp| Mongo::ReadPreference.from_bson(BSON.from_json(rp.to_json)) }
+    command_bson = json_to_bson(args["command"])
+    read_preference = args["readPreference"]?.try { |rp| Mongo::ReadPreference.from_bson(json_to_bson(rp)) }
     batch_size = args["batchSize"]?.try(&.as_i)
     comment = args["comment"]?.try { |c| json_to_bson_value(c) }
     max_time_ms = json_i64(args["maxTimeMS"]?) || json_i64(args["maxAwaitTimeMS"]?)
@@ -604,7 +610,7 @@ module Mongo::Unified::Operations
   end
 
   private def execute_create_change_stream(args, target, session)
-    pipeline = args && args["pipeline"]? ? args["pipeline"].as_a.map { |p| BSON.from_json(p.to_json) } : [] of BSON
+    pipeline = args && args["pipeline"]? ? args["pipeline"].as_a.map { |p| json_to_bson(p) } : [] of BSON
     batch_size = args.try(&.["batchSize"]?).try(&.as_i)
     max_await = args.try(&.["maxAwaitTimeMS"]?).try(&.as_i64)
     full_document = args.try(&.["fullDocument"]?).try(&.as_s)
@@ -623,9 +629,9 @@ module Mongo::Unified::Operations
 
   private def execute_aggregate(args, target, session)
     raise "Missing arguments" unless args
-    pipeline = args["pipeline"].as_a.map { |p| BSON.from_json(p.to_json) }
+    pipeline = args["pipeline"].as_a.map { |p| json_to_bson(p) }
     allow_disk_use = args["allowDiskUse"]?.try(&.as_bool)
-    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
     batch_size = args["batchSize"]?.try(&.as_i)
     max_time_ms = args["maxTimeMS"]?.try(&.as_i64)
     comment = args["comment"]?.try { |c| json_to_bson_value(c) }
@@ -647,8 +653,8 @@ module Mongo::Unified::Operations
     collation = nil; skip = nil; limit = nil
 
     if args
-      filter = BSON.from_json(args["filter"].to_json) if args["filter"]?
-      collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+      filter = json_to_bson(args["filter"]) if args["filter"]?
+      collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
       skip = args["skip"]?.try(&.as_i)
       limit = args["limit"]?.try(&.as_i)
     end
@@ -661,11 +667,11 @@ module Mongo::Unified::Operations
     collation = nil; skip = nil; limit = nil; hint = nil
 
     if args
-      filter = BSON.from_json(args["filter"].to_json) if args["filter"]?
-      collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
+      filter = json_to_bson(args["filter"]) if args["filter"]?
+      collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
       skip = args["skip"]?.try { |v| v.as_i? || v.as_i64?.try(&.to_i32) }
       limit = args["limit"]?.try { |v| v.as_i? || v.as_i64?.try(&.to_i32) }
-      hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+      hint = args["hint"]?.try { |h| h.as_s? || json_to_bson(h) }
     end
     comment = args.try(&.["comment"]?).try { |c| json_to_bson_value(c) }
     target.as(Mongo::Collection).count(filter, collation: collation, skip: skip, limit: limit, hint: hint, comment: comment, session: session, timeout_ms: op_timeout_ms(args))
@@ -680,9 +686,9 @@ module Mongo::Unified::Operations
   private def execute_distinct(args, target, session)
     raise "Missing arguments" unless args
     key = args["fieldName"].as_s
-    filter = args["filter"]? ? BSON.from_json(args["filter"].to_json) : nil
-    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-    hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+    filter = args["filter"]? ? json_to_bson(args["filter"]) : nil
+    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
+    hint = args["hint"]?.try { |h| h.as_s? || json_to_bson(h) }
     comment = args["comment"]?.try { |c| json_to_bson_value(c) }
     target.as(Mongo::Collection).distinct(key, filter: filter, collation: collation, hint: hint, comment: comment, session: session, timeout_ms: op_timeout_ms(args))
   end
@@ -691,16 +697,16 @@ module Mongo::Unified::Operations
     raise "Missing arguments" unless args
     map = json_to_bson_value(args["map"])
     reduce = json_to_bson_value(args["reduce"])
-    output = BSON.from_json(args["out"].to_json)
+    output = json_to_bson(args["out"])
     target.as(Mongo::Collection).map_reduce(map, reduce, output: output, session: session, timeout_ms: op_timeout_ms(args))
   end
 
   private def execute_find_one_and_delete(args, target, session)
     raise "Missing arguments" unless args
-    filter = BSON.from_json(args["filter"].to_json)
-    sort = args["sort"]? ? BSON.from_json(args["sort"].to_json) : nil
-    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-    hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+    filter = json_to_bson(args["filter"])
+    sort = args["sort"]? ? json_to_bson(args["sort"]) : nil
+    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
+    hint = args["hint"]?.try { |h| h.as_s? || json_to_bson(h) }
     max_time_ms = args["maxTimeMS"]?.try(&.as_i64)
     comment = args["comment"]?.try { |c| json_to_bson_value(c) }
     bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
@@ -709,13 +715,13 @@ module Mongo::Unified::Operations
 
   private def execute_find_one_and_replace(args, target, session)
     raise "Missing arguments" unless args
-    filter = BSON.from_json(args["filter"].to_json)
-    replacement = BSON.from_json(args["replacement"].to_json)
-    sort = args["sort"]? ? BSON.from_json(args["sort"].to_json) : nil
+    filter = json_to_bson(args["filter"])
+    replacement = json_to_bson(args["replacement"])
+    sort = args["sort"]? ? json_to_bson(args["sort"]) : nil
     upsert = args["upsert"]?.try(&.as_bool) || false
     new_doc = args["returnDocument"]?.try(&.as_s) == "After"
-    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-    hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
+    hint = args["hint"]?.try { |h| h.as_s? || json_to_bson(h) }
     max_time_ms = args["maxTimeMS"]?.try(&.as_i64)
     comment = args["comment"]?.try { |c| json_to_bson_value(c) }
     bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
@@ -724,14 +730,14 @@ module Mongo::Unified::Operations
 
   private def execute_find_one_and_update(args, target, session)
     raise "Missing arguments" unless args
-    filter = BSON.from_json(args["filter"].to_json)
+    filter = json_to_bson(args["filter"])
     update = parse_update_arg(args["update"])
-    sort = args["sort"]? ? BSON.from_json(args["sort"].to_json) : nil
+    sort = args["sort"]? ? json_to_bson(args["sort"]) : nil
     upsert = args["upsert"]?.try(&.as_bool) || false
     new_doc = args["returnDocument"]?.try(&.as_s) == "After"
-    array_filters = args["arrayFilters"]?.try { |af| af.as_a.map { |f| BSON.from_json(f.to_json) } }
-    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-    hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+    array_filters = args["arrayFilters"]?.try { |af| af.as_a.map { |f| json_to_bson(f) } }
+    collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
+    hint = args["hint"]?.try { |h| h.as_s? || json_to_bson(h) }
     max_time_ms = args["maxTimeMS"]?.try(&.as_i64)
     comment = args["comment"]?.try { |c| json_to_bson_value(c) }
     bypass = args["bypassDocumentValidation"]?.try(&.as_bool)
@@ -744,47 +750,47 @@ module Mongo::Unified::Operations
       req = req_any.as_h
       if req["insertOne"]?
         req_args = req["insertOne"]
-        doc = BSON.from_json(req_args["document"].to_json)
+        doc = json_to_bson(req_args["document"])
         Mongo::Bulk::InsertOne.new(doc).as(Mongo::Bulk::WriteModel)
       elsif req["updateOne"]?
         req_args = req["updateOne"]
-        f = BSON.from_json(req_args["filter"].to_json)
+        f = json_to_bson(req_args["filter"])
         u = parse_update_arg(req_args["update"])
         upsert = req_args["upsert"]?.try(&.as_bool)
-        collation = req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-        hint = req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-        arrayFilters = req_args["arrayFilters"]?.try { |af| af.as_a.map { |f_el| BSON.from_json(f_el.to_json) } }
-        sort = req_args["sort"]?.try { |s| BSON.from_json(s.to_json) }
+        collation = req_args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
+        hint = req_args["hint"]?.try { |h| h.as_s? || json_to_bson(h) }
+        arrayFilters = req_args["arrayFilters"]?.try { |af| af.as_a.map { |f_el| json_to_bson(f_el) } }
+        sort = req_args["sort"]?.try { |s| json_to_bson(s) }
         Mongo::Bulk::UpdateOne.new(f, u, upsert: upsert, collation: collation, hint: hint, array_filters: arrayFilters, sort: sort).as(Mongo::Bulk::WriteModel)
       elsif req["updateMany"]?
         req_args = req["updateMany"]
-        f = BSON.from_json(req_args["filter"].to_json)
+        f = json_to_bson(req_args["filter"])
         u = parse_update_arg(req_args["update"])
         upsert = req_args["upsert"]?.try(&.as_bool)
-        collation = req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-        hint = req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-        arrayFilters = req_args["arrayFilters"]?.try { |af| af.as_a.map { |f_el| BSON.from_json(f_el.to_json) } }
+        collation = req_args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
+        hint = req_args["hint"]?.try { |h| h.as_s? || json_to_bson(h) }
+        arrayFilters = req_args["arrayFilters"]?.try { |af| af.as_a.map { |f_el| json_to_bson(f_el) } }
         Mongo::Bulk::UpdateMany.new(f, u, upsert: upsert, collation: collation, hint: hint, array_filters: arrayFilters).as(Mongo::Bulk::WriteModel)
       elsif req["replaceOne"]?
         req_args = req["replaceOne"]
-        f = BSON.from_json(req_args["filter"].to_json)
-        r = BSON.from_json(req_args["replacement"].to_json)
+        f = json_to_bson(req_args["filter"])
+        r = json_to_bson(req_args["replacement"])
         upsert = req_args["upsert"]?.try(&.as_bool)
-        collation = req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-        hint = req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
-        sort = req_args["sort"]?.try { |s| BSON.from_json(s.to_json) }
+        collation = req_args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
+        hint = req_args["hint"]?.try { |h| h.as_s? || json_to_bson(h) }
+        sort = req_args["sort"]?.try { |s| json_to_bson(s) }
         Mongo::Bulk::ReplaceOne.new(f, r, upsert: upsert, collation: collation, hint: hint, sort: sort).as(Mongo::Bulk::WriteModel)
       elsif req["deleteOne"]?
         req_args = req["deleteOne"]
-        f = BSON.from_json(req_args["filter"].to_json)
-        collation = req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-        hint = req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+        f = json_to_bson(req_args["filter"])
+        collation = req_args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
+        hint = req_args["hint"]?.try { |h| h.as_s? || json_to_bson(h) }
         Mongo::Bulk::DeleteOne.new(f, collation: collation, hint: hint).as(Mongo::Bulk::WriteModel)
       elsif req["deleteMany"]?
         req_args = req["deleteMany"]
-        f = BSON.from_json(req_args["filter"].to_json)
-        collation = req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-        hint = req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+        f = json_to_bson(req_args["filter"])
+        collation = req_args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
+        hint = req_args["hint"]?.try { |h| h.as_s? || json_to_bson(h) }
         Mongo::Bulk::DeleteMany.new(f, collation: collation, hint: hint).as(Mongo::Bulk::WriteModel)
       else
         raise "Unsupported bulkWrite request type"
@@ -834,57 +840,57 @@ module Mongo::Unified::Operations
     if req["insertOne"]?
       req_args = req["insertOne"]
       ns = req_args["namespace"].as_s
-      doc = BSON.from_json(req_args["document"].to_json)
+      doc = json_to_bson(req_args["document"])
       Mongo::ClientBulk::InsertOne.new(ns, doc)
     elsif req["updateOne"]?
       req_args = req["updateOne"]
       Mongo::ClientBulk::UpdateOne.new(
         req_args["namespace"].as_s,
-        BSON.from_json(req_args["filter"].to_json),
+        json_to_bson(req_args["filter"]),
         parse_update_arg(req_args["update"]),
         upsert: req_args["upsert"]?.try(&.as_bool),
-        collation: req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) },
-        hint: req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) },
-        array_filters: req_args["arrayFilters"]?.try { |af| af.as_a.map { |f_el| BSON.from_json(f_el.to_json) } },
-        sort: req_args["sort"]?.try { |s| BSON.from_json(s.to_json) },
+        collation: req_args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) },
+        hint: req_args["hint"]?.try { |h| h.as_s? || json_to_bson(h) },
+        array_filters: req_args["arrayFilters"]?.try { |af| af.as_a.map { |f_el| json_to_bson(f_el) } },
+        sort: req_args["sort"]?.try { |s| json_to_bson(s) },
       )
     elsif req["updateMany"]?
       req_args = req["updateMany"]
       Mongo::ClientBulk::UpdateMany.new(
         req_args["namespace"].as_s,
-        BSON.from_json(req_args["filter"].to_json),
+        json_to_bson(req_args["filter"]),
         parse_update_arg(req_args["update"]),
         upsert: req_args["upsert"]?.try(&.as_bool),
-        collation: req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) },
-        hint: req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) },
-        array_filters: req_args["arrayFilters"]?.try { |af| af.as_a.map { |f_el| BSON.from_json(f_el.to_json) } },
+        collation: req_args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) },
+        hint: req_args["hint"]?.try { |h| h.as_s? || json_to_bson(h) },
+        array_filters: req_args["arrayFilters"]?.try { |af| af.as_a.map { |f_el| json_to_bson(f_el) } },
       )
     elsif req["replaceOne"]?
       req_args = req["replaceOne"]
       Mongo::ClientBulk::ReplaceOne.new(
         req_args["namespace"].as_s,
-        BSON.from_json(req_args["filter"].to_json),
-        BSON.from_json(req_args["replacement"].to_json),
+        json_to_bson(req_args["filter"]),
+        json_to_bson(req_args["replacement"]),
         upsert: req_args["upsert"]?.try(&.as_bool),
-        collation: req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) },
-        hint: req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) },
-        sort: req_args["sort"]?.try { |s| BSON.from_json(s.to_json) },
+        collation: req_args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) },
+        hint: req_args["hint"]?.try { |h| h.as_s? || json_to_bson(h) },
+        sort: req_args["sort"]?.try { |s| json_to_bson(s) },
       )
     elsif req["deleteOne"]?
       req_args = req["deleteOne"]
       Mongo::ClientBulk::DeleteOne.new(
         req_args["namespace"].as_s,
-        BSON.from_json(req_args["filter"].to_json),
-        collation: req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) },
-        hint: req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) },
+        json_to_bson(req_args["filter"]),
+        collation: req_args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) },
+        hint: req_args["hint"]?.try { |h| h.as_s? || json_to_bson(h) },
       )
     elsif req["deleteMany"]?
       req_args = req["deleteMany"]
       Mongo::ClientBulk::DeleteMany.new(
         req_args["namespace"].as_s,
-        BSON.from_json(req_args["filter"].to_json),
-        collation: req_args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) },
-        hint: req_args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) },
+        json_to_bson(req_args["filter"]),
+        collation: req_args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) },
+        hint: req_args["hint"]?.try { |h| h.as_s? || json_to_bson(h) },
       )
     else
       raise "Unsupported clientBulkWrite model type"
@@ -1304,7 +1310,7 @@ module Mongo::Unified::Operations
     source = IO::Memory.new(hex_bytes(args["source"]))
     id = args["id"]? ? json_to_bson_value(args["id"]) : nil
     chunk = args["chunkSizeBytes"]?.try { |v| v.as_i? || v.as_i64?.try(&.to_i32) }
-    metadata = args["metadata"]?.try { |m| BSON.from_json(m.to_json) }
+    metadata = args["metadata"]?.try { |m| json_to_bson(m) }
     bucket.upload_from_stream(filename, source, id: id, chunk_size_bytes: chunk, metadata: metadata, timeout_ms: op_timeout_ms(args))
   end
 
@@ -1383,21 +1389,21 @@ module Mongo::Unified::Operations
     projection = nil; max = nil; min = nil
     return_key = nil; show_record_id = nil
     if args
-      filter = BSON.from_json(args["filter"].to_json) if args["filter"]?
-      sort = BSON.from_json(args["sort"].to_json) if args["sort"]?
+      filter = json_to_bson(args["filter"]) if args["filter"]?
+      sort = json_to_bson(args["sort"]) if args["sort"]?
       skip = args["skip"]?.try(&.as_i)
       limit = args["limit"]?.try(&.as_i)
       batch_size = args["batchSize"]?.try(&.as_i)
-      collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(BSON.from_json(c.to_json)) }
-      hint = args["hint"]?.try { |h| h.as_s? || BSON.from_json(h.to_json) }
+      collation = args["collation"]?.try { |c| Mongo::Collation.from_bson(json_to_bson(c)) }
+      hint = args["hint"]?.try { |h| h.as_s? || json_to_bson(h) }
       allow_disk_use = args["allowDiskUse"]?.try(&.as_bool)
       max_time_ms = args["maxTimeMS"]?.try(&.as_i64) || args["maxAwaitTimeMS"]?.try(&.as_i64)
       comment = args["comment"]?.try { |c| json_to_bson_value(c) }
       tailable = args["tailable"]?.try(&.as_bool)
       await_data = args["awaitData"]?.try(&.as_bool)
-      projection = BSON.from_json(args["projection"].to_json) if args["projection"]?
-      max = BSON.from_json(args["max"].to_json) if args["max"]?
-      min = BSON.from_json(args["min"].to_json) if args["min"]?
+      projection = json_to_bson(args["projection"]) if args["projection"]?
+      max = json_to_bson(args["max"]) if args["max"]?
+      min = json_to_bson(args["min"]) if args["min"]?
       return_key = args["returnKey"]?.try(&.as_bool)
       show_record_id = args["showRecordId"]?.try(&.as_bool)
       case args["cursorType"]?.try(&.as_s?)
@@ -1428,6 +1434,155 @@ module Mongo::Unified::Operations
       s.hexbytes
     else
       raise "Missing GridFS source bytes"
+    end
+  end
+
+  # UTF encrypt / decrypt. Keep BSON binary subtype (0x06 ciphertext, 0x04 key id).
+  private def execute_encrypt(args, target)
+    raise "Missing arguments" unless args
+    enc = target.as(Mongo::ClientEncryption)
+    opts = args["opts"]? || args
+    algorithm = opts["algorithm"].as_s
+    key_id = opts["keyId"]?.try { |v| json_to_uuid_binary(v) }
+    key_alt_name = opts["keyAltName"]?.try(&.as_s?)
+    enc.encrypt(json_to_typed_bson(args["value"]), algorithm: algorithm, key_id: key_id, key_alt_name: key_alt_name)
+  end
+
+  private def execute_decrypt(args, target)
+    raise "Missing arguments" unless args
+    target.as(Mongo::ClientEncryption).decrypt(json_to_encrypted_binary(args["value"]))
+  end
+
+  private def execute_create_data_key(args, target)
+    raise "Missing arguments" unless args
+    kms_provider = args["kmsProvider"].as_s
+    unless Csfle.local_provider?(kms_provider)
+      raise Skip.new("cloud KMS #{kms_provider}")
+    end
+    enc = target.as(Mongo::ClientEncryption)
+    opts = args["opts"]?
+    names = opts.try(&.["keyAltNames"]?).try(&.as_a?).try(&.map(&.as_s))
+    material = opts.try(&.["keyMaterial"]?).try { |v|
+      val = json_to_typed_bson(v)
+      val.as?(BSON::Binary)
+    }
+    master = opts.try(&.["masterKey"]?).try { |v| json_to_bson(v) }
+    enc.create_data_key(kms_provider, key_alt_names: names, key_material: material, master_key: master)
+  end
+
+  private def execute_rewrap_many_data_key(args, target)
+    raise "Missing arguments" unless args
+    enc = target.as(Mongo::ClientEncryption)
+    opts = args["opts"]?
+    provider = opts.try(&.["provider"]?).try(&.as_s?)
+    if name = provider
+      unless Csfle.local_provider?(name)
+        raise Skip.new("cloud KMS #{name}")
+      end
+    else
+      # No provider: rewrap with each key's current KMS (often AWS/Azure/GCP).
+      raise Skip.new("cloud KMS (rewrap with current provider)")
+    end
+    filter = args["filter"]? ? json_to_bson(args["filter"]) : BSON.new
+    master = opts.try(&.["masterKey"]?).try { |v| json_to_bson(v) }
+    result = begin
+      enc.rewrap_many_data_key(filter, provider: provider, master_key: master)
+    rescue ex : Mongo::Error::Crypt
+      msg = ex.message || ""
+      if msg.includes?("KMS HTTP") || msg.includes?("not configured") || msg.includes?("KMS provider")
+        raise Skip.new("cloud KMS (decrypt existing cloud data keys)")
+      end
+      raise ex
+    end
+    utf_rewrap_result(result)
+  end
+
+  private def utf_rewrap_result(result : Mongo::ClientEncryption::RewrapManyDataKeyResult)
+    bw = result.bulk_write_result
+    unless bw
+      return BSON.new
+    end
+    BSON.build do |bson|
+      bson.document("bulkWriteResult") do
+        bson["insertedCount"] = bw.n_inserted
+        bson["matchedCount"] = bw.n_matched
+        bson["modifiedCount"] = bw.n_modified
+        bson["deletedCount"] = bw.n_removed
+        bson["upsertedCount"] = bw.n_upserted
+        bson.document("upsertedIds") { }
+      end
+    end
+  end
+
+  private def execute_get_key(args, target)
+    raise "Missing arguments" unless args
+    target.as(Mongo::ClientEncryption).get_key(json_to_uuid_binary(args["id"]))
+  end
+
+  private def execute_get_keys(target)
+    target.as(Mongo::ClientEncryption).get_keys
+  end
+
+  private def execute_delete_key(args, target)
+    raise "Missing arguments" unless args
+    result = target.as(Mongo::ClientEncryption).delete_key(json_to_uuid_binary(args["id"]))
+    {"deletedCount" => result.try(&.n) || 0}
+  end
+
+  private def execute_add_key_alt_name(args, target)
+    raise "Missing arguments" unless args
+    target.as(Mongo::ClientEncryption).add_key_alt_name(
+      json_to_uuid_binary(args["id"]),
+      args["keyAltName"].as_s
+    )
+  end
+
+  private def execute_remove_key_alt_name(args, target)
+    raise "Missing arguments" unless args
+    target.as(Mongo::ClientEncryption).remove_key_alt_name(
+      json_to_uuid_binary(args["id"]),
+      args["keyAltName"].as_s
+    )
+  end
+
+  private def execute_get_key_by_alt_name(args, target)
+    raise "Missing arguments" unless args
+    target.as(Mongo::ClientEncryption).get_key_by_alt_name(args["keyAltName"].as_s)
+  end
+
+  # Walk one wrapped field so binary subtype is not lost (`BSON#[]` returns Bytes).
+  private def json_to_typed_bson(json : JSON::Any)
+    doc = json_to_bson(JSON::Any.new({"v" => json}))
+    doc.each do |key, value, code, subtype|
+      next unless key == "v"
+      if code.binary? && value.is_a?(Bytes)
+        st = subtype || BSON::Binary::SubType::Generic
+        return BSON::Binary.new(st, value.clone)
+      end
+      return value
+    end
+    json_to_bson_value(json)
+  end
+
+  private def json_to_encrypted_binary(json : JSON::Any) : BSON::Binary
+    val = json_to_typed_bson(json)
+    if val.is_a?(BSON::Binary)
+      return val
+    end
+    raise Exception.new("decrypt value must be BSON binary")
+  end
+
+  private def json_to_uuid_binary(json : JSON::Any) : BSON::Binary
+    val = json_to_typed_bson(json)
+    case val
+    when BSON::Binary
+      val
+    when UUID
+      BSON::Binary.new(val)
+    when Bytes
+      BSON::Binary.new(BSON::Binary::SubType::UUID, val)
+    else
+      raise Exception.new("keyId must be UUID binary")
     end
   end
 end

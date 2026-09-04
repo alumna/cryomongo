@@ -48,6 +48,17 @@ jobs:
           sudo apt-get install -y libzstd-dev libmongocrypt-dev
           shards install
 
+      - name: Cache crypt_shared
+        uses: actions/cache@v4
+        with:
+          path: tmp/mongo_crypt_v1.so
+          key: crypt-shared-8.0.29-linux-x86_64-ubuntu2404
+
+      - name: Download crypt_shared
+        run: |
+          scripts/download-crypt-shared.sh
+          echo "CRYPT_SHARED_LIB_PATH=${PWD}/tmp/mongo_crypt_v1.so" >> "$GITHUB_ENV"
+
       - name: Run Specs
         env:
           TOPOLOGY: ${{ matrix.topology }}

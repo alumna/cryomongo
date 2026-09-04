@@ -2,24 +2,67 @@
 
 ## Unreleased
 
+Client-Side Field Level Encryption (CSFLE)
+
 ### Added
 - Explicit client-side encryption (`Mongo::ClientEncryption`), local KMS only
   - System `libmongocrypt` bindings (`pkg-config`; link `-lmongocrypt` only)
   - `create_data_key`, `encrypt`, `decrypt`
+  - Key vault: `get_key`, `get_keys`, `delete_key`,
+    `add_key_alt_name`, `remove_key_alt_name`, `get_key_by_alt_name`
+  - `rewrap_many_data_key` (local KMS; empty match has no `bulkWriteResult`)
   - Encrypted values are BSON binary subtype `0x06`
   - Compile `-Dwithout_libmongocrypt` skips the link; the type then raises
   - Specs skip the live encrypt path when the library is missing
   - GitHub CI installs `libmongocrypt-dev` so that spec runs
+- Auto-encryption on `Mongo::Client` (`Mongo::AutoEncryption`, FLE1 `schemaMap`)
+  - Local KMS only; crypt_shared (`mongo_crypt_v1.so`) for query analysis
+  - `extraOptions.cryptSharedLibPath` or `CRYPT_SHARED_LIB_PATH`
+  - Insert / find / update / delete encrypt marked fields and decrypt results
+  - Key-vault commands bypass auto-encryption (no deadlock)
+  - Specs skip when libmongocrypt or crypt_shared is missing
+  - GitHub CI downloads crypt_shared (does not commit the `.so`)
+  - mongocryptd is not spawned
+  - `bypass_query_analysis` skips crypt_shared (writes still encrypt from the map)
+- Queryable Encryption on `Mongo::Client` (`encryptedFieldsMap`, MongoDB 8.0 equality)
+  - `Mongo::AutoEncryption.new(..., encrypted_fields_map:)`
+  - `ClientEncryption#create_encrypted_collection` (null `keyId` → data key)
+  - `Database#create_collection` creates ESC / ECOC and `__safeContent__`
+  - `Collection#compact_structured_encryption_data` (auto-encryption fills tokens)
+  - Specs skip when libmongocrypt or crypt_shared is missing
+  - Queryable Encryption collections need a replica set or sharded cluster
+  - MongoDB 8.0 range is in the official UTF slice
+  - Prefix / suffix / substring and MongoDB 8.2+ stay out
+- First official CSFLE unified batch (local KMS, MongoDB 8.0)
+  - Copied: `localKMS`, `namedKMS`, `namedKMS-explicit`, `keyCache`,
+    `create-and-createIndexes`, `fle2v2-InsertFind-Indexed`
+  - UTF `clientEncryption` entity; `encrypt` / `decrypt` ops
+  - UTF client `autoEncryptOpts` (schemaMap, encryptedFieldsMap, extraOptions)
+  - Named local KMS (`local:name`); master key may be base64
+  - `key_expiration_ms` on `ClientEncryption` and `AutoEncryption`
+- Rest of official CSFLE UTF that can run on MongoDB 8.0 + local KMS (Wave 25)
+  - 71 more files (key vault, FLE1 local validator, QE equality, QE range)
+  - UTF ops: `createDataKey`, `rewrapManyDataKey`, key-vault helpers
+  - UTF relaxed JSON integers that fit in Int32 are Int32
+  - UTF `initialData` insert uses `bypassDocumentValidation`
+  - Auto-encryption: `bypass_query_analysis`
+  - Client `bulkWrite` collinfo on the op database (`mongo_db`)
+  - Cloud KMS / 8.2+ text files are leftover with reasons
 
 ### Fixed
 - Do not call `mongocrypt_destroy` from `ClientEncryption` GC finalize
   - Finalize runs during `GC_malloc`; libmongocrypt uses libc free
   - GitHub four-topology CI crashed (double free / SIGSEGV)
+- `Insert.with_ids` keeps BSON binary subtype when it generates `_id`
+  - `[]=` of `Bytes` wrote generic `0x00` and dropped FLE `0x06`
 
 ### Changed
 - **docs:** Phase 4 (CSFLE) is Waves 21–25.
   Wave 21 is bindings plus explicit local KMS.
-  Auto-encryption is Wave 22.
+  Wave 22 is auto-encryption (`schemaMap`).
+  Wave 23 is Queryable Encryption (`encryptedFieldsMap`, 8.0 equality).
+  Official CSFLE tests are Waves 24–25 (local KMS + 8.0 done;
+  leftover is cloud KMS and 8.2+ text).
   Adapter CI four-topology matrix is Wave 20.
   Phase 3.14 (performance) is later and is not in those waves.
 
