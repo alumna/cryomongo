@@ -39,6 +39,12 @@ on:
 
 jobs:
   tests:
+    # Wave 41. GitHub default job timeout is 6 hours. PR 37 run
+    # 33920568333: ubuntu-24.04-arm sharded hung in Run Specs past
+    # 60 min with no utf-timing artifact. Honest macos-26 sharded
+    # wall is ~24 min. 45 min kills a hang and still fits that cell.
+    # Do not use 25 min. Do not Linux-only.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -157,6 +163,8 @@ jobs:
           if-no-files-found: ignore
 
   tests-macos:
+    # Same 45 min cap as Linux (Wave 41). macos-26 sharded is ~24 min.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:

@@ -7,6 +7,11 @@ struct Mongo::Messages::OpReply < Mongo::Messages::Part
   @[Field(ignore: true)]
   @op_code : OpCode = OpCode::Reply
 
+  # Same GC root as OpMsg: keep the owned receive copy while documents
+  # are BSON.view interior slices. Outgoing replies leave this nil.
+  @[Field(ignore: true)]
+  @frame : Bytes? = nil
+
   @[Flags]
   enum ResponseFlags : Int32
     CursorNotFound
@@ -19,7 +24,14 @@ struct Mongo::Messages::OpReply < Mongo::Messages::Part
   getter cursor_id : Int64
   getter starting_from : Int32
   getter number_returned : Int32
-  getter documents : Array(BSON)
+
+  def documents : Array(BSON)
+    pin = @frame
+    docs = @documents
+    # Load @frame so the compiler keeps the GC root on this struct.
+    pin.try(&.size)
+    docs
+  end
 
   def initialize(
     @response_flags,
@@ -43,9 +55,11 @@ struct Mongo::Messages::OpReply < Mongo::Messages::Part
     initialize(Messages::BufferPool.copy_and_checkin(msg_bytes, size), header, used: size)
   end
 
-  # *msg_bytes* must stay valid for the life of this message. Do not checkin
-  # here (the IO path already returned the staging buffer after the copy).
+  # *msg_bytes* must stay valid for the life of this message. Store it in
+  # @frame so Darwin GC keeps the base pointer. Do not checkin here (the IO
+  # path already returned the staging buffer after the copy).
   def initialize(msg_bytes : Bytes, header : Messages::Header, used : Int32 = msg_bytes.size)
+    @frame = msg_bytes
     view_bytes = msg_bytes[0, used]
     msg_view = IO::Memory.new(view_bytes, writable: false)
 

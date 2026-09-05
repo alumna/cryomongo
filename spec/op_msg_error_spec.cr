@@ -214,6 +214,24 @@ describe Mongo::Messages::OpMsg do
     end
   end
 
+  # Wave 42: copy-then-checkin is not enough if the owned Bytes is only a
+  # local. Darwin GC can free that allocation while error? walks interior
+  # BSON.view slices. @frame on the message keeps the base pointer.
+  it "walks error? and body after GC.collect (owned frame stays alive)" do
+    ok_msg = parse_op_msg_via_pool(ok1_with_topology)
+    err_doc = BSON.build do |b|
+      b["ok"] = 0.0
+      b["errmsg"] = "failed"
+      b["code"] = 123
+      b.document("errInfo") { b["reason"] = "nested" }
+    end
+    err_msg = parse_op_msg_via_pool(err_doc)
+    32.times { Bytes.new(16_384) }
+    GC.collect
+    walk_op_msg_error(ok_msg, false)
+    walk_op_msg_error(err_msg, true)
+  end
+
   it "reuses BufferPool-sized receive buffers for error?" do
     doc = BSON.new({"ok" => 1.0})
     n = Mongo::Messages::BufferPool::POOL_SIZE * 4
@@ -296,6 +314,27 @@ describe Mongo::Messages::OpReply do
     body = serialize_op_reply([nested])
     msg = Mongo::Messages::OpReply.new(IO::Memory.new(body), op_reply_header(body.size))
     scribble_pooled_buffers
+    first = msg.documents.first?
+    first.should_not be_nil
+    if first
+      first["ok"].should eq 1.0
+      cursor = first["cursor"]?
+      cursor.should be_a(BSON)
+      if cursor.is_a?(BSON)
+        cursor["id"].should eq 0_i64
+      end
+    end
+  end
+
+  it "walks documents after GC.collect (owned frame stays alive)" do
+    nested = BSON.build do |b|
+      b["ok"] = 1.0
+      b.document("cursor") { b["id"] = 0_i64 }
+    end
+    body = serialize_op_reply([nested])
+    msg = Mongo::Messages::OpReply.new(IO::Memory.new(body), op_reply_header(body.size))
+    32.times { Bytes.new(16_384) }
+    GC.collect
     first = msg.documents.first?
     first.should_not be_nil
     if first

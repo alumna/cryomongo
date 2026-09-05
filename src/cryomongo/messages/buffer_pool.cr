@@ -1,8 +1,10 @@
 # Reusable receive staging buffers. Socket code checkouts, reads, copies
 # *used* bytes, then checkins (copy_and_checkin). Parse BSON.view of the
 # copy only. Nested []? must not alias a buffer another fiber can overwrite
-# after checkin (preview_mt). Failed reads also return the buffer.
-# Compression inflate uses its own Bytes and does not use this pool.
+# after checkin (preview_mt). OpMsg / OpReply keep that copy as a field so
+# Darwin GC cannot free it while error? walks interior views. Failed reads
+# also return the buffer. Compression inflate uses its own Bytes and does
+# not use this pool.
 module Mongo::Messages::BufferPool
   extend self
 
@@ -36,6 +38,7 @@ module Mongo::Messages::BufferPool
   # One memcpy of the frame, then the staging buffer goes back to the pool.
   # Same copy cost as the old per-document own_payload clone. Do not checkin
   # the returned slice (that would let a later checkout overwrite views).
+  # The message must store this slice so the base pointer stays a GC root.
   def copy_and_checkin(pool_buf : Bytes, used : Int32) : Bytes
     begin
       owned = Bytes.new(used)

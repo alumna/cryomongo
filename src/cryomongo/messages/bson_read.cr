@@ -1,5 +1,7 @@
 # Read a BSON document as a view of an already-read message buffer.
-# The slice stays valid while *buffer* (or a view into it) is alive.
+# The slice stays valid while *buffer* is alive. OpMsg / OpReply store that
+# buffer on the message (Darwin GC needs the base pointer, not only these
+# interior views).
 module Mongo::Messages
   def self.read_bson_view(buffer : Bytes, io : IO::Memory) : BSON
     pos = io.pos

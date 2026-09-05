@@ -621,8 +621,9 @@ class Mongo::Client
   end
 
   # SDAM application error: ignore stale generation / topologyVersion so two
-  # concurrent shutdowns emit one Unknown and one poolClearedEvent. Pool clear
-  # stays under the topology lock (SDAM spec).
+  # concurrent shutdowns emit one Unknown and one poolClearedEvent. Equal TV
+  # still marks Unknown while the type is Primary. Pool clear stays under
+  # the topology lock (SDAM spec).
   private def handle_application_error(
     server_description : SDAM::ServerDescription?,
     connection : Mongo::Connection?,

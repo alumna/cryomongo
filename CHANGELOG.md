@@ -69,6 +69,11 @@ Client-Side Field Level Encryption (CSFLE)
     ok:1 hello in `error?`. `BSON.new(BSON)` is a no-op
   - Command / CommandWrite / WriteConcern still `BSON.new(bytes)` for
     nested docs stored on the error
+- OP_MSG / OP_REPLY keep the owned receive copy on the message (`@frame`)
+  - `BSON.view` interior slices are not a Darwin GC root
+  - macos-26 standalone SIGBUS in `error?` after copy-then-checkin
+  - Do not clone every ok:1 hello. Do not checkin the owned copy
+  - `BSON.new(BSON)` is a no-op
 - Darwin CSOT: wait for timeoutMS in short socket slices so a kqueue
   `IO::TimeoutError` does not win before the CSOT deadline
   (getMore / bulkWrite / GridFS UTF). Do not lengthen official waits.
@@ -83,6 +88,28 @@ Client-Side Field Level Encryption (CSFLE)
 - Darwin CSOT leftover: 10ms socket slices on Darwin so a premature
   kqueue timeout does not burn 100ms of timeoutMS before getMore /
   the 3rd insert. Linux stays at 100ms. Do not lengthen official waits.
+- Darwin CSOT leftover: do not `Fiber.yield` after a slice timeout
+  - `Fiber.yield` is `EventLoop.sleep(0)`; Darwin treats 0 as now
+  - That wait burned leftover timeoutMS so the 2nd find / getMore /
+    3rd insert never started (`timeoutMS` 75 / `blockTimeMS` 50)
+  - When leftover is already 0, still try one read (bytes may already
+    be in the kernel). Do not lengthen official waits. Linux stays
+    at 100ms slices.
+- Concurrent insert shutdown still marks Unknown when a streaming
+  hello publishes the same topologyVersion while the server is still
+  Primary (Darwin command slices vs one monitor wait;
+  `insert-shutdown-error`)
+  - Equal TV stays stale after Unknown or a new replica-set role
+  - Do not drop `wrap_connect_deadline`
+- AwaitData getMore uses a refreshed timeoutMS for each next()
+  (not leftover from find)
+  - After find (timeoutMS 250, failPoint 150) leftover is ~100ms
+  - A blocked getMore then times out or returns empty and next()
+    sends another getMore
+  - If leftover is nil, the socket wait never ends
+  - Empty tailable getMore still expires that next() leftover
+  - Do not start a new timeoutMS per getMore
+  - Linux without CSOT stays a single socket wait
 - `connectTimeoutMS=0` passes nil into `TCPSocket` (Crystal `0` is
   immediate on Darwin kqueue)
 - GitHub macOS `tls_spec` uses Homebrew openssl@3 (PATH and pkg-config)
@@ -124,6 +151,10 @@ Client-Side Field Level Encryption (CSFLE)
   Windows GitHub is leftover: the driver does not compile (`LibC::SHUT_RDWR`,
   zstd.cr bash `pkg-libs.sh`, no `mongocrypt.lib` in the 1.20.4 tarball).
   `windows-11-arm` has no libmongocrypt 1.20.4 tarball.
+- GitHub Specs jobs (`tests` and `tests-macos`) use
+  `timeout-minutes: 45` (Wave 41)
+  - Honest macos-26 sharded wall is ~24 min
+  - A hung cell must not run for GitHub's 6 hour default
 - `scripts/download-crypt-shared.sh` picks linux **x86_64** or **aarch64**
   and ubuntu2204 (22.04) or ubuntu2404 (24.04 and 26.04), plus official
   macos **arm64** / **x86_64** `.dylib` and windows x86_64 `.zip`. Official
@@ -147,6 +178,10 @@ Client-Side Field Level Encryption (CSFLE)
   (drop `enxcol_.*` only when encryptedFields is set).
   Wave 36 prefers Homebrew openssl@3 on macos-15 `tls_spec`
   (`rsa -traditional`; pkg-config openssl there is 1.1).
+  Wave 41 caps Specs jobs at 45 minutes (`timeout-minutes`)
+  so a hung cell cannot run for GitHub's 6 hour default.
+  Wave 42 keeps the owned OP_MSG / OP_REPLY receive copy on the
+  message so Darwin GC cannot free it while `error?` walks views.
   Windows GitHub is leftover (driver does not compile).
   Adapter CI four-topology matrix is Wave 20.
   Phase 3.14 (performance) is later and is not in those waves.
