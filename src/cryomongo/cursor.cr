@@ -107,6 +107,9 @@ class Mongo::Cursor
   def next
     owns_iteration = start_iteration_deadline
     begin
+      {% if flag?(:darwin) %}
+        empty_await_get_mores = 0
+      {% end %}
       loop do
         if (limit = @limit) && @yielded >= limit
           return Iterator::Stop::INSTANCE
@@ -138,13 +141,17 @@ class Mongo::Cursor
         if @tailable && batch_empty?
           check_iteration_expired!
           {% if flag?(:darwin) %}
-            # Darwin find awaitData: one empty getMore then stop. Leftover 0
-            # already expired above. Looping while leftover remains sent a
-            # second getMore (got 3). Linux still loops until leftover
-            # expires (official two-getMore then Timeout). Change streams
-            # keep looping (empty getMores until an event).
+            # Darwin find awaitData: two empty getMores then stop. Leftover 0
+            # already expired above. One empty then stop closed got-3 and
+            # broke official refresh (timeoutMS 250, maxAwaitTimeMS 1,
+            # failPoint 150): the blocked getMore can be empty, the next
+            # getMore has the document. A third getMore was got-3. Linux
+            # still loops until leftover expires. Change streams keep looping.
             if stop_after_empty_await_get_more?
-              raise Mongo::Error::Timeout.new("Operation exceeded timeoutMS")
+              empty_await_get_mores += 1
+              if empty_await_get_mores >= 2
+                raise Mongo::Error::Timeout.new("Operation exceeded timeoutMS")
+              end
             end
           {% end %}
         end
@@ -336,6 +343,7 @@ class Mongo::Cursor
 
   # Darwin find awaitData only. Linux compiles this out of next() so the
   # empty-expire loop and get_more_deadline stay as they are.
+  # next() stops after two empty awaitData getMores (not one).
   # ChangeStream::Cursor returns false (idle empty getMores must wait).
   protected def stop_after_empty_await_get_more? : Bool
     {% if flag?(:darwin) %}

@@ -7,8 +7,10 @@ require "./spec_helper"
 # Bytes? on the OpMsg struct is not a Darwin GC root. Wave 47 OwnedReceive
 # on that struct is not enough on Darwin (`33968324194` macos-15 standalone
 # still error?+1604). Receive OpMsg / OpReply / Message are classes
-# (Wave 52). Keep scribble / pool / concurrent / GC.collect walks.
-# GC.collect on Linux is not Darwin proof.
+# (Wave 52). Wave 55: a pin only in ensure is dropped (ubuntu-26.04
+# SIGSEGV at error? during create_data_key insert). Keep scribble / pool
+# / concurrent / GC.collect / Message-drop walks. GC.collect on Linux is
+# not the GitHub ubuntu-26.04 proof.
 
 private def serialize_op_msg(doc : BSON) : Bytes
   msg = Mongo::Messages::OpMsg.new(doc)
@@ -116,6 +118,17 @@ private def walk_op_msg_error(msg : Mongo::Messages::OpMsg, expect_command : Boo
     counter = tv["counter"]
     raise "expected counter 1, got #{counter.inspect}" unless counter == 1_i64
   end
+end
+
+# GitHub ubuntu-26.04 crash site: create_data_key insert_one reply is
+# ok:1 with n (no topologyVersion required). Walk error? then body.
+private def walk_insert_reply(msg : Mongo::Messages::OpMsg) : Nil
+  err = msg.error?
+  raise "expected no error, got #{err.inspect}" if err
+  ok = msg.body["ok"]
+  raise "expected ok 1.0, got #{ok.inspect}" unless ok == 1.0
+  n = msg.body["n"]?
+  raise "expected n 1, got #{n.inspect}" unless n == 1
 end
 
 describe Mongo::Messages::OpMsg do
@@ -264,6 +277,63 @@ describe Mongo::Messages::OpMsg do
     GC.collect
     walk_op_msg_error(ok_msg, false)
     walk_op_msg_error(err_msg, true)
+  end
+
+  # Wave 55: ubuntu-26.04 SIGSEGV at error?+1999 during create_data_key
+  # insert_one (run 33978516578). Same []? walk as ok:1 insert. A pin
+  # only in ensure is not enough. Concurrent GC.collect plus Message
+  # drop is the local stress. GitHub is the real proof.
+  it "walks insert-shaped error? while another fiber runs GC.collect" do
+    insert_doc = BSON.build do |b|
+      b["ok"] = 1.0
+      b["n"] = 1
+    end
+    err_doc = BSON.build do |b|
+      b["ok"] = 0.0
+      b["errmsg"] = "failed"
+      b["code"] = 123
+      b.document("errInfo") { b["reason"] = "nested" }
+    end
+    n = Mongo::Messages::BufferPool::POOL_SIZE * 4
+
+    stop = Channel(Nil).new(1)
+    started = Channel(Nil).new(1)
+    stopped = Channel(Nil).new(1)
+    spawn do
+      started.send(nil)
+      loop do
+        select
+        when stop.receive
+          break
+        else
+          8.times { Bytes.new(16_384) }
+          GC.collect
+          Fiber.yield
+        end
+      end
+      stopped.send(nil)
+    end
+    started.receive
+
+    failures = Channel(Exception?).new(1)
+    spawn do
+      begin
+        n.times do
+          ok_msg = parse_op_msg_via_message_drop(insert_doc)
+          walk_insert_reply(ok_msg)
+          err_msg = parse_op_msg_via_message_drop(err_doc)
+          walk_op_msg_error(err_msg, true)
+        end
+        failures.send(nil)
+      rescue e
+        failures.send(e)
+      end
+    end
+
+    result = failures.receive
+    stop.send(nil)
+    stopped.receive
+    result.should be_nil
   end
 
   it "reuses BufferPool-sized receive buffers for error?" do

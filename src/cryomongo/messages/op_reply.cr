@@ -5,7 +5,8 @@ require "./owned_receive"
 
 # The OP_REPLY message is sent by the database in response to an OP_QUERY or OP_GET_MORE message.
 # Class, same as OpMsg: receive copies this out of Message. A class field
-# on a struct is not a Darwin GC root (Wave 47).
+# on a struct is not a Darwin GC root (Wave 47). Wave 55: documents are
+# viewed through OwnedReceive#view (pin.bytes), not only an ensure pin.
 class Mongo::Messages::OpReply < Mongo::Messages::Part
   @[Field(ignore: true)]
   @op_code : OpCode = OpCode::Reply
@@ -33,9 +34,16 @@ class Mongo::Messages::OpReply < Mongo::Messages::Part
   def documents : Array(BSON)
     pin = @frame
     docs = @documents
-    # Keep the heap owner in the live range. A class field on a struct
-    # is not enough on Darwin (Wave 47). This OpReply is a class.
-    pin.try(&.bytes.size)
+    return docs unless owner = pin
+    # Re-view each doc from pin.bytes so the owner stays a GC root
+    # (Wave 55). A pin only in ensure is dropped. Same slices, no
+    # second array.
+    i = 0
+    while i < docs.size
+      doc = docs[i]
+      docs[i] = owner.view(doc.data)
+      i += 1
+    end
     docs
   end
 
@@ -78,7 +86,8 @@ class Mongo::Messages::OpReply < Mongo::Messages::Part
     @documents = [] of BSON
 
     while msg_view.pos < used
-      @documents << Messages.read_bson_view(view_bytes, msg_view)
+      payload = Messages.read_bson_view(view_bytes, msg_view)
+      @documents << owner.view(payload.data)
     end
   end
 end

@@ -149,8 +149,8 @@ module Mongo::ChangeStream
       end
     end
 
-    # Idle empty getMores are heartbeats. Do not Darwin-stop after one empty
-    # awaitData getMore (find-cursor got-3). Keep waiting until leftover expires.
+    # Idle empty getMores are heartbeats. Do not Darwin-stop after empty
+    # awaitData getMores (find-cursor got-3). Keep waiting until leftover expires.
     protected def stop_after_empty_await_get_more? : Bool
       false
     end

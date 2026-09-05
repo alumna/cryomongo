@@ -86,6 +86,13 @@ Client-Side Field Level Encryption (CSFLE)
     on a struct is not a Darwin GC root
   - Keep copy-then-checkin and `OwnedReceive` on the class
   - Do not clone every ok:1 hello. bson.cr stays a struct
+- OP_MSG `error?` / `body` walk through `OwnedReceive#view` (`pin.bytes`)
+  - A pin only in `ensure` is dropped (Crystal 1.21 Parallel + fiber
+    thread switch). ubuntu-26.04 standalone SIGSEGV at `error?` during
+    `create_data_key` insert (`33978516578`)
+  - `SectionBody` holds the same owner class. Do not clone every ok:1
+    hello. bson.cr stays a struct. GitHub ubuntu-26.04 standalone must
+    finish the suite on the next PR 37
 - Darwin CSOT: wait for timeoutMS in short socket slices so a kqueue
   `IO::TimeoutError` does not win before the CSOT deadline
   (getMore / bulkWrite / GridFS UTF). Do not lengthen official waits.
@@ -119,12 +126,23 @@ Client-Side Field Level Encryption (CSFLE)
   - leftover 0 at wrap still raises (2nd find / update must not
     succeed). Darwin non-CSOT (`socketTimeoutMS` / handshake) still
     raises (Wave 48 Shape B)
+- Darwin CSOT leftover: leftover >0 at wrap last-reads with 1ms,
+  not wait 0
+  - Darwin kqueue treats 0 as now; Wave 53 wait 0 was empty when
+    failPoint data was still in flight (`timeoutMS` 75 /
+    `blockTimeMS` 50). 1ms is a real wait, Instant-capped once per
+    wrap so early kqueue retries. `read_greedy` may call `read`
+    more than once; `@got_data` finishes the frame in that 1ms
+  - leftover 0 at wrap still raises with no last-read. Do not wait
+    remaining leftover. Do not shorten Darwin slices. Do not
+    `Fiber.yield`
 - leftover 0 still send keeps a positive `maxTimeMS` (floor 1)
   - Do not skip `maxTimeMS`. Do not raise remaining timeoutMS <
     min RTT before that send (LB `bulkWrite` update)
-- Darwin find awaitData: one empty getMore then stop this next()
-  - Leftover 0 still expires after that getMore
-  - Looping while leftover remains sent a second getMore (got 3)
+- Darwin find awaitData: two empty getMores then stop this next()
+  - One empty then stop closed got-3 and broke official refresh
+    (`timeoutMS` 250, `maxAwaitTimeMS` 1, failPoint 150)
+  - Leftover 0 still expires after a getMore
   - Linux still loops until leftover expires (two-getMore then Timeout)
   - Change streams still loop (empty getMores until an event)
   - Do not rewrite `get_more_deadline`. getMore is not retryable

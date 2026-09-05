@@ -41,6 +41,7 @@ module Mongo::Messages::BufferPool
   # the returned slice (that would let a later checkout overwrite views).
   # The message must wrap this slice in OwnedReceive on the class.
   # Do not store only Bytes? on a struct OpMsg (Wave 42 / 47).
+  # Wave 55: the walk must use pin.bytes, not only an ensure pin.
   def copy_and_checkin(pool_buf : Bytes, used : Int32) : Bytes
     begin
       owned = Bytes.new(used)
