@@ -1,10 +1,11 @@
 # Reusable receive staging buffers. Socket code checkouts, reads, copies
 # *used* bytes, then checkins (copy_and_checkin). Parse BSON.view of the
 # copy only. Nested []? must not alias a buffer another fiber can overwrite
-# after checkin (preview_mt). OpMsg / OpReply wrap that copy in a heap
-# class (OwnedReceive). Bytes? on a struct is not a Darwin GC root
-# (Wave 42). Failed reads also return the buffer. Compression inflate
-# uses its own Bytes and does not use this pool.
+# after checkin (preview_mt). Receive OpMsg / OpReply / Message are
+# classes (Wave 52). They wrap the copy in OwnedReceive. A class field
+# on a struct OpMsg is not a Darwin GC root (Wave 47). Failed reads
+# also return the buffer. Compression inflate uses its own Bytes and
+# does not use this pool.
 module Mongo::Messages::BufferPool
   extend self
 
@@ -38,8 +39,8 @@ module Mongo::Messages::BufferPool
   # One memcpy of the frame, then the staging buffer goes back to the pool.
   # Same copy cost as the old per-document own_payload clone. Do not checkin
   # the returned slice (that would let a later checkout overwrite views).
-  # The message must wrap this slice in OwnedReceive. Do not store only
-  # Bytes? on the OpMsg struct (that is not a Darwin GC root).
+  # The message must wrap this slice in OwnedReceive on the class.
+  # Do not store only Bytes? on a struct OpMsg (Wave 42 / 47).
   def copy_and_checkin(pool_buf : Bytes, used : Int32) : Bytes
     begin
       owned = Bytes.new(used)

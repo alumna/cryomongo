@@ -1,9 +1,10 @@
 # Heap owner for an OP_MSG / OP_REPLY receive copy.
-# Bytes is a Slice struct (pointer + size). @frame : Bytes? on OpMsg /
-# OpReply (also structs) is not a Darwin GC root: LLVM can keep the struct
-# in a register, Darwin GC misses the interior pointer, and error? then
-# walks a freed BSON.view (Wave 42 SIGBUS). A class instance is a heap
-# object. A struct field that holds a class pointer is a GC root.
+# Bytes is a Slice struct (pointer + size). @frame : Bytes? on a struct
+# OpMsg is not a Darwin GC root (Wave 42). A class field on that struct
+# is not enough either (Wave 47 OwnedReceive; GitHub macos-15 standalone
+# still SIGBUS at error?+1604). Receive OpMsg / OpReply / Message are
+# classes (Wave 52) so the GC scans the object. Keep this owner on the
+# class. Do not checkin the owned copy.
 class Mongo::Messages::OwnedReceive
   getter bytes : Bytes
 

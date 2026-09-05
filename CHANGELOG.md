@@ -79,6 +79,13 @@ Client-Side Field Level Encryption (CSFLE)
   - `Bytes` is a Slice struct; `@frame : Bytes?` is not a Darwin GC root
   - macos-15 standalone SIGBUS in `error?` after Wave 42 (cells swapped)
   - Do not clone every ok:1 hello. Do not checkin the owned copy
+- OP_MSG / OP_REPLY / Message receive types are classes
+  - Wave 47 `OwnedReceive` on a struct did not close Darwin SIGBUS
+    (`33968324194` macos-15 standalone, same `error?+1604`)
+  - `Connection.receive` copies OpMsg and drops Message; a class field
+    on a struct is not a Darwin GC root
+  - Keep copy-then-checkin and `OwnedReceive` on the class
+  - Do not clone every ok:1 hello. bson.cr stays a struct
 - Darwin CSOT: wait for timeoutMS in short socket slices so a kqueue
   `IO::TimeoutError` does not win before the CSOT deadline
   (getMore / bulkWrite / GridFS UTF). Do not lengthen official waits.
@@ -97,15 +104,30 @@ Client-Side Field Level Encryption (CSFLE)
   - `Fiber.yield` is `EventLoop.sleep(0)`; Darwin treats 0 as now
   - That wait burned leftover timeoutMS so the 2nd find / getMore /
     3rd insert never started (`timeoutMS` 75 / `blockTimeMS` 50)
-- Darwin CSOT leftover: when leftover is already 0, raise
+- Darwin CSOT leftover: leftover 0 at wrap still raises
   `IO::TimeoutError` without a last successful read
   - Wave 43 last-read (`wait` 0) turned a failPoint into success
     when bytes were already in the kernel (legacy timeouts)
-  - The same last-read could finish the first find after the 75ms
-    budget, so the 2nd find / getMore / 3rd insert never started
-  - Leftover 0 still sends (deadline at first byte). The read then
+  - leftover 0 still sends (deadline at first byte). The read then
     times out. Bytes from a slice that still had leftover still
     return. Do not shorten Darwin slices. Do not `Fiber.yield`
+- Darwin CSOT leftover: last-read a command sent with leftover >0
+  even if leftover is now 0 and no byte has been returned yet
+  - Darwin first find often takes >75ms (`timeoutMS` 75 /
+    `blockTimeMS` 50). Bytes from the failPoint can sit in the
+    kernel after leftover hits 0 (`@got_data` is not enough)
+  - leftover 0 at wrap still raises (2nd find / update must not
+    succeed). Darwin non-CSOT (`socketTimeoutMS` / handshake) still
+    raises (Wave 48 Shape B)
+- leftover 0 still send keeps a positive `maxTimeMS` (floor 1)
+  - Do not skip `maxTimeMS`. Do not raise remaining timeoutMS <
+    min RTT before that send (LB `bulkWrite` update)
+- Darwin find awaitData: one empty getMore then stop this next()
+  - Leftover 0 still expires after that getMore
+  - Looping while leftover remains sent a second getMore (got 3)
+  - Linux still loops until leftover expires (two-getMore then Timeout)
+  - Change streams still loop (empty getMores until an event)
+  - Do not rewrite `get_more_deadline`. getMore is not retryable
 
 - Concurrent insert shutdown still marks Unknown when a streaming
   hello publishes the same topologyVersion while the server is still

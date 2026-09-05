@@ -67,7 +67,9 @@ struct Mongo::Deadline
 
   # maxTimeMS is remaining timeout minus the server min RTT, so the server can
   # answer MaxTimeMSExpired before the socket times out.
-  # Returns nil when the leftover time is too small to send.
+  # Returns nil when leftover is too small (including leftover 0). leftover 0
+  # still send floors to 1 in apply_csot_max_time; do not raise remaining <
+  # min RTT before that send.
   def max_time_ms(min_rtt : Time::Span) : Int64?
     return nil if infinite?
     left = remaining

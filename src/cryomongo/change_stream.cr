@@ -149,6 +149,12 @@ module Mongo::ChangeStream
       end
     end
 
+    # Idle empty getMores are heartbeats. Do not Darwin-stop after one empty
+    # awaitData getMore (find-cursor got-3). Keep waiting until leftover expires.
+    protected def stop_after_empty_await_get_more? : Bool
+      false
+    end
+
     # One getMore at most. Does not block waiting for a later change after an
     # empty batch. Use this to read the latest resume token while idle.
     def try_next : BSON?

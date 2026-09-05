@@ -4,9 +4,11 @@ require "./spec_helper"
 # checkin (UTF disable_fail_points / ConfigureFailPoint mode=off). Nested []?
 # is a BSON.view. BSON.new(BSON) does not copy. Wave 33 scribbled AFTER parse
 # on one fiber and did not prove preview_mt pool reuse. Wave 42 @frame :
-# Bytes? on the OpMsg struct is not a Darwin GC root. The owned copy lives
-# on a heap class (OwnedReceive). Keep scribble / pool / concurrent /
-# GC.collect walks. GC.collect on Linux is not Darwin proof.
+# Bytes? on the OpMsg struct is not a Darwin GC root. Wave 47 OwnedReceive
+# on that struct is not enough on Darwin (`33968324194` macos-15 standalone
+# still error?+1604). Receive OpMsg / OpReply / Message are classes
+# (Wave 52). Keep scribble / pool / concurrent / GC.collect walks.
+# GC.collect on Linux is not Darwin proof.
 
 private def serialize_op_msg(doc : BSON) : Bytes
   msg = Mongo::Messages::OpMsg.new(doc)
@@ -57,6 +59,19 @@ private def parse_op_msg_scribble(doc : BSON) : Mongo::Messages::OpMsg
   msg = parse_op_msg_via_pool(doc)
   scribble_pooled_buffers
   msg
+end
+
+# Connection.receive copies OpMsg and drops Message. Both are classes so
+# the GC scans OpMsg after Message is gone.
+private def parse_op_msg_via_message_drop(doc : BSON) : Mongo::Messages::OpMsg
+  body = serialize_op_msg(doc)
+  header = op_msg_header(body.size)
+  io = IO::Memory.new
+  header.to_io(io)
+  io.write(body)
+  io.rewind
+  message = Mongo::Messages::Message.new(io)
+  message.contents.as(Mongo::Messages::OpMsg)
 end
 
 private def serialize_op_reply(docs : Array(BSON)) : Bytes
@@ -217,9 +232,9 @@ describe Mongo::Messages::OpMsg do
     end
   end
 
-  # Wave 47: Bytes? on a struct is not a Darwin GC root (Wave 42 @frame).
-  # The owned copy lives on a heap class. copy-then-checkin is not enough
-  # if that Bytes is only a local or a Slice field on OpMsg.
+  # Wave 47: a class field on a struct OpMsg is not enough on Darwin.
+  # Wave 52: receive OpMsg is a class. copy-then-checkin is not enough
+  # if that Bytes is only a local or a Slice field on a struct.
   it "walks error? and body after GC.collect (owned frame stays alive)" do
     ok_msg = parse_op_msg_via_pool(ok1_with_topology)
     err_doc = BSON.build do |b|
@@ -229,6 +244,22 @@ describe Mongo::Messages::OpMsg do
       b.document("errInfo") { b["reason"] = "nested" }
     end
     err_msg = parse_op_msg_via_pool(err_doc)
+    32.times { Bytes.new(16_384) }
+    GC.collect
+    walk_op_msg_error(ok_msg, false)
+    walk_op_msg_error(err_msg, true)
+  end
+
+  # Same walk after Connection.receive's copy-then-drop-Message.
+  it "walks error? after Message is dropped and GC.collect" do
+    ok_msg = parse_op_msg_via_message_drop(ok1_with_topology)
+    err_doc = BSON.build do |b|
+      b["ok"] = 0.0
+      b["errmsg"] = "failed"
+      b["code"] = 123
+      b.document("errInfo") { b["reason"] = "nested" }
+    end
+    err_msg = parse_op_msg_via_message_drop(err_doc)
     32.times { Bytes.new(16_384) }
     GC.collect
     walk_op_msg_error(ok_msg, false)
@@ -329,8 +360,8 @@ describe Mongo::Messages::OpReply do
     end
   end
 
-  # Bytes? on a struct is not a Darwin GC root (Wave 42). The owned copy
-  # lives on a heap class, same as OpMsg.
+  # A class field on a struct is not enough on Darwin (Wave 47). Receive
+  # OpReply is a class, same as OpMsg.
   it "walks documents after GC.collect (owned frame stays alive)" do
     nested = BSON.build do |b|
       b["ok"] = 1.0

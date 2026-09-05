@@ -122,7 +122,8 @@ class Mongo::Cursor
         return Iterator::Stop::INSTANCE if @cursor_id == 0
 
         # Deadline at first byte: leftover 0 still sends getMore so
-        # commandStarted fires. AwaitReadIO raises on read.
+        # commandStarted fires. AwaitReadIO raises on read when leftover
+        # was already 0 at wrap.
         fetch_more
 
         # Non-tailable: an empty getMore means the result is exhausted.
@@ -136,6 +137,16 @@ class Mongo::Cursor
         # (ARM sharded hung). Do not start a new timeoutMS per getMore.
         if @tailable && batch_empty?
           check_iteration_expired!
+          {% if flag?(:darwin) %}
+            # Darwin find awaitData: one empty getMore then stop. Leftover 0
+            # already expired above. Looping while leftover remains sent a
+            # second getMore (got 3). Linux still loops until leftover
+            # expires (official two-getMore then Timeout). Change streams
+            # keep looping (empty getMores until an event).
+            if stop_after_empty_await_get_more?
+              raise Mongo::Error::Timeout.new("Operation exceeded timeoutMS")
+            end
+          {% end %}
         end
       end
     ensure
@@ -321,6 +332,17 @@ class Mongo::Cursor
     if d = @iteration_deadline || @deadline
       d.check!
     end
+  end
+
+  # Darwin find awaitData only. Linux compiles this out of next() so the
+  # empty-expire loop and get_more_deadline stay as they are.
+  # ChangeStream::Cursor returns false (idle empty getMores must wait).
+  protected def stop_after_empty_await_get_more? : Bool
+    {% if flag?(:darwin) %}
+      !@await_time_ms.nil?
+    {% else %}
+      false
+    {% end %}
   end
 
   # close() always starts a fresh timeoutMS, even if cursor lifetime already expired.

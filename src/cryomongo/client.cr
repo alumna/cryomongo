@@ -870,8 +870,8 @@ class Mongo::Client
     deadline : Mongo::Deadline?,
   ) : {Mongo::Connection, Bool}
     # Deadline at first byte: leftover 0 still checkouts so the command
-    # can be sent. AwaitReadIO raises on read. Do not apply a 0 socket
-    # wait (Crystal 0 is now on Darwin).
+    # can be sent. AwaitReadIO raises on read when leftover was already 0
+    # at wrap. Do not apply a 0 socket wait (Crystal 0 is now on Darwin).
     timeout = if d = deadline
                 if d.infinite?
                   Mongo::Connection.uri_timeout(@options.socket_timeout)

@@ -4,14 +4,17 @@ require "./op_code"
 require "./owned_receive"
 
 # OP_MSG is an extensible message format designed to subsume the functionality of other opcodes.
-struct Mongo::Messages::OpMsg < Mongo::Messages::Part
+# Class: Connection.receive copies this and drops Message. A class field on a
+# struct is not a Darwin GC root (Wave 47). Outgoing uses the same type
+# (split send/receive is not cheap: every command builds OpMsg).
+class Mongo::Messages::OpMsg < Mongo::Messages::Part
   @[Field(ignore: true)]
   getter op_code : OpCode = OpCode::Msg
 
   # Heap owner for the owned receive copy. BSON.view uses interior slices
-  # of owner.bytes. Bytes? on this struct is not a Darwin GC root (Wave 42).
-  # A class pointer is (Wave 47). Outgoing messages leave this nil.
-  # Do not serialize (OwnedReceive is not a Part field).
+  # of owner.bytes. Keep this on the class (Wave 52). A class pointer on
+  # a struct OpMsg is not enough on Darwin (Wave 47). Outgoing messages
+  # leave this nil. Do not serialize (OwnedReceive is not a Part field).
   @[Field(ignore: true)]
   @frame : OwnedReceive? = nil
 
@@ -48,16 +51,15 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
       raise error
     end
     # Copy then checkin before any BSON.view. own_payload after view still
-    # left a window: OpMsg / BSON / Part are structs, nested []? is a view,
-    # and preview_mt can overwrite the pool while error? walks body.
+    # left a window: nested []? is a view, and preview_mt can overwrite the
+    # pool while error? walks body. Receive types are classes (Wave 52).
     initialize(Messages::BufferPool.copy_and_checkin(msg_bytes, size), header, used: size)
   end
 
   # *msg_bytes* must stay valid for the life of this message. The IO path
   # passes an owned copy after checkin. Inflate / specs pass their own Bytes.
-  # Wrap that copy in OwnedReceive so Darwin GC scans a heap object, not
-  # only a Bytes? field on this struct. Do not checkin here: that would
-  # pool the copy and invalidate nested []?.
+  # Wrap that copy in OwnedReceive on this class. Do not checkin here: that
+  # would pool the copy and invalidate nested []?.
   def initialize(msg_bytes : Bytes, header : Messages::Header, used : Int32 = msg_bytes.size)
     owner = OwnedReceive.new(msg_bytes)
     @frame = owner
@@ -65,7 +67,8 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
     msg_view = IO::Memory.new(view_bytes, writable: false)
 
     @flag_bits = Flags.from_value(msg_view.read_bytes(UInt32, IO::ByteFormat::LittleEndian))
-    @sections = typeof(@sections).new
+    @sections = [] of Messages::Part
+    @checksum = nil
 
     has_checksum = @flag_bits.checksum_present?
     limit_pos = used - (has_checksum ? 4 : 0)
@@ -105,20 +108,21 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
     end
   end
 
-  struct SectionBody < Part
+  # Part is a class, so sections must be classes too.
+  class SectionBody < Part
     getter payload_type : UInt8 = 0_u8
     getter payload : BSON
 
     def initialize(@payload : BSON); end
   end
 
-  struct SectionDocumentSequence < Part
+  class SectionDocumentSequence < Part
     getter payload_type : UInt8 = 1_u8
     getter payload : SectionPayload
 
     def initialize(@payload : SectionPayload); end
 
-    struct SectionPayload < Part
+    class SectionPayload < Part
       getter sequence_size : Int32 = 0
       getter sequence_identifier : String
       getter contents : Array(BSON)
@@ -136,8 +140,8 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
     end
     raise Mongo::Error.new("Invalid OP_MSG: Missing body section")
   ensure
-    # Keep the heap owner in the live range. Bytes? on this struct is not
-    # a Darwin GC root (Wave 42). A class pointer is (Wave 47).
+    # Keep the heap owner in the live range. A class field on a struct
+    # OpMsg is not enough on Darwin (Wave 47). This OpMsg is a class.
     pin.try(&.bytes.size)
   end
 

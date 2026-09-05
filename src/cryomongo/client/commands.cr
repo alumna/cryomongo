@@ -227,8 +227,9 @@ class Mongo::Client
     wrapped_csot_io = false
 
     # Deadline at first byte: leftover 0 still sends so commandStarted
-    # fires (2nd find / getMore / 3rd insert). AwaitReadIO raises on
-    # read without a leftover-0 last-read. Do not check! here.
+    # fires (2nd find / getMore / 3rd insert). AwaitReadIO last-reads
+    # only when leftover was >0 at wrap. leftover 0 at wrap raises on
+    # read without a last-read. Do not check! here.
     # Drop a leaked handshake wrap so this command uses timeoutMS or
     # socketTimeoutMS, not connectTimeoutMS / an infinite slice retry.
     connection.unwrap_deadline_io
@@ -672,15 +673,18 @@ class Mongo::Client
   private def wrap_command_io(connection : Mongo::Connection, deadline : Mongo::Deadline?) : Bool
     if (d = deadline) && !d.infinite?
       left = d.remaining
+      leftover_positive = left > Time::Span.zero
       # Deadline at first byte: leftover 0 still wraps so the send can
-      # run. AwaitReadIO raises on read (no leftover-0 last-read).
-      expire_at = left <= Time::Span.zero ? Time.instant : Time.instant + left
+      # run. AwaitReadIO last-reads only when leftover was >0 at wrap
+      # (this command was sent with budget). leftover 0 at wrap still
+      # sends then raises on read (no last-read).
+      expire_at = leftover_positive ? Time.instant + left : Time.instant
       # Do not set leftover timeoutMS as one socket wait. Darwin kqueue can
       # fire that wait early (bulkWrite UTF then sees two inserts, not three).
       # Slices retry a premature IO::TimeoutError or ETIMEDOUT until the
       # CSOT deadline.
       connection.apply_timeout(nil)
-      return connection.wrap_deadline_io(expire_at)
+      return connection.wrap_deadline_io(expire_at, csot: true, leftover_positive_at_wrap: leftover_positive)
     end
     sock = Mongo::Connection.uri_timeout(@options.socket_timeout)
     {% if flag?(:darwin) %}
@@ -722,17 +726,18 @@ class Mongo::Client
     return body if deadline.infinite?
     return body if command != Commands::GetMore && !deadline.send_max_time?
 
-    # Deadline at first byte: leftover 0 still sends. Skip maxTimeMS;
-    # AwaitReadIO raises on read.
-    if deadline.remaining <= Time::Span.zero
-      return body
-    end
-
-    live = topology.servers.find { |s| s.address == server_description.address }
-    min_rtt = (live || server_description).min_round_trip_time
-    max_time_ms = deadline.max_time_ms(min_rtt)
-    unless max_time_ms
-      raise Error::Timeout.new("remaining timeoutMS is less than server min RTT")
+    leftover_zero = deadline.remaining <= Time::Span.zero
+    if leftover_zero
+      # leftover 0 still send: keep a positive maxTimeMS (floor 1).
+      # Do not skip. Do not raise remaining < min RTT before send.
+      max_time_ms = 1_i64
+    else
+      live = topology.servers.find { |s| s.address == server_description.address }
+      min_rtt = (live || server_description).min_round_trip_time
+      max_time_ms = deadline.max_time_ms(min_rtt)
+      unless max_time_ms
+        raise Error::Timeout.new("remaining timeoutMS is less than server min RTT")
+      end
     end
 
     if command == Commands::GetMore

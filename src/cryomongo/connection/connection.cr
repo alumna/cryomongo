@@ -285,11 +285,21 @@ class Mongo::Connection
 
   # Slice waits until *expire_at*. Nil means no deadline (connectTimeoutMS=0).
   # Returns false when the socket is already wrapped (nested command).
-  def wrap_deadline_io(expire_at : Time::Instant?) : Bool
+  # *csot* and *leftover_positive_at_wrap* select the leftover-0 last-read
+  # (CSOT command sent with leftover >0). Handshake / Darwin socketTimeoutMS
+  # keep the defaults (raise at leftover 0, no last-read).
+  def wrap_deadline_io(expire_at : Time::Instant?, *, csot : Bool = false, leftover_positive_at_wrap : Bool = false) : Bool
     return false if @socket.is_a?(AwaitReadIO)
     inner = @socket
     @deadline_inner = inner
-    @socket = AwaitReadIO.new(inner, @raw_socket, expire_at, self)
+    @socket = AwaitReadIO.new(
+      inner,
+      @raw_socket,
+      expire_at,
+      self,
+      csot: csot,
+      leftover_positive_at_wrap: leftover_positive_at_wrap,
+    )
     true
   end
 
@@ -318,6 +328,9 @@ class Mongo::Connection
 
   private def receive_one
     message = Mongo::Messages::Message.new(socket)
+    # Class pointer, not a struct copy. Handshake then calls error? after
+    # this Message is gone. A class field on a struct OpMsg is not a
+    # Darwin GC root (Wave 47). Receive types are classes (Wave 52).
     op_msg = message.contents.as(Messages::OpMsg)
     @more_to_come = op_msg.flag_bits.more_to_come?
     op_msg
@@ -506,6 +519,8 @@ class Mongo::Connection
         "(#{server_description.address}) << #{"[#{message.header.response_to}]".ljust(8)} Header: #{message.header.inspect}"
       } if log
 
+      # Same as receive_one: copy the OpMsg class pointer, then drop Message
+      # after the yield. Do not checkin the owned copy.
       op_msg = message.contents.as(Messages::OpMsg)
       more_to_come = op_msg.flag_bits.more_to_come?
 

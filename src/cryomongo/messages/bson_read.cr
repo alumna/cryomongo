@@ -1,7 +1,8 @@
 # Read a BSON document as a view of an already-read message buffer.
-# The slice stays valid while *buffer* is alive. OpMsg / OpReply wrap that
-# buffer in a heap class (OwnedReceive). Bytes? on a struct is not a Darwin
-# GC root; interior BSON.view slices are not either.
+# The slice stays valid while *buffer* is alive. Receive OpMsg / OpReply
+# are classes and wrap that buffer in OwnedReceive. A class field on a
+# struct OpMsg is not a Darwin GC root (Wave 47). Interior BSON.view
+# slices are not either.
 module Mongo::Messages
   def self.read_bson_view(buffer : Bytes, io : IO::Memory) : BSON
     pos = io.pos

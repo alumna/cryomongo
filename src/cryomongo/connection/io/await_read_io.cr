@@ -22,15 +22,22 @@
 # starts (timeoutMS 75 / blockTimeMS 50). The inner read already yields in
 # wait_readable.
 #
-# When leftover is already 0 at the start of a read, raise at once. Do not
-# last-read with wait 0. Crystal 0 is now on Darwin, but LibC.read still
-# runs first on a non-blocking socket. If the failPoint already unblocked,
-# that last-read returns success and the command succeeds when the test
-# needed a socket timeout (legacy timeouts). The same last-read can finish
-# the first find after the 75ms budget, so leftover is 0 and wrap_command_io
-# used to refuse the 2nd send. Bytes that arrived during a slice that still
-# had leftover still return. Finish a message that already started. Do not
-# spin a 0ms wait until leftover is 0 before send.
+# leftover 0 at wrap (leftover 0 still send / Darwin non-CSOT / handshake):
+# raise at once. Do not last-read with wait 0. Crystal 0 is now on Darwin,
+# but LibC.read still runs first on a non-blocking socket. If the failPoint
+# already unblocked, that last-read returns success when the test needed a
+# socket timeout (legacy timeouts). The same last-read would finish a 2nd
+# find sent with leftover already 0.
+#
+# CSOT wrap created with leftover >0: last-read even if leftover is now 0
+# and this wrap has not seen a byte. Darwin first find often takes >75ms
+# (timeoutMS 75 / blockTimeMS 50). Bytes from the failPoint can sit in the
+# kernel after leftover hits 0. @got_data is not enough (zero bytes yet).
+# Darwin non-CSOT (socketTimeoutMS) does not last-read (Wave 48 Shape B).
+#
+# Bytes that arrived during a slice that still had leftover still return.
+# Finish a message that already started. Do not spin a 0ms wait until
+# leftover is 0 before send.
 class Mongo::Connection::AwaitReadIO < IO
   {% if flag?(:darwin) %}
     SLICE = 10.milliseconds
@@ -38,7 +45,15 @@ class Mongo::Connection::AwaitReadIO < IO
     SLICE = 100.milliseconds
   {% end %}
 
-  def initialize(@inner : IO, @raw : ::Socket, @deadline : Time::Instant?, @connection : Mongo::Connection)
+  def initialize(
+    @inner : IO,
+    @raw : ::Socket,
+    @deadline : Time::Instant?,
+    @connection : Mongo::Connection,
+    *,
+    @csot : Bool = false,
+    @leftover_positive_at_wrap : Bool = false,
+  )
     # True after this wrap has returned at least one byte. Leftover 0 then
     # still reads kernel bytes so a partial OP_MSG can finish.
     @got_data = false
@@ -53,8 +68,10 @@ class Mongo::Connection::AwaitReadIO < IO
       if deadline = @deadline
         left = deadline - Time.instant
         if left <= Time::Span.zero
-          # No last-read when this wrap has not seen a byte yet.
-          raise IO::TimeoutError.new("Read timed out") unless @got_data
+          # leftover 0 at wrap / Darwin non-CSOT: no last-read unless this
+          # wrap already returned a byte (finish a partial OP_MSG). CSOT
+          # leftover >0 at wrap: last-read kernel bytes for this send.
+          raise IO::TimeoutError.new("Read timed out") unless @got_data || last_read_sent_csot?
           # Immediate wait to finish the frame. Crystal 0 is now on Darwin.
           expired = true
           wait = Time::Span.zero
@@ -101,7 +118,7 @@ class Mongo::Connection::AwaitReadIO < IO
 
   def write(slice : Bytes) : Nil
     # Deadline at first byte: leftover 0 still sends so commandStarted
-    # fires. Read then raises without a leftover-0 last-read.
+    # fires. leftover 0 at wrap then raises on read (no last-read).
     @inner.write(slice)
   end
 
@@ -134,6 +151,12 @@ class Mongo::Connection::AwaitReadIO < IO
 
   private def slice_timeout?(error : IO::Error) : Bool
     error.is_a?(IO::TimeoutError) || error.os_error == Errno::ETIMEDOUT
+  end
+
+  # CSOT command sent with leftover >0: finish this response even if leftover
+  # is now 0 and no byte has been returned yet.
+  private def last_read_sent_csot? : Bool
+    @csot && @leftover_positive_at_wrap
   end
 
   # One LibC.read. Crystal 0 is now; LibC.read still runs first.

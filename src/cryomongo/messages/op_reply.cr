@@ -4,14 +4,15 @@ require "./op_code"
 require "./owned_receive"
 
 # The OP_REPLY message is sent by the database in response to an OP_QUERY or OP_GET_MORE message.
-struct Mongo::Messages::OpReply < Mongo::Messages::Part
+# Class, same as OpMsg: receive copies this out of Message. A class field
+# on a struct is not a Darwin GC root (Wave 47).
+class Mongo::Messages::OpReply < Mongo::Messages::Part
   @[Field(ignore: true)]
   @op_code : OpCode = OpCode::Reply
 
   # Same heap owner as OpMsg: wrap the owned receive copy in a class so
   # Darwin GC scans it while documents are BSON.view interior slices.
-  # Bytes? on this struct is not a Darwin GC root (Wave 42). Outgoing
-  # replies leave this nil.
+  # Keep this on the class (Wave 52). Outgoing replies leave this nil.
   @[Field(ignore: true)]
   @frame : OwnedReceive? = nil
 
@@ -27,12 +28,13 @@ struct Mongo::Messages::OpReply < Mongo::Messages::Part
   getter cursor_id : Int64
   getter starting_from : Int32
   getter number_returned : Int32
+  @documents : Array(BSON)
 
   def documents : Array(BSON)
     pin = @frame
     docs = @documents
-    # Keep the heap owner in the live range. Bytes? on this struct is not
-    # a Darwin GC root (Wave 42). A class pointer is (Wave 47).
+    # Keep the heap owner in the live range. A class field on a struct
+    # is not enough on Darwin (Wave 47). This OpReply is a class.
     pin.try(&.bytes.size)
     docs
   end
@@ -60,8 +62,8 @@ struct Mongo::Messages::OpReply < Mongo::Messages::Part
   end
 
   # *msg_bytes* must stay valid for the life of this message. Wrap it in
-  # OwnedReceive so Darwin GC scans a heap object. Do not checkin here
-  # (the IO path already returned the staging buffer after the copy).
+  # OwnedReceive on this class. Do not checkin here (the IO path already
+  # returned the staging buffer after the copy).
   def initialize(msg_bytes : Bytes, header : Messages::Header, used : Int32 = msg_bytes.size)
     owner = OwnedReceive.new(msg_bytes)
     @frame = owner
