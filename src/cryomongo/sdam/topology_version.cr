@@ -3,7 +3,8 @@
 # counter is not greater is stale. failCommand 91 also increments, but
 # the server stays Primary. A streaming hello can publish that same
 # counter first (Darwin command slices vs one monitor wait). The live
-# path still marks Unknown when the type is still writable.
+# path still marks Unknown when the type is still Primary or Standalone.
+# Mongos / load-balanced stay spec-stale on equal TV.
 module Mongo::SDAM::TopologyVersion
   extend self
 
@@ -39,9 +40,11 @@ module Mongo::SDAM::TopologyVersion
   end
 
   # Live application error. Strictly older TV is always stale. Equal TV
-  # is stale only after this version is already Unknown or a non-writable
-  # replica-set role (monitor already applied the new state). Equal TV on
-  # Primary / Mongos / Standalone still marks Unknown.
+  # is stale after Unknown, a non-writable replica-set role, or Mongos /
+  # load-balanced (spec: a real state change increments the counter).
+  # Equal TV on Primary / Standalone still marks Unknown (failCommand
+  # shutdown vs streaming hello). Do not treat Mongos like Primary: that
+  # can extra-clear a serviceId-scoped pool.
   def application_error_stale?(current : ServerDescription, error_tv : BSON?) : Bool
     cmp = compare(current.topology_version, error_tv)
     return true if cmp < 0
@@ -50,6 +53,8 @@ module Mongo::SDAM::TopologyVersion
       current.type.rs_secondary? ||
       current.type.rs_arbiter? ||
       current.type.rs_other? ||
-      current.type.rs_ghost?
+      current.type.rs_ghost? ||
+      current.type.mongos? ||
+      current.type.load_balancer?
   end
 end

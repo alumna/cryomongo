@@ -226,7 +226,9 @@ class Mongo::Client
     want_log = want_command_logs?
     wrapped_csot_io = false
 
-    deadline.try(&.check!)
+    # Deadline at first byte: leftover 0 still sends so commandStarted
+    # fires (2nd find / getMore / 3rd insert). AwaitReadIO raises on
+    # read without a leftover-0 last-read. Do not check! here.
     # Drop a leaked handshake wrap so this command uses timeoutMS or
     # socketTimeoutMS, not connectTimeoutMS / an infinite slice retry.
     connection.unwrap_deadline_io
@@ -622,8 +624,8 @@ class Mongo::Client
 
   # SDAM application error: ignore stale generation / topologyVersion so two
   # concurrent shutdowns emit one Unknown and one poolClearedEvent. Equal TV
-  # still marks Unknown while the type is Primary. Pool clear stays under
-  # the topology lock (SDAM spec).
+  # still marks Unknown while the type is Primary. Mongos / load-balanced
+  # stay spec-stale. Pool clear stays under the topology lock (SDAM spec).
   private def handle_application_error(
     server_description : SDAM::ServerDescription?,
     connection : Mongo::Connection?,
@@ -670,15 +672,15 @@ class Mongo::Client
   private def wrap_command_io(connection : Mongo::Connection, deadline : Mongo::Deadline?) : Bool
     if (d = deadline) && !d.infinite?
       left = d.remaining
-      if left <= Time::Span.zero
-        raise Error::Timeout.new("Operation exceeded timeoutMS")
-      end
+      # Deadline at first byte: leftover 0 still wraps so the send can
+      # run. AwaitReadIO raises on read (no leftover-0 last-read).
+      expire_at = left <= Time::Span.zero ? Time.instant : Time.instant + left
       # Do not set leftover timeoutMS as one socket wait. Darwin kqueue can
       # fire that wait early (bulkWrite UTF then sees two inserts, not three).
       # Slices retry a premature IO::TimeoutError or ETIMEDOUT until the
       # CSOT deadline.
       connection.apply_timeout(nil)
-      return connection.wrap_deadline_io(Time.instant + left)
+      return connection.wrap_deadline_io(expire_at)
     end
     sock = Mongo::Connection.uri_timeout(@options.socket_timeout)
     {% if flag?(:darwin) %}
@@ -719,6 +721,12 @@ class Mongo::Client
     return body unless deadline
     return body if deadline.infinite?
     return body if command != Commands::GetMore && !deadline.send_max_time?
+
+    # Deadline at first byte: leftover 0 still sends. Skip maxTimeMS;
+    # AwaitReadIO raises on read.
+    if deadline.remaining <= Time::Span.zero
+      return body
+    end
 
     live = topology.servers.find { |s| s.address == server_description.address }
     min_rtt = (live || server_description).min_round_trip_time

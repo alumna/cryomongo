@@ -185,8 +185,9 @@ class Mongo::SDAM::TopologyDescription
   # Application error: ignore a stale pool generation and a stale
   # topologyVersion, then replace the description. Equal TV still marks
   # Unknown while the type is Primary (failCommand shutdown vs streaming
-  # hello). Yields before unlock so the caller can clear the pool in the
-  # same critical section (SDAM spec).
+  # hello). Mongos / load-balanced stay spec-stale on equal TV. Yields
+  # before unlock so the caller can clear the pool in the same critical
+  # section (SDAM spec).
   def apply_application_error(
     old_description : ServerDescription,
     new_description : ServerDescription,

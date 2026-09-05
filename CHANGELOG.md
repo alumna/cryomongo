@@ -74,6 +74,11 @@ Client-Side Field Level Encryption (CSFLE)
   - macos-26 standalone SIGBUS in `error?` after copy-then-checkin
   - Do not clone every ok:1 hello. Do not checkin the owned copy
   - `BSON.new(BSON)` is a no-op
+- OP_MSG / OP_REPLY wrap the owned receive copy in a heap class
+  (`OwnedReceive`), not `Bytes?` on the message struct
+  - `Bytes` is a Slice struct; `@frame : Bytes?` is not a Darwin GC root
+  - macos-15 standalone SIGBUS in `error?` after Wave 42 (cells swapped)
+  - Do not clone every ok:1 hello. Do not checkin the owned copy
 - Darwin CSOT: wait for timeoutMS in short socket slices so a kqueue
   `IO::TimeoutError` does not win before the CSOT deadline
   (getMore / bulkWrite / GridFS UTF). Do not lengthen official waits.
@@ -92,14 +97,22 @@ Client-Side Field Level Encryption (CSFLE)
   - `Fiber.yield` is `EventLoop.sleep(0)`; Darwin treats 0 as now
   - That wait burned leftover timeoutMS so the 2nd find / getMore /
     3rd insert never started (`timeoutMS` 75 / `blockTimeMS` 50)
-  - When leftover is already 0, still try one read (bytes may already
-    be in the kernel). Do not lengthen official waits. Linux stays
-    at 100ms slices.
+- Darwin CSOT leftover: when leftover is already 0, raise
+  `IO::TimeoutError` without a last successful read
+  - Wave 43 last-read (`wait` 0) turned a failPoint into success
+    when bytes were already in the kernel (legacy timeouts)
+  - The same last-read could finish the first find after the 75ms
+    budget, so the 2nd find / getMore / 3rd insert never started
+  - Leftover 0 still sends (deadline at first byte). The read then
+    times out. Bytes from a slice that still had leftover still
+    return. Do not shorten Darwin slices. Do not `Fiber.yield`
+
 - Concurrent insert shutdown still marks Unknown when a streaming
   hello publishes the same topologyVersion while the server is still
   Primary (Darwin command slices vs one monitor wait;
   `insert-shutdown-error`)
   - Equal TV stays stale after Unknown or a new replica-set role
+  - Equal TV on Mongos / load-balanced is spec-stale (not Primary)
   - Do not drop `wrap_connect_deadline`
 - AwaitData getMore uses a refreshed timeoutMS for each next()
   (not leftover from find)

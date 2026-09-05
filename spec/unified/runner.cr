@@ -287,6 +287,7 @@ module Mongo::Unified
           # Needs two mongos serviceIds from one client. roundrobin + health-check
           # still sometimes sends both sockets to one mongos (got extra
           # connectionCreated after pool clear). Skip unless UTF_RUN_TWO_MONGOS=1.
+          # Wave 51: that extra Created is HAProxy, not Mongos Unknown-on-equal-TV.
           if test.description == "only connections for a specific serviceId are closed when pools are cleared" && ENV["UTF_RUN_TWO_MONGOS"]? != "1"
             skipped += 1
             Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "needs two serviceIds from HAProxy", duration_ms: Timing.elapsed_ms(test_started))

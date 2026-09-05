@@ -38,11 +38,17 @@ describe Mongo::SDAM::TopologyVersion do
   it "marks Unknown on equal TV while the server is still Primary" do
     current = desc(:rs_primary, 2)
     Mongo::SDAM::TopologyVersion.application_error_stale?(current, tv(2)).should be_false
+    Mongo::SDAM::TopologyVersion.application_error_stale?(desc(:standalone, 2), tv(2)).should be_false
   end
 
   it "keeps equal TV stale after Unknown or a new replica-set role" do
     Mongo::SDAM::TopologyVersion.application_error_stale?(desc(:unknown, 2), tv(2)).should be_true
     Mongo::SDAM::TopologyVersion.application_error_stale?(desc(:rs_secondary, 2), tv(2)).should be_true
+  end
+
+  it "keeps equal TV stale on Mongos and load-balanced" do
+    Mongo::SDAM::TopologyVersion.application_error_stale?(desc(:mongos, 2), tv(2)).should be_true
+    Mongo::SDAM::TopologyVersion.application_error_stale?(desc(:load_balancer, 2), tv(2)).should be_true
   end
 
   it "still ignores a strictly older application error" do

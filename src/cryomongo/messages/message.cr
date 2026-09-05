@@ -1,6 +1,9 @@
 require "./header"
 require "./message_part"
 
+# Message stays a struct. The receive copy lives on OpMsg / OpReply as
+# OwnedReceive (a class). Do not add Bytes? here: Bytes? on a struct is
+# not a Darwin GC root (Wave 42).
 struct Mongo::Messages::Message
   @@id = Atomic(Int32).new(0)
 

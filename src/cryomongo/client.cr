@@ -539,11 +539,18 @@ class Mongo::Client
                  Time.instant + @options.server_selection_timeout
                end
     last_network : Mongo::Error::Network? = nil
+    tried_idle = false
     loop do
       leftover = deadline - Time.instant
       if leftover <= Time::Span.zero
-        fail_checkout(server_description.address, "connectionError", started_at, last_network)
-        raise last_network || Mongo::Error::Connection.new("Timed out while checking out a connection from connection pool")
+        # Deadline at first byte: leftover 0 still takes one idle socket
+        # so the command can be sent. Do not wait on the pool.
+        unless tried_idle
+          tried_idle = true
+        else
+          fail_checkout(server_description.address, "connectionError", started_at, last_network)
+          raise last_network || Mongo::Error::Connection.new("Timed out while checking out a connection from connection pool")
+        end
       end
       begin
         conn = checkout_and_emit_discards(pool, server_description, wait)
@@ -862,14 +869,15 @@ class Mongo::Client
     provided : Mongo::Connection?,
     deadline : Mongo::Deadline?,
   ) : {Mongo::Connection, Bool}
-    deadline.try(&.check!)
+    # Deadline at first byte: leftover 0 still checkouts so the command
+    # can be sent. AwaitReadIO raises on read. Do not apply a 0 socket
+    # wait (Crystal 0 is now on Darwin).
     timeout = if d = deadline
                 if d.infinite?
                   Mongo::Connection.uri_timeout(@options.socket_timeout)
                 else
                   left = d.remaining
-                  raise Mongo::Error::Timeout.new("Operation exceeded timeoutMS") if left <= Time::Span.zero
-                  left
+                  left <= Time::Span.zero ? nil : left
                 end
               else
                 Mongo::Connection.uri_timeout(@options.socket_timeout)

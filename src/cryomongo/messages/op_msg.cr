@@ -1,18 +1,19 @@
 require "bson"
 require "./message_part"
 require "./op_code"
+require "./owned_receive"
 
 # OP_MSG is an extensible message format designed to subsume the functionality of other opcodes.
 struct Mongo::Messages::OpMsg < Mongo::Messages::Part
   @[Field(ignore: true)]
   getter op_code : OpCode = OpCode::Msg
 
-  # Owned receive copy. BSON.view uses interior slices of this buffer.
-  # Those slices are not a Darwin GC root; without this field the
-  # allocation can be freed while error? still walks body (Wave 42 SIGBUS).
-  # Outgoing messages leave this nil. Do not serialize (Bytes is not a Part field).
+  # Heap owner for the owned receive copy. BSON.view uses interior slices
+  # of owner.bytes. Bytes? on this struct is not a Darwin GC root (Wave 42).
+  # A class pointer is (Wave 47). Outgoing messages leave this nil.
+  # Do not serialize (OwnedReceive is not a Part field).
   @[Field(ignore: true)]
-  @frame : Bytes? = nil
+  @frame : OwnedReceive? = nil
 
   @[Flags]
   enum Flags : Int32
@@ -54,12 +55,13 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
 
   # *msg_bytes* must stay valid for the life of this message. The IO path
   # passes an owned copy after checkin. Inflate / specs pass their own Bytes.
-  # Keep that copy in @frame so Darwin GC sees the base pointer, not only
-  # interior BSON.view slices. Do not checkin here: that would pool the copy
-  # and invalidate nested []?.
+  # Wrap that copy in OwnedReceive so Darwin GC scans a heap object, not
+  # only a Bytes? field on this struct. Do not checkin here: that would
+  # pool the copy and invalidate nested []?.
   def initialize(msg_bytes : Bytes, header : Messages::Header, used : Int32 = msg_bytes.size)
-    @frame = msg_bytes
-    view_bytes = msg_bytes[0, used]
+    owner = OwnedReceive.new(msg_bytes)
+    @frame = owner
+    view_bytes = owner.bytes[0, used]
     msg_view = IO::Memory.new(view_bytes, writable: false)
 
     @flag_bits = Flags.from_value(msg_view.read_bytes(UInt32, IO::ByteFormat::LittleEndian))
@@ -134,9 +136,9 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
     end
     raise Mongo::Error.new("Invalid OP_MSG: Missing body section")
   ensure
-    # Keep @frame in the live range. LLVM must not drop the base pointer
-    # while callers still walk BSON.view slices (Darwin GC, Wave 42).
-    pin.try(&.size)
+    # Keep the heap owner in the live range. Bytes? on this struct is not
+    # a Darwin GC root (Wave 42). A class pointer is (Wave 47).
+    pin.try(&.bytes.size)
   end
 
   def each_sequence(&)
@@ -195,8 +197,8 @@ struct Mongo::Messages::OpMsg < Mongo::Messages::Part
       Mongo::Error::Command.new(err_code, err_code_name, err_msg, details, error_labels: err_label_set, topology_version: topology_version, base_backoff_ms: base_backoff_ms, reply: BSON.new(cached_body.data))
     end
   ensure
-    # Same pin as body: keep the owned copy alive for the whole walk.
-    pin.try(&.size)
+    # Same pin as body: keep the heap owner alive for the whole walk.
+    pin.try(&.bytes.size)
   end
 
   # failCommand may put labels on the reply or inside writeConcernError.

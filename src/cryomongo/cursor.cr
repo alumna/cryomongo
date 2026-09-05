@@ -121,8 +121,8 @@ class Mongo::Cursor
         # Only a closed cursor (id 0) means the iteration is over.
         return Iterator::Stop::INSTANCE if @cursor_id == 0
 
-        # Do not send getMore after this next() leftover is gone.
-        check_iteration_expired!
+        # Deadline at first byte: leftover 0 still sends getMore so
+        # commandStarted fires. AwaitReadIO raises on read.
         fetch_more
 
         # Non-tailable: an empty getMore means the result is exhausted.

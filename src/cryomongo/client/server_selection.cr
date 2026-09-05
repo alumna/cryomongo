@@ -155,7 +155,8 @@ class Mongo::Client
     if effective && !effective.infinite?
       left = effective.remaining
       selection_timeout = left if left < selection_timeout
-      raise Error::Timeout.new("timed out during server selection") if selection_timeout <= Time::Span.zero
+      # Leftover 0 still tries one pick of a ready server (deadline at
+      # first byte). The loop raises if none is ready.
     end
     {selection_start, selection_timeout, effective}
   end

@@ -3,7 +3,10 @@ require "./spec_helper"
 # GitHub arm/macOS standalone SIGSEGV/SIGBUS in OpMsg#error? after BufferPool
 # checkin (UTF disable_fail_points / ConfigureFailPoint mode=off). Nested []?
 # is a BSON.view. BSON.new(BSON) does not copy. Wave 33 scribbled AFTER parse
-# on one fiber and did not prove preview_mt pool reuse.
+# on one fiber and did not prove preview_mt pool reuse. Wave 42 @frame :
+# Bytes? on the OpMsg struct is not a Darwin GC root. The owned copy lives
+# on a heap class (OwnedReceive). Keep scribble / pool / concurrent /
+# GC.collect walks. GC.collect on Linux is not Darwin proof.
 
 private def serialize_op_msg(doc : BSON) : Bytes
   msg = Mongo::Messages::OpMsg.new(doc)
@@ -214,9 +217,9 @@ describe Mongo::Messages::OpMsg do
     end
   end
 
-  # Wave 42: copy-then-checkin is not enough if the owned Bytes is only a
-  # local. Darwin GC can free that allocation while error? walks interior
-  # BSON.view slices. @frame on the message keeps the base pointer.
+  # Wave 47: Bytes? on a struct is not a Darwin GC root (Wave 42 @frame).
+  # The owned copy lives on a heap class. copy-then-checkin is not enough
+  # if that Bytes is only a local or a Slice field on OpMsg.
   it "walks error? and body after GC.collect (owned frame stays alive)" do
     ok_msg = parse_op_msg_via_pool(ok1_with_topology)
     err_doc = BSON.build do |b|
@@ -326,6 +329,8 @@ describe Mongo::Messages::OpReply do
     end
   end
 
+  # Bytes? on a struct is not a Darwin GC root (Wave 42). The owned copy
+  # lives on a heap class, same as OpMsg.
   it "walks documents after GC.collect (owned frame stays alive)" do
     nested = BSON.build do |b|
       b["ok"] = 1.0
