@@ -145,8 +145,9 @@ class Mongo::Cursor
             # already expired above. One empty then stop closed got-3 and
             # broke official refresh (timeoutMS 250, maxAwaitTimeMS 1,
             # failPoint 150): the blocked getMore can be empty, the next
-            # getMore has the document. A third getMore was got-3. Linux
-            # still loops until leftover expires. Change streams keep looping.
+            # getMore has the document. A third getMore was got-3. Do not
+            # treat MaxTimeMSExpired as a third getMore either. Linux still
+            # loops until leftover expires. Change streams keep looping.
             if stop_after_empty_await_get_more?
               empty_await_get_mores += 1
               if empty_await_get_mores >= 2

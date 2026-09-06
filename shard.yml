@@ -15,9 +15,11 @@ license: MIT
 # default link (missing mongocrypt_setopt_key_expiration and related APIs).
 
 dependencies:
+  # Wave 58 document class is Unreleased on bson.cr 0.9.2. GitHub CI must
+  # use master until the next bson tag. Local specs use shard.override.yml.
   bson:
     github: alumna/bson.cr
-    version: ~> 0.9.2
+    branch: master
   pipe:
     github: jgaskins/pipe
   dns:

@@ -93,6 +93,16 @@ Client-Side Field Level Encryption (CSFLE)
   - `SectionBody` holds the same owner class. Do not clone every ok:1
     hello. bson.cr stays a struct. GitHub ubuntu-26.04 standalone must
     finish the suite on the next PR 37
+- BSON document type is a class (bson.cr Unreleased on 0.9.2)
+  - Wave 55 `pin.bytes` closed Linux SIGSEGV and failed on Darwin
+    (`33990243466` macos-15 standalone SIGBUS in `OwnedReceive#fetch`)
+  - `error?` still walks `OwnedReceive#view`. Do not clone every ok:1 hello
+  - Extra alloc per view is the GC trade. Do not copy receive bytes twice
+  - ObjectId / Binary / Decimal128 stay structs
+  - GitHub macos-15 and macos-26 standalone must both finish on the next
+    PR 37. ubuntu-26.04 standalone must stay green
+  - cryomongo tracks bson.cr `master` until the next bson tag
+  - Reopen `copy_with` on `class BSON` (`ext/bson.cr`)
 - Darwin CSOT: wait for timeoutMS in short socket slices so a kqueue
   `IO::TimeoutError` does not win before the CSOT deadline
   (getMore / bulkWrite / GridFS UTF). Do not lengthen official waits.
@@ -136,6 +146,15 @@ Client-Side Field Level Encryption (CSFLE)
   - leftover 0 at wrap still raises with no last-read. Do not wait
     remaining leftover. Do not shorten Darwin slices. Do not
     `Fiber.yield`
+- Darwin CSOT leftover: leftover >0 at wrap last-reads one Darwin
+  slice (10ms Instant), not 1ms
+  - GitHub `33990243466`: 1ms Instant was empty when failPoint data
+    was still in flight (`timeoutMS` 75 / `blockTimeMS` 50)
+  - Instant-capped once per wrap, then one wait-0 `LibC.read`
+  - leftover 0 at wrap still raises with no last-read. Do not wait
+    remaining leftover. Do not shorten Darwin slices. Do not
+    `Fiber.yield`. Linux stays 100ms slices. 10ms is not a longer
+    official `timeoutMS`
 - leftover 0 still send keeps a positive `maxTimeMS` (floor 1)
   - Do not skip `maxTimeMS`. Do not raise remaining timeoutMS <
     min RTT before that send (LB `bulkWrite` update)
@@ -146,6 +165,11 @@ Client-Side Field Level Encryption (CSFLE)
   - Linux still loops until leftover expires (two-getMore then Timeout)
   - Change streams still loop (empty getMores until an event)
   - Do not rewrite `get_more_deadline`. getMore is not retryable
+- Tailable awaitData: `maxAwaitTimeMS` on getMore only, not find
+  - Find uses leftover `timeoutMS` as `maxTimeMS` (CSOT)
+  - Sending `maxAwaitTimeMS` 1 on find made Darwin refresh
+    `MaxTimeMSExpired` after failPoint 150 (`timeoutMS` 250)
+  - Do not add a third empty getMore. getMore is not retryable
 
 - Concurrent insert shutdown still marks Unknown when a streaming
   hello publishes the same topologyVersion while the server is still

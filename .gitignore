@@ -22,3 +22,6 @@ drivers-evergreen-tools/
 FIXES.md
 LOCAL_TESTING.md
 
+# Local workbench only. GitHub shards install uses shard.yml (bson.cr master).
+/shard.override.yml
+

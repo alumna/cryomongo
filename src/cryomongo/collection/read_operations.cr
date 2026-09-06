@@ -326,7 +326,11 @@ class Mongo::Collection
     end
     mode, computed = cursor_timeout(timeout_ms, timeout_mode, tailable_flag)
     computed = deadline if deadline
-    # Tailable awaitData sends maxTimeMS on find. Other iteration cursors must not.
+    # Tailable awaitData: leftover timeoutMS is maxTimeMS on find.
+    # maxAwaitTimeMS belongs on getMore only (same as change streams).
+    # Sending maxAwaitTimeMS (1) on find made Darwin refresh MaxTimeMSExpired
+    # after failPoint block 150ms (timeoutMS 250). Other iteration cursors
+    # still omit maxTimeMS on find.
     find_deadline = if tailable_flag && await_flag
                       computed
                     elsif mode.iteration?
@@ -335,6 +339,9 @@ class Mongo::Collection
                       computed
                     end
     deadline = computed
+    # AwaitData: keep max_time_ms for the cursor (getMore). Do not send it
+    # on this find.
+    find_max_time_ms = tailable_flag && await_flag ? nil : max_time_ms
 
     result = self.command(Commands::Find, filter: filter, session: session, deadline: find_deadline, options: {
       sort:                  sort.try { BSON.new(sort) },
@@ -346,7 +353,7 @@ class Mongo::Collection
       single_batch:          single_batch,
       comment:               comment,
       let:                   let.try { BSON.new(let) },
-      max_time_ms:           max_time_ms,
+      max_time_ms:           find_max_time_ms,
       read_concern:          read_concern,
       max:                   max.try { BSON.new(max) },
       min:                   min.try { BSON.new(min) },

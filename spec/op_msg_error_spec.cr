@@ -8,9 +8,11 @@ require "./spec_helper"
 # on that struct is not enough on Darwin (`33968324194` macos-15 standalone
 # still error?+1604). Receive OpMsg / OpReply / Message are classes
 # (Wave 52). Wave 55: a pin only in ensure is dropped (ubuntu-26.04
-# SIGSEGV at error? during create_data_key insert). Keep scribble / pool
-# / concurrent / GC.collect / Message-drop walks. GC.collect on Linux is
-# not the GitHub ubuntu-26.04 proof.
+# SIGSEGV at error? during create_data_key insert). Wave 58: BSON
+# document is a class so `[]?` after `OwnedReceive#view` is a method on a
+# heap object (Darwin SIGBUS `33990243466` macos-15 standalone). Keep
+# scribble / pool / concurrent / GC.collect / Message-drop walks.
+# GC.collect on Linux is not the GitHub Darwin proof.
 
 private def serialize_op_msg(doc : BSON) : Bytes
   msg = Mongo::Messages::OpMsg.new(doc)

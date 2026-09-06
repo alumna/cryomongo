@@ -9,7 +9,8 @@
 # Wave 55: a pin only in ensure is dropped (ubuntu-26.04 SIGSEGV at
 # error? during create_data_key insert). error? / body / stored-error
 # must call #view / #fetch so the walk uses `@bytes` and this class
-# stays a GC root. bson.cr stays a struct.
+# stays a GC root. bson.cr document is a class (Wave 58) so `[]?` is a
+# method on a heap object. Do not clone.
 class Mongo::Messages::OwnedReceive
   getter bytes : Bytes
 

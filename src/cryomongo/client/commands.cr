@@ -228,9 +228,9 @@ class Mongo::Client
 
     # Deadline at first byte: leftover 0 still sends so commandStarted
     # fires (2nd find / getMore / 3rd insert). AwaitReadIO last-reads
-    # only when leftover was >0 at wrap (1ms Instant, not wait 0).
-    # leftover 0 at wrap raises on read without a last-read. Do not
-    # check! here.
+    # only when leftover was >0 at wrap (one Darwin slice, 10ms Instant,
+    # then wait 0). leftover 0 at wrap raises on read without a last-read.
+    # Do not check! here.
     # Drop a leaked handshake wrap so this command uses timeoutMS or
     # socketTimeoutMS, not connectTimeoutMS / an infinite slice retry.
     connection.unwrap_deadline_io
@@ -677,9 +677,9 @@ class Mongo::Client
       leftover_positive = left > Time::Span.zero
       # Deadline at first byte: leftover 0 still wraps so the send can
       # run. AwaitReadIO last-reads only when leftover was >0 at wrap
-      # (this command was sent with budget): 1ms Instant, Darwin 0 is
-      # now. leftover 0 at wrap still sends then raises on read (no
-      # last-read).
+      # (this command was sent with budget): one Darwin slice (10ms
+      # Instant), Darwin 0 is now. leftover 0 at wrap still sends then
+      # raises on read (no last-read).
       expire_at = leftover_positive ? Time.instant + left : Time.instant
       # Do not set leftover timeoutMS as one socket wait. Darwin kqueue can
       # fire that wait early (bulkWrite UTF then sees two inserts, not three).
