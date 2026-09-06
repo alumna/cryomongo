@@ -9,7 +9,7 @@
 
 <hr/>
 
-A MongoDB driver in Crystal (no mongo-c-driver). Tested against **MongoDB 8.0**. zstd wire compression links libzstd. Explicit client-side encryption links libmongocrypt when that library is installed.
+A MongoDB driver in Crystal (no mongo-c-driver). Tested against **MongoDB 8.0**. zstd wire compression links libzstd. Client-side encryption links official **libmongocrypt 1.20.4** (vendored). Auto-encryption also needs **crypt_shared** (`mongo_crypt_v1.so` on linux, `.dylib` on macOS).
 
 > If you are looking for a higher-level object-document mapper, see [`moongoon`](https://github.com/elbywan/moongoon).
 
@@ -41,7 +41,7 @@ A MongoDB driver in Crystal (no mongo-c-driver). Tested against **MongoDB 8.0**.
 
 `alumna/cryomongo` is a fork of [`elbywan/cryomongo`](https://github.com/elbywan/cryomongo). The work here is for **MongoDB 8.0** (max wire version **25**, OP_MSG-only) and **Crystal 1.21**. It is meant to merge into the upstream repository.
 
-The driver is **0.x**. Phases 1–3 of [ROADMAP.md](ROADMAP.md) are done (CRUD, sessions, transactions, CSOT, load balancer, CMAP/SDAM, compression). Phase 4 Wave 21 ships explicit encryption with local KMS. **1.0** still waits on the rest of client-side encryption (Waves 22–25) and cloud auth (Phase 5: AWS / OIDC). Phase **3.14** (performance) is later and is not in those waves.
+The driver is **0.x**. Phases 1–3 of [ROADMAP.md](ROADMAP.md) are done (CRUD, sessions, transactions, CSOT, load balancer, CMAP/SDAM, compression). Phase 4 Waves 21–25 ship CSFLE with local KMS (explicit, auto-encryption, Queryable Encryption equality and 8.0 range, official UTF that can run without cloud accounts). **1.0** still waits on cloud auth (Phase 5: AWS / OIDC). Phase **3.14** (performance) is later and is not in those waves.
 
 Not in this fork: Atlas Search, MongoDB newer than 8.0, `MONGODB-AWS`, `MONGODB-OIDC`. Open work: [ROADMAP.md](ROADMAP.md).
 
@@ -54,7 +54,7 @@ Not in this fork: Atlas Search, MongoDB newer than 8.0, `MONGODB-AWS`, `MONGODB-
 - **[TLS](https://docs.mongodb.com/manual/core/security-transport-encryption/)** - `tlsCertificateKeyFilePassword`; stapled OCSP unless `tlsDisableCertificateRevocationCheck`
 - **[Indexes](https://docs.mongodb.com/manual/indexes/index.html)**
 - **[GridFS](https://docs.mongodb.com/manual/core/gridfs/index.html)** - `session:`, `delete_by_name` / `rename_by_name`, `drop`
-- **Explicit client-side encryption** - local KMS; `create_data_key` / `encrypt` / `decrypt`; needs libmongocrypt (auto-encryption is later)
+- **Client-side encryption** - local KMS; explicit `create_data_key` / `encrypt` / `decrypt`; auto-encryption with `schemaMap` and Queryable Encryption `encryptedFieldsMap` (needs vendored libmongocrypt 1.20.4 and crypt_shared)
 - **[Change streams](https://docs.mongodb.com/manual/changeStreams/index.html)** - `#next` waits; `#try_next` polls; resume after a labeled getMore error
 - **[Tailable cursors](https://docs.mongodb.com/manual/core/tailable-cursors/index.html)** and **[collation](https://docs.mongodb.com/manual/reference/collation/index.html)**
 - **Standalone, [replica set](https://docs.mongodb.com/manual/replication/), [sharded](https://docs.mongodb.com/manual/sharding/), load-balanced**
@@ -82,7 +82,9 @@ dependencies:
 
 zstd wire compression links **libzstd**. On Debian/Ubuntu: `sudo apt-get install libzstd-dev`. snappy is pure Crystal. zlib is in the Crystal stdlib.
 
-Explicit client-side encryption links **libmongocrypt** when `pkg-config --exists libmongocrypt`. On Debian/Ubuntu: `sudo apt-get install libmongocrypt-dev`. GitHub CI installs that package and runs the explicit-encryption spec. Compile with `-Dwithout_libmongocrypt` to skip the link. Then `Mongo::ClientEncryption` raises a clear error, and the live encrypt/decrypt spec does not run. Auto-encryption is not in this version.
+Explicit client-side encryption links official **libmongocrypt 1.20.4**. Run `scripts/vendor-libmongocrypt.sh` (writes `vendor/libmongocrypt/`, gitignored). GitHub Ubuntu 24.04 `libmongocrypt-dev` is too old for `mongocrypt_setopt_key_expiration` and related APIs (PR 37). The default link does not use pkg-config, so apt cannot win. Distro packages and CVE hotfixes may set `USE_SYSTEM_LIBMONGOCRYPT=true` (needs **>= 1.20.0**). Compile with `-Dwithout_libmongocrypt` to skip the link. Then `Mongo::ClientEncryption` raises a clear error, and live encrypt specs do not run. A CVE in libmongocrypt needs a pin bump of 1.20.4 in this shard, then a human release. Linux official tarballs are nocrypto; the driver supplies OpenSSL hooks.
+
+Auto-encryption also needs **crypt_shared** (`mongo_crypt_v1.so` on linux, `mongo_crypt_v1.dylib` on macOS), not mongocryptd. Set `extraOptions.cryptSharedLibPath` or the env var `CRYPT_SHARED_LIB_PATH` to the absolute path of that file. Download MongoDB 8.0.x `crypt_shared` from the [MongoDB download center](https://www.mongodb.com/try/download/enterprise) (package `crypt_shared`), or run `scripts/download-crypt-shared.sh` (writes `tmp/mongo_crypt_v1.so` or `.dylib`, gitignored). Linux: ubuntu2204 on 22.04, ubuntu2404 on 24.04 and 26.04 (there is no ubuntu2604 package), **x86_64** or **aarch64**. macOS: official `macos-arm64` / `macos-x86_64` tarballs. GitHub CI downloads it in `.github/workflows/specs.yml` and does not commit the binary. Specs skip the live auto-encryption path when libmongocrypt or crypt_shared is missing.
 
 ## Usage
 
@@ -510,7 +512,13 @@ gridfs.drop
 
 ## Client-side encryption
 
-Needs **libmongocrypt**. Local KMS only in this version. The local master key is 96 bytes. Encrypted values are BSON binary subtype `0x06`. Always call `#close`. The GC does not free the libmongocrypt handle. Auto-encryption (`schemaMap`) is not here yet.
+Needs **libmongocrypt** (official 1.20.4 by default). Local KMS only in this version (including named `local:name`). The local master key is 96 bytes (binary or base64). Encrypted values are BSON binary subtype `0x06`. Always call `#close`. The GC does not free the libmongocrypt handle.
+
+Automatic encryption is an Enterprise feature (crypt_shared). It only applies to collection commands. A local `schemaMap` is safer than a schema from the server. Other JSON Schema rules in that map are not enforced and error. The authenticated user needs the `listCollections` privilege. Enabling auto-encryption reduces the maximum write batch size.
+
+Set `cryptSharedLibPath` or `CRYPT_SHARED_LIB_PATH` to the `mongo_crypt_v1.so` (linux) or `mongo_crypt_v1.dylib` (macOS) file, not a directory. All `Mongo::Client` objects in one process should use the same path.
+
+The unified runner copies official CSFLE UTF that can run on MongoDB 8.0 + local KMS (77 files). Cloud KMS, KMIP, and MongoDB 8.2+ / 9.0 text (prefix / suffix / substring) files are leftover on purpose.
 
 ```crystal
 require "cryomongo"
@@ -537,11 +545,89 @@ encrypted = encryption.encrypt(
   key_id: key_id
 )
 plain = encryption.decrypt(encrypted) # => "secret"
+# Key vault: get_key, get_keys, delete_key, add_key_alt_name,
+# remove_key_alt_name, get_key_by_alt_name, rewrap_many_data_key
 encryption.close
 client.close
 ```
 
 The deterministic algorithm is `Mongo::ClientEncryption::ALGORITHM_DETERMINISTIC`. Same plaintext then gives the same ciphertext.
+
+Auto-encryption encrypts marked fields on write and decrypts them on read:
+
+```crystal
+schema = BSON.build do |bson|
+  bson.document("hr.people") do
+    bson["bsonType"] = "object"
+    bson.document("properties") do
+      bson.document("ssn") do
+        bson.document("encrypt") do
+          bson["bsonType"] = "string"
+          bson["algorithm"] = Mongo::ClientEncryption::ALGORITHM_DETERMINISTIC
+          bson.array("keyId") { bson["0"] = key_id }
+        end
+      end
+    end
+  end
+end
+
+extra = BSON.build do |bson|
+  bson["cryptSharedLibPath"] = "/usr/local/lib/mongo_crypt_v1.so"
+  bson["cryptSharedLibRequired"] = true
+end
+
+auto = Mongo::Client.new(
+  uri,
+  auto_encryption: Mongo::AutoEncryption.new(
+    key_vault_namespace: "keyvault.datakeys",
+    kms_providers: kms,
+    schema_map: schema,
+    extra_options: extra
+  )
+)
+auto["hr"]["people"].insert_one({ssn: "123-45-6789", name: "Ada"})
+auto.close
+```
+
+Do not encrypt `_id` unless you mean to. Key-vault commands on that client bypass auto-encryption. `bypass_auto_encryption: true` skips encrypt and still decrypts. `bypass_query_analysis: true` skips crypt_shared (writes still encrypt from the map / collinfo). This version does not spawn mongocryptd.
+
+Queryable Encryption (MongoDB 8.0 equality and range) uses `encrypted_fields_map` instead of `schemaMap`. Do not put the same collection in both. `create_encrypted_collection` generates data keys for null `keyId`, then creates the collection (plus ESC / ECOC). Configure auto-encryption on a **new** client with the returned `encryptedFields`. `compact_structured_encryption_data` needs that auto-encrypting client. Queryable Encryption collections need a replica set or sharded cluster (not standalone). Prefix / suffix / substring need MongoDB 8.2+ and are not in this version.
+
+```crystal
+ef = BSON.build do |bson|
+  bson.array("fields") do
+    bson.document("0") do
+      bson["path"] = "ssn"
+      bson["bsonType"] = "string"
+      bson["keyId"] = nil
+      bson.document("queries") { bson["queryType"] = "equality" }
+    end
+  end
+end
+
+_coll, filled = encryption.create_encrypted_collection(
+  client["hr"],
+  "people",
+  encrypted_fields: ef,
+  kms_provider: "local"
+)
+encryption.close
+
+qe_map = BSON.build { |bson| bson["hr.people"] = filled }
+qe = Mongo::Client.new(
+  uri,
+  auto_encryption: Mongo::AutoEncryption.new(
+    key_vault_namespace: "keyvault.datakeys",
+    kms_providers: kms,
+    encrypted_fields_map: qe_map,
+    extra_options: extra
+  )
+)
+qe["hr"]["people"].insert_one({ssn: "123-45-6789", name: "Ada"})
+found = qe["hr"]["people"].find_one({ssn: "123-45-6789"})
+qe["hr"]["people"].compact_structured_encryption_data
+qe.close
+```
 
 ## Change streams
 
@@ -851,7 +937,7 @@ See [BENCHMARK.md](BENCHMARK.md) (how to run, then the numbers). BSON-only: `cry
 4. Push to the branch (`git push origin my-new-feature`)
 5. Create a new Pull Request
 
-Spec CI runs `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=snappy,zstd,zlib` (snappy is first, so the suite uses snappy; zlib and zstd run in compression prose). UTF holds one cluster lock per JSON file so failCommand and step-down do not overlap. Live prose that talks to mongod uses the same lock. Retryable writes wait for a replica-set primary instead of sending the first write to a lone Unknown seed (GitHub 27017 is often a secondary). Replica-set leftover failCommand is turned off with `directConnection` (long poll heartbeat, no URI userinfo) so an Unknown member cannot keep it.
+Spec CI runs `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=snappy,zstd,zlib` (snappy is first, so the suite uses snappy; zlib and zstd run in compression prose). Linux GitHub is a 24-cell matrix: Ubuntu 22.04, 24.04, and 26.04 (preview) on x64 and arm64, each with standalone, replica set, sharded, and load-balanced (`docker-topology.sh`). macOS GitHub is 8 cells: **macos-15** and **macos-26** (arm64) × the same four topologies, native Community MongoDB 8.0.29 (`ci-native-topology.sh`, not Docker). Labels are pinned. Do not use `ubuntu-latest` or `macos-latest`. Skip `ubuntu-slim`, **macos-14** (deprecated), and intel `macos-*-large`. Windows GitHub is leftover (the driver does not compile). Cache keys include OS and arch (libmongocrypt linux x86_64 glibc_2_7 vs arm64 glibc_2_17 vs macos universal; crypt_shared must match arch). UTF holds one cluster lock per JSON file so failCommand and step-down do not overlap. Live prose that talks to mongod uses the same lock. Retryable writes wait for a replica-set primary instead of sending the first write to a lone Unknown seed (GitHub 27017 is often a secondary). Replica-set leftover failCommand is turned off with `directConnection` (long poll heartbeat, no URI userinfo) so an Unknown member cannot keep it.
 
 ## Contributors
 

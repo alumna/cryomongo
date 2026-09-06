@@ -107,6 +107,9 @@ class Mongo::Cursor
   def next
     owns_iteration = start_iteration_deadline
     begin
+      {% if flag?(:darwin) %}
+        empty_await_get_mores = 0
+      {% end %}
       loop do
         if (limit = @limit) && @yielded >= limit
           return Iterator::Stop::INSTANCE
@@ -121,12 +124,37 @@ class Mongo::Cursor
         # Only a closed cursor (id 0) means the iteration is over.
         return Iterator::Stop::INSTANCE if @cursor_id == 0
 
+        # Deadline at first byte: leftover 0 still sends getMore so
+        # commandStarted fires. AwaitReadIO raises on read when leftover
+        # was already 0 at wrap.
         fetch_more
 
         # Non-tailable: an empty getMore means the result is exhausted.
         # Tailable / change streams stay open and wait again.
         if !@tailable && batch_empty?
           return Iterator::Stop::INSTANCE
+        end
+
+        # Empty tailable getMore: expire this next() instead of looping
+        # forever. A getMore with no leftover timeoutMS never returns
+        # (ARM sharded hung). Do not start a new timeoutMS per getMore.
+        if @tailable && batch_empty?
+          check_iteration_expired!
+          {% if flag?(:darwin) %}
+            # Darwin find awaitData: two empty getMores then stop. Leftover 0
+            # already expired above. One empty then stop closed got-3 and
+            # broke official refresh (timeoutMS 250, maxAwaitTimeMS 1,
+            # failPoint 150): the blocked getMore can be empty, the next
+            # getMore has the document. A third getMore was got-3. Do not
+            # treat MaxTimeMSExpired as a third getMore either. Linux still
+            # loops until leftover expires. Change streams keep looping.
+            if stop_after_empty_await_get_more?
+              empty_await_get_mores += 1
+              if empty_await_get_mores >= 2
+                raise Mongo::Error::Timeout.new("Operation exceeded timeoutMS")
+              end
+            end
+          {% end %}
         end
       end
     ensure
@@ -276,24 +304,54 @@ class Mongo::Cursor
   # Change streams set @iteration_deadline first so this returns false.
   private def start_iteration_deadline : Bool
     return false unless @timeout_mode.iteration?
-    return false unless @timeout_ms
+    return false if @timeout_ms.nil?
     return false if @iteration_deadline
     @iteration_deadline = Mongo::Deadline.from_timeout_ms(@timeout_ms)
     true
   end
 
+  # timeoutMode iteration: each next/try_next gets a fresh timeoutMS.
+  # AwaitData getMore must use that, not leftover from find.
+  # After find (timeoutMS 250, failPoint 150) leftover is ~100ms. A blocked
+  # getMore then times out or returns empty and next() sends another getMore
+  # (official test: find + one getMore). If leftover is nil, wrap_command_io
+  # waits forever and the cell hangs. Do not start a new timeoutMS per
+  # getMore inside one next() — that never expires.
   private def get_more_deadline : Mongo::Deadline?
-    if @timeout_mode.iteration? && @timeout_ms
-      d = @iteration_deadline || Mongo::Deadline.from_timeout_ms(@timeout_ms)
-      @iteration_deadline = d
-      if @tailable && @await_time_ms
-        d
-      else
-        d.try(&.without_max_time)
+    if @timeout_mode.iteration?
+      ms = @timeout_ms
+      unless ms.nil?
+        d = @iteration_deadline
+        if d.nil?
+          d = Mongo::Deadline.from_timeout_ms(ms)
+          @iteration_deadline = d
+        end
+        if @tailable && @await_time_ms
+          return d
+        else
+          return d.try(&.without_max_time)
+        end
       end
-    else
-      @deadline
     end
+    @deadline
+  end
+
+  private def check_iteration_expired! : Nil
+    if d = @iteration_deadline || @deadline
+      d.check!
+    end
+  end
+
+  # Darwin find awaitData only. Linux compiles this out of next() so the
+  # empty-expire loop and get_more_deadline stay as they are.
+  # next() stops after two empty awaitData getMores (not one).
+  # ChangeStream::Cursor returns false (idle empty getMores must wait).
+  protected def stop_after_empty_await_get_more? : Bool
+    {% if flag?(:darwin) %}
+      !@await_time_ms.nil?
+    {% else %}
+      false
+    {% end %}
   end
 
   # close() always starts a fresh timeoutMS, even if cursor lifetime already expired.

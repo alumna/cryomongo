@@ -186,7 +186,10 @@ module Mongo::SDAM
       @topology.update(previous, new_description)
       # Clear with the topology update. Only when leaving a known state so UTF
       # sees one poolClearedEvent (a paused pool would emit again).
-      @client.clear_pool(previous, interrupt_in_use: new_description.error_is_timeout) if new_description.error && known
+      # Load-balanced has no monitors; do not pause that pool.
+      if new_description.error && known && !@client.options.load_balanced
+        @client.clear_pool(previous, interrupt_in_use: new_description.error_is_timeout)
+      end
     end
 
     private def do_check(previous : ServerDescription) : {Commands::Hello::Result, Time::Span, Bool}
@@ -334,8 +337,8 @@ module Mongo::SDAM
     private def awaitable_timeout_extra(previous : ServerDescription) : Time::Span
       extra = @heartbeat_frequency
       return extra if previous.type.mongos?
-      configured = @client.options.connect_timeout
-      return extra if configured && configured.total_milliseconds == 0
+      configured = Mongo::Connection.uri_timeout(@client.options.connect_timeout)
+      return extra unless configured
       base = configured || 10.seconds
       # mongod 8.0 default minWaitForStreamingHelloMillis is 1000, so an
       # unchanged topologyVersion waits ~1s even when maxAwaitTimeMS is smaller.
@@ -351,10 +354,13 @@ module Mongo::SDAM
 
     private def apply_socket_timeout(conn : Mongo::Connection, extra : Time::Span? = nil) : Nil
       # URI default connectTimeoutMS is 10s. 0 means no timeout, including awaitable hello.
-      configured = @client.options.connect_timeout
-      if configured && configured.total_milliseconds == 0
-        conn.apply_timeout(nil)
-        return
+      # Darwin kqueue treats Time::Span.zero as an immediate timeout.
+      configured = Mongo::Connection.uri_timeout(@client.options.connect_timeout)
+      unless configured
+        if @client.options.connect_timeout
+          conn.apply_timeout(nil)
+          return
+        end
       end
       base = configured || 10.seconds
       conn.apply_timeout(extra ? base + extra : base)

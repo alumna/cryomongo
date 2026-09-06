@@ -13,6 +13,7 @@ test*.sh
 
 /data
 /tmp/
+/vendor/libmongocrypt/
 /specifications*
 drivers-evergreen-tools/
 /local
@@ -20,4 +21,7 @@ drivers-evergreen-tools/
 # Temporary
 FIXES.md
 LOCAL_TESTING.md
+
+# Local workbench only. GitHub shards install uses shard.yml (bson.cr master).
+/shard.override.yml
 

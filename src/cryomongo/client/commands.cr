@@ -224,14 +224,17 @@ class Mongo::Client
     database_name = ""
     want_apm = @commands_observable.has_subscribers?
     want_log = want_command_logs?
+    wrapped_csot_io = false
 
-    deadline.try(&.check!)
-    remaining = if (d = deadline) && !d.infinite?
-                  d.remaining
-                else
-                  nil
-                end
-    connection.apply_timeout(remaining || @options.socket_timeout)
+    # Deadline at first byte: leftover 0 still sends so commandStarted
+    # fires (2nd find / getMore / 3rd insert). AwaitReadIO last-reads
+    # only when leftover was >0 at wrap (one Darwin slice, 10ms Instant,
+    # then wait 0). leftover 0 at wrap raises on read without a last-read.
+    # Do not check! here.
+    # Drop a leaked handshake wrap so this command uses timeoutMS or
+    # socketTimeoutMS, not connectTimeoutMS / an infinite slice retry.
+    connection.unwrap_deadline_io
+    wrapped_csot_io = wrap_command_io(connection, deadline)
 
     # Load-balanced transactions keep this socket even if this command fails
     # with a non-transient error.
@@ -281,6 +284,18 @@ class Mongo::Client
     end
 
     flag_bits = unacknowledged ? Messages::OpMsg::Flags::MoreToCome : Messages::OpMsg::Flags::None
+
+    # Auto-encryption: one nil check. No extra alloc when it is off.
+    # Encrypt before session fields so lsid / txnNumber are appended after.
+    # Key-vault and listCollections set a per-fiber bypass (no re-entry).
+    if auto = @auto_encryption
+      unless auto.bypassing?
+        unless auto.skip_encrypt?
+          body = auto.encrypt_command(body, sequences)
+          sequences = nil
+        end
+      end
+    end
 
     # Apply session rules, then retry extras, then Server API.
     session.mark_used
@@ -441,8 +456,17 @@ class Mongo::Client
       raise wrap_csot_timeout(error, deadline)
     end
 
+    # Decrypt after APM CommandSucceeded (spec). Skip when this fiber is
+    # fetching keys or collection info. Still decrypt when bypass_auto_encryption.
+    result_body = op_msg.body
+    if auto = @auto_encryption
+      unless auto.bypassing?
+        result_body = auto.decrypt_reply(result_body)
+      end
+    end
+
     # Parse and return the body as a custom Result type.
-    result = command.result(op_msg.body)
+    result = command.result(result_body)
     session.last_operation_server = server_description
 
     # APM already recorded Succeeded for bulkWrite ok:1 + writeConcernError.
@@ -493,7 +517,7 @@ class Mongo::Client
       )
     end
     if error.is_a?(NetworkError)
-      keep_pin = error.is_a?(IO::TimeoutError) &&
+      keep_pin = io_timeout?(error) &&
                  !owns_connection &&
                  @options.load_balanced &&
                  connection.awaiting_reply? &&
@@ -516,7 +540,7 @@ class Mongo::Client
       else
         # After handshake, a socket timeout is a slow operation, not a dead server.
         # closeConnection / reset still mark Unknown and clear the pool.
-        kind = error.is_a?(IO::TimeoutError) ? SDAM::ApplicationError::Kind::Timeout : SDAM::ApplicationError::Kind::Network
+        kind = io_timeout?(error) ? SDAM::ApplicationError::Kind::Timeout : SDAM::ApplicationError::Kind::Network
         action = SDAM::ApplicationError.decide(kind, SDAM::ApplicationError::Phase::AfterHandshake, stale: false)
         unless action.ignore? || keep_pin
           # After handshake, a non-timeout network error marks Unknown and
@@ -531,8 +555,10 @@ class Mongo::Client
       end
       session.try &.dirty = true
       if (d = deadline) && !d.infinite? && !error.is_a?(Error::PoolCleared)
-        cause = error.cause
-        if d.expired? || cause.is_a?(IO::TimeoutError)
+        # A leaked Darwin slice is io_timeout? while the CSOT deadline still
+        # has time. Raise Timeout only when the deadline has passed. Linux
+        # CSOT already waits until expiry, so d.expired? is true there.
+        if d.expired?
           error = Error::Timeout.new("socket timeout: #{error.message}", cause: error)
         end
       end
@@ -570,6 +596,7 @@ class Mongo::Client
 
     raise error
   ensure
+    connection.unwrap_deadline_io if wrapped_csot_io
     session.majority_commit_wc = false
     release_connection(connection) if connection && owns_connection
     if end_implicit_session && !keeps_implicit_session?(result)
@@ -598,8 +625,9 @@ class Mongo::Client
   end
 
   # SDAM application error: ignore stale generation / topologyVersion so two
-  # concurrent shutdowns emit one Unknown and one poolClearedEvent. Pool clear
-  # stays under the topology lock (SDAM spec).
+  # concurrent shutdowns emit one Unknown and one poolClearedEvent. Equal TV
+  # still marks Unknown while the type is Primary. Mongos / load-balanced
+  # stay spec-stale. Pool clear stays under the topology lock (SDAM spec).
   private def handle_application_error(
     server_description : SDAM::ServerDescription?,
     connection : Mongo::Connection?,
@@ -639,6 +667,49 @@ class Mongo::Client
     @monitors.find(&.server_description.address.== desc.address).try &.cancel_check
   end
 
+  # CSOT: slice until leftover timeoutMS. Darwin without CSOT: slice until
+  # socketTimeoutMS (or until data if unset) so a false kqueue timeout is
+  # retried but a failPoint blockConnection still expires. Linux without
+  # CSOT keeps a single socket wait (hot path).
+  private def wrap_command_io(connection : Mongo::Connection, deadline : Mongo::Deadline?) : Bool
+    if (d = deadline) && !d.infinite?
+      left = d.remaining
+      leftover_positive = left > Time::Span.zero
+      # Deadline at first byte: leftover 0 still wraps so the send can
+      # run. AwaitReadIO last-reads only when leftover was >0 at wrap
+      # (this command was sent with budget): two Darwin slices (20ms
+      # Instant), Darwin 0 is now. leftover 0 at wrap still sends then
+      # raises on read (no last-read).
+      expire_at = leftover_positive ? Time.instant + left : Time.instant
+      # Do not set leftover timeoutMS as one socket wait. Darwin kqueue can
+      # fire that wait early (bulkWrite UTF then sees two inserts, not three).
+      # Slices retry a premature IO::TimeoutError or ETIMEDOUT until the
+      # CSOT deadline.
+      connection.apply_timeout(nil)
+      return connection.wrap_deadline_io(expire_at, csot: true, leftover_positive_at_wrap: leftover_positive)
+    end
+    sock = Mongo::Connection.uri_timeout(@options.socket_timeout)
+    {% if flag?(:darwin) %}
+      connection.apply_timeout(nil)
+      expire_at = sock ? Time.instant + sock : nil
+      connection.wrap_deadline_io(expire_at)
+    {% else %}
+      connection.apply_timeout(sock)
+      false
+    {% end %}
+  end
+
+  # Darwin may surface ETIMEDOUT as Socket::Error, not IO::TimeoutError.
+  private def io_timeout?(error : Exception?) : Bool
+    return false unless error
+    return true if error.is_a?(IO::TimeoutError)
+    if error.responds_to?(:os_error)
+      os = error.os_error
+      return true if os == Errno::ETIMEDOUT
+    end
+    io_timeout?(error.cause)
+  end
+
   private def resolve_deadline(deadline : Mongo::Deadline?, session : Session::ClientSession?) : Mongo::Deadline?
     return deadline if deadline
     if d = session.try(&.operation_deadline)
@@ -657,11 +728,18 @@ class Mongo::Client
     return body if deadline.infinite?
     return body if command != Commands::GetMore && !deadline.send_max_time?
 
-    live = topology.servers.find { |s| s.address == server_description.address }
-    min_rtt = (live || server_description).min_round_trip_time
-    max_time_ms = deadline.max_time_ms(min_rtt)
-    unless max_time_ms
-      raise Error::Timeout.new("remaining timeoutMS is less than server min RTT")
+    leftover_zero = deadline.remaining <= Time::Span.zero
+    if leftover_zero
+      # leftover 0 still send: keep a positive maxTimeMS (floor 1).
+      # Do not skip. Do not raise remaining < min RTT before send.
+      max_time_ms = 1_i64
+    else
+      live = topology.servers.find { |s| s.address == server_description.address }
+      min_rtt = (live || server_description).min_round_trip_time
+      max_time_ms = deadline.max_time_ms(min_rtt)
+      unless max_time_ms
+        raise Error::Timeout.new("remaining timeoutMS is less than server min RTT")
+      end
     end
 
     if command == Commands::GetMore

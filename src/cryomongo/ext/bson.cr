@@ -1,5 +1,5 @@
 # :nodoc:
-struct BSON
+class BSON
   # Return a copy with keys from *named_tuple* overriding this document.
   # One builder pass. Do not use many `[]=` calls.
   def copy_with(named_tuple : NamedTuple) : BSON

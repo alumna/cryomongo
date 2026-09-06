@@ -1,5 +1,9 @@
 # Read a BSON document as a view of an already-read message buffer.
-# The slice stays valid while *buffer* (or a view into it) is alive.
+# The slice stays valid while *buffer* is alive. Receive OpMsg / OpReply
+# are classes and wrap that buffer in OwnedReceive. A class field on a
+# struct OpMsg is not a Darwin GC root (Wave 47). Interior BSON.view
+# slices are not either. Wave 55: error? / body rebuild the view from
+# pin.bytes (OwnedReceive#view). A pin only in ensure is dropped.
 module Mongo::Messages
   def self.read_bson_view(buffer : Bytes, io : IO::Memory) : BSON
     pos = io.pos

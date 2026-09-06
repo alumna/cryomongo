@@ -184,9 +184,14 @@ class Mongo::Collection
   end
 
   # Drops this collection. NamespaceNotFound (code 26) is ignored.
+  # Queryable Encryption also drops ESC and ECOC when the namespace is in
+  # AutoEncryption `encryptedFieldsMap`.
   #
   # NOTE: [for more details, please check the official MongoDB documentation](https://docs.mongodb.com/manual/reference/command/drop/).
   def drop(*, session : Session::ClientSession? = nil, timeout_ms : Int64? = nil, deadline : Mongo::Deadline? = nil) : Commands::Common::BaseResult?
+    if ef = @database.client.encrypted_fields_for("#{@database.name}.#{@name}")
+      @database.drop_queryable_encryption_state(@name.to_s, ef, session, timeout_ms, deadline)
+    end
     @database.command(Commands::Drop, name: @name, session: session, timeout_ms: timeout_ms, deadline: deadline, write_concern: @write_concern)
   rescue e : Mongo::Error::Command
     return nil if e.code == 26

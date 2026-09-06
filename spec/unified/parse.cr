@@ -4,6 +4,46 @@ require "bson"
 module Mongo::Unified::Parse
   extend self
 
+  # Relaxed ExtJSON numbers that fit in Int32 become `$numberInt`.
+  # `BSON.from_json` stores a JSON integer as Int64 (Crystal pull parser).
+  # Queryable Encryption `bsonType: int` rejects that long.
+  # Typed wrappers (`$numberLong`, `$oid`, `$minKey`, …) stay as written.
+  # Canonical ExtJSON wrappers. Query operators (`$eq`) are not wrappers.
+  EXTJSON_WRAPPERS = {
+    "$oid", "$symbol", "$numberInt", "$numberLong", "$numberDouble", "$numberDecimal",
+    "$binary", "$uuid", "$code", "$timestamp", "$regularExpression", "$dbPointer",
+    "$date", "$minKey", "$maxKey", "$undefined",
+  }
+
+  def extjson_wrapper?(key : String) : Bool
+    EXTJSON_WRAPPERS.includes?(key)
+  end
+  def promote_relaxed_ints(json : JSON::Any) : JSON::Any
+    if h = json.as_h?
+      if h.size == 1
+        key = h.first_key
+        return json if extjson_wrapper?(key)
+      end
+      promoted = Hash(String, JSON::Any).new(initial_capacity: h.size)
+      h.each { |k, v| promoted[k] = promote_relaxed_ints(v) }
+      JSON::Any.new(promoted)
+    elsif a = json.as_a?
+      JSON::Any.new(a.map { |v| promote_relaxed_ints(v) })
+    elsif i = json.as_i64?
+      if i >= Int32::MIN && i <= Int32::MAX
+        JSON::Any.new({"$numberInt" => JSON::Any.new(i.to_s)})
+      else
+        JSON::Any.new({"$numberLong" => JSON::Any.new(i.to_s)})
+      end
+    else
+      json
+    end
+  end
+
+  def json_to_bson(json : JSON::Any) : BSON
+    BSON.from_json(promote_relaxed_ints(json).to_json)
+  end
+
   def write_concern(json : JSON::Any) : Mongo::WriteConcern
     hash = json.as_h
     w_json = hash["w"]?

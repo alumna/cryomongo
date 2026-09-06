@@ -1,7 +1,11 @@
 require "./header"
 require "./message_part"
 
-struct Mongo::Messages::Message
+# Class so Connection.receive can copy contents and drop this Message
+# without losing a Darwin GC root. Embedding a struct Part (or a class
+# field on a struct OpMsg) is not enough (Waves 42 / 47). Header stays
+# a struct (four ints).
+class Mongo::Messages::Message
   @@id = Atomic(Int32).new(0)
 
   getter header : Header

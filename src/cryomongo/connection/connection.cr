@@ -41,9 +41,29 @@ class Mongo::Connection
   @awaiting_reply = false
   # Receive timed out with no frame bytes. The next send drains the late reply.
   @pending_reply = false
+  # Socket under AwaitReadIO while a CSOT / awaitable-hello deadline is active.
+  @deadline_inner : IO? = nil
 
   def self.next_id : Int64
     @@next_connection_id.add(1)
+  end
+
+  # URI connectTimeoutMS / socketTimeoutMS 0 means no timeout.
+  # Crystal Time::Span.zero is an immediate timeout on Darwin kqueue.
+  def self.uri_timeout(span : Time::Span?) : Time::Span?
+    return nil unless span
+    return nil if span <= Time::Span.zero
+    span
+  end
+
+  # Handshake wait. Unset connectTimeoutMS is 10s (URI spec). 0 is infinite.
+  # Do not treat unset as infinite: wrap would retry failPoint hello forever
+  # and never mark Unknown.
+  def self.handshake_timeout(options : Mongo::Options) : Time::Span?
+    span = uri_timeout(options.connect_timeout)
+    return span if span
+    return nil if options.connect_timeout
+    10.seconds
   end
 
   def initialize(@server_description : SDAM::ServerDescription, @credentials : Mongo::Credentials, @options : Mongo::Options, is_monitor : Bool = false, connection_id : Int64? = nil)
@@ -67,17 +87,16 @@ class Mongo::Connection
       clean_host = host.starts_with?('[') && host.ends_with?(']') ? host.byte_slice(1, host.bytesize - 2) : host
       tls_hostname = clean_host
 
-      tcp = TCPSocket.new(clean_host, port, dns_timeout: @options.connect_timeout, connect_timeout: @options.connect_timeout)
+      # connectTimeoutMS=0 must be nil. Darwin kqueue treats 0 as now.
+      connect_span = Mongo::Connection.uri_timeout(@options.connect_timeout)
+      tcp = TCPSocket.new(clean_host, port, dns_timeout: connect_span, connect_timeout: connect_span)
       tcp.tcp_nodelay = true
       raw = tcp
     end
     @raw_socket = raw
 
     timeout = is_monitor ? @options.connect_timeout : @options.socket_timeout
-
-    if timeout && timeout.total_milliseconds == 0
-      timeout = nil
-    end
+    timeout = Mongo::Connection.uri_timeout(timeout)
 
     raw.read_timeout = timeout
     raw.write_timeout = timeout
@@ -108,14 +127,22 @@ class Mongo::Connection
   end
 
   def handshake(*, send_metadata = false, appname = nil, legacy = false, client_metadata : BSON? = nil, load_balanced : Bool = false)
-    run_hello(
-      send_metadata: send_metadata,
-      appname: appname,
-      legacy: legacy,
-      client_metadata: client_metadata,
-      load_balanced: load_balanced,
-      first: true
-    )
+    # Darwin kqueue fires a 1ms socketTimeoutMS wait at once. Hello then
+    # fails before CSOT timeoutMS can ignore socketTimeoutMS (UTF
+    # "socketTimeoutMS is ignored if timeoutMS is set"). Slice until
+    # connectTimeoutMS (10s if unset) so hello can finish. A failPoint
+    # hello block longer than that still times out. Restore socketTimeoutMS
+    # after. Do not drop this wrap.
+    wrap_connect_deadline do
+      run_hello(
+        send_metadata: send_metadata,
+        appname: appname,
+        legacy: legacy,
+        client_metadata: client_metadata,
+        load_balanced: load_balanced,
+        first: true
+      )
+    end
   end
 
   # Later monitor / RTT hello. No client metadata. Optional awaitable fields for streaming.
@@ -243,20 +270,69 @@ class Mongo::Connection
   # (streaming exhaust). receive() would wait for the next exhaust reply and
   # miss connectTimeoutMS + heartbeatFrequencyMS.
   private def receive_awaitable(started : Time::Instant)
-    overall = @raw_socket.read_timeout
-    deadline = overall ? started + overall : nil
-    inner = @socket
-    @socket = AwaitReadIO.new(inner, @raw_socket, deadline, self)
+    overall = Mongo::Connection.uri_timeout(@raw_socket.read_timeout)
+    expire_at = overall ? started + overall : nil
+    # Nested wrap is a no-op. Only unwrap if this call wrapped, or a
+    # handshake wrap would be stripped mid-hello.
+    wrapped = wrap_deadline_io(expire_at)
     begin
       receive_one
     ensure
-      @socket = inner
+      unwrap_deadline_io if wrapped
       apply_timeout(overall)
+    end
+  end
+
+  # Slice waits until *expire_at*. Nil means no deadline (connectTimeoutMS=0).
+  # Returns false when the socket is already wrapped (nested command).
+  # *csot* and *leftover_positive_at_wrap* select the leftover-0 last-read
+  # (CSOT command sent with leftover >0: two Darwin slices, 20ms Instant,
+  # then wait 0). Handshake / Darwin socketTimeoutMS keep the defaults
+  # (raise at leftover 0, no last-read).
+  def wrap_deadline_io(expire_at : Time::Instant?, *, csot : Bool = false, leftover_positive_at_wrap : Bool = false) : Bool
+    return false if @socket.is_a?(AwaitReadIO)
+    inner = @socket
+    @deadline_inner = inner
+    @socket = AwaitReadIO.new(
+      inner,
+      @raw_socket,
+      expire_at,
+      self,
+      csot: csot,
+      leftover_positive_at_wrap: leftover_positive_at_wrap,
+    )
+    true
+  end
+
+  def unwrap_deadline_io : Nil
+    inner = @deadline_inner
+    return unless inner
+    @socket = inner
+    @deadline_inner = nil
+  end
+
+  # Handshake / SASL: slice until connectTimeoutMS. Unset is 10s, not
+  # infinite. Nested wrap is a no-op (already AwaitReadIO). Restore the
+  # usual socket timeout after so a later command uses socketTimeoutMS.
+  private def wrap_connect_deadline
+    connect_span = Mongo::Connection.handshake_timeout(@options)
+    expire_at = connect_span ? Time.instant + connect_span : nil
+    wrapped = wrap_deadline_io(expire_at)
+    begin
+      yield
+    ensure
+      unwrap_deadline_io if wrapped
+      restore = @monitor ? connect_span : Mongo::Connection.uri_timeout(@options.socket_timeout)
+      apply_timeout(restore)
     end
   end
 
   private def receive_one
     message = Mongo::Messages::Message.new(socket)
+    # Class pointer, not a struct copy. Handshake then calls error? after
+    # this Message is gone. A class field on a struct OpMsg is not a
+    # Darwin GC root (Wave 47). Receive types are classes (Wave 52).
+    # Wave 55: error? walks through OwnedReceive#view (pin.bytes).
     op_msg = message.contents.as(Messages::OpMsg)
     @more_to_come = op_msg.flag_bits.more_to_come?
     op_msg
@@ -317,43 +393,47 @@ class Mongo::Connection
 
   def authenticate
     # see: https://github.com/mongodb/specifications/blob/master/source/auth/auth.rst#authentication-handshake
+    # Darwin 1ms socketTimeoutMS can also fire during SASL after hello.
+    # Slice until connectTimeoutMS (10s if unset), same as handshake.
     return if server_description.type.rs_arbiter?
     return if @credentials.username.nil? && @credentials.password.nil? && @credentials.mechanism.nil?
 
-    if reply = @speculative_reply
-      if scram = @speculative_scram
-        scram.continue_from_hello(self, reply)
-        clear_speculative_auth
-        return
-      elsif @speculative_x509
-        clear_speculative_auth
-        return
+    wrap_connect_deadline do
+      if reply = @speculative_reply
+        if scram = @speculative_scram
+          scram.continue_from_hello(self, reply)
+          clear_speculative_auth
+          next
+        elsif @speculative_x509
+          clear_speculative_auth
+          next
+        end
       end
-    end
-    clear_speculative_auth
+      clear_speculative_auth
 
-    mechanism = if m = @credentials.mechanism
-                  Auth.parse_mechanism(m)
-                elsif mechs = @sasl_supported_mechs
-                  if mechs.any? { |name| name.upcase.gsub(/[-_]/, "") == "SCRAMSHA256" }
-                    Auth::Mechanism::ScramSha256
+      mechanism = if m = @credentials.mechanism
+                    Auth.parse_mechanism(m)
+                  elsif mechs = @sasl_supported_mechs
+                    if mechs.any? { |name| name.upcase.gsub(/[-_]/, "") == "SCRAMSHA256" }
+                      Auth::Mechanism::ScramSha256
+                    else
+                      Auth::Mechanism::ScramSha1
+                    end
                   else
                     Auth::Mechanism::ScramSha1
                   end
-                else
-                  Auth::Mechanism::ScramSha1
-                end
 
-    case mechanism
-    when .scram_sha1?, .scram_sha256?
-      scram = Mongo::Auth::Scram.new(mechanism, @credentials)
-      scram.authenticate(self)
-    when .mongodb_x509?
-      Mongo::Auth::X509.authenticate(self, @credentials)
-    when .plain?
-      Mongo::Auth::Plain.authenticate(self, @credentials)
-    else
-      raise Mongo::Error.new "Authentication mechanism not supported: #{mechanism}"
+      case mechanism
+      when .scram_sha1?, .scram_sha256?
+        scram = Mongo::Auth::Scram.new(mechanism, @credentials)
+        scram.authenticate(self)
+      when .mongodb_x509?
+        Mongo::Auth::X509.authenticate(self, @credentials)
+      when .plain?
+        Mongo::Auth::Plain.authenticate(self, @credentials)
+      else
+        raise Mongo::Error.new "Authentication mechanism not supported: #{mechanism}"
+      end
     end
   end
 
@@ -441,6 +521,9 @@ class Mongo::Connection
         "(#{server_description.address}) << #{"[#{message.header.response_to}]".ljust(8)} Header: #{message.header.inspect}"
       } if log
 
+      # Same as receive_one: copy the OpMsg class pointer, then drop Message
+      # after the yield. Do not checkin the owned copy. error? uses
+      # OwnedReceive#view so the owner stays live (Wave 55).
       op_msg = message.contents.as(Messages::OpMsg)
       more_to_come = op_msg.flag_bits.more_to_come?
 
@@ -540,66 +623,4 @@ class Mongo::Connection
   end
 end
 
-# :nodoc:
-# Wait for data in 100ms slices. IO::TimeoutError stays inside read(), so
-# Message.new does not unwind after a partial header or body.
-class Mongo::Connection::AwaitReadIO < IO
-  def initialize(@inner : IO, @raw : ::Socket, @deadline : Time::Instant?, @connection : Mongo::Connection)
-  end
-
-  def read(slice : Bytes) : Int32
-    slice_cap = 100.milliseconds
-    loop do
-      if @connection.interrupted? || @inner.closed?
-        raise IO::Error.new("Closed stream")
-      end
-      if deadline = @deadline
-        left = deadline - Time.instant
-        raise IO::TimeoutError.new("Read timed out") if left <= Time::Span.zero
-        wait = left < slice_cap ? left : slice_cap
-      else
-        wait = slice_cap
-      end
-      if @connection.interrupted?
-        wait = 1.millisecond
-      end
-      @raw.read_timeout = wait
-      @raw.write_timeout = wait
-      inner = @inner
-      unless inner.same?(@raw)
-        if inner.responds_to?(:read_timeout=)
-          inner.read_timeout = wait
-        end
-        if inner.responds_to?(:write_timeout=)
-          inner.write_timeout = wait
-        end
-      end
-      # interrupt() may have set 1ms, then this loop wrote 100ms back. Recheck
-      # so close does not start another full slice.
-      if @connection.interrupted? || @inner.closed?
-        raise IO::Error.new("Closed stream")
-      end
-      begin
-        return @inner.read(slice)
-      rescue IO::TimeoutError
-        next
-      end
-    end
-  end
-
-  def write(slice : Bytes) : Nil
-    @inner.write(slice)
-  end
-
-  def flush
-    @inner.flush
-  end
-
-  def close
-    @inner.close
-  end
-
-  def closed? : Bool
-    @inner.closed?
-  end
-end
+require "./io/await_read_io"

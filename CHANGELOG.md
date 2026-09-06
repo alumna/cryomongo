@@ -2,24 +2,296 @@
 
 ## Unreleased
 
+Client-Side Field Level Encryption (CSFLE)
+
 ### Added
 - Explicit client-side encryption (`Mongo::ClientEncryption`), local KMS only
-  - System `libmongocrypt` bindings (`pkg-config`; link `-lmongocrypt` only)
+  - libmongocrypt bindings (official **1.20.4** vendored by default)
   - `create_data_key`, `encrypt`, `decrypt`
+  - Key vault: `get_key`, `get_keys`, `delete_key`,
+    `add_key_alt_name`, `remove_key_alt_name`, `get_key_by_alt_name`
+  - `rewrap_many_data_key` (local KMS; empty match has no `bulkWriteResult`)
   - Encrypted values are BSON binary subtype `0x06`
   - Compile `-Dwithout_libmongocrypt` skips the link; the type then raises
   - Specs skip the live encrypt path when the library is missing
-  - GitHub CI installs `libmongocrypt-dev` so that spec runs
+  - GitHub CI runs `scripts/vendor-libmongocrypt.sh` (does not install `libmongocrypt-dev`)
+  - Linux official tarball is nocrypto; OpenSSL AES / HMAC / SHA / RAND hooks fill that gap
+- Auto-encryption on `Mongo::Client` (`Mongo::AutoEncryption`, FLE1 `schemaMap`)
+  - Local KMS only; crypt_shared (`mongo_crypt_v1.so`) for query analysis
+  - `extraOptions.cryptSharedLibPath` or `CRYPT_SHARED_LIB_PATH`
+  - Insert / find / update / delete encrypt marked fields and decrypt results
+  - Key-vault commands bypass auto-encryption (no deadlock)
+  - Specs skip when libmongocrypt or crypt_shared is missing
+  - GitHub CI downloads crypt_shared (does not commit the `.so`)
+  - mongocryptd is not spawned
+  - `bypass_query_analysis` skips crypt_shared (writes still encrypt from the map)
+- Queryable Encryption on `Mongo::Client` (`encryptedFieldsMap`, MongoDB 8.0 equality)
+  - `Mongo::AutoEncryption.new(..., encrypted_fields_map:)`
+  - `ClientEncryption#create_encrypted_collection` (null `keyId` → data key)
+  - `Database#create_collection` creates ESC / ECOC and `__safeContent__`
+  - `Collection#compact_structured_encryption_data` (auto-encryption fills tokens)
+  - Specs skip when libmongocrypt or crypt_shared is missing
+  - Queryable Encryption collections need a replica set or sharded cluster
+  - MongoDB 8.0 range is in the official UTF slice
+  - Prefix / suffix / substring and MongoDB 8.2+ stay out
+- First official CSFLE unified batch (local KMS, MongoDB 8.0)
+  - Copied: `localKMS`, `namedKMS`, `namedKMS-explicit`, `keyCache`,
+    `create-and-createIndexes`, `fle2v2-InsertFind-Indexed`
+  - UTF `clientEncryption` entity; `encrypt` / `decrypt` ops
+  - UTF client `autoEncryptOpts` (schemaMap, encryptedFieldsMap, extraOptions)
+  - Named local KMS (`local:name`); master key may be base64
+  - `key_expiration_ms` on `ClientEncryption` and `AutoEncryption`
+- Rest of official CSFLE UTF that can run on MongoDB 8.0 + local KMS (Wave 25)
+  - 71 more files (key vault, FLE1 local validator, QE equality, QE range)
+  - UTF ops: `createDataKey`, `rewrapManyDataKey`, key-vault helpers
+  - UTF relaxed JSON integers that fit in Int32 are Int32
+  - UTF `initialData` insert uses `bypassDocumentValidation`
+  - Auto-encryption: `bypass_query_analysis`
+  - Client `bulkWrite` collinfo on the op database (`mongo_db`)
+  - Cloud KMS / 8.2+ text files are leftover with reasons
 
 ### Fixed
 - Do not call `mongocrypt_destroy` from `ClientEncryption` GC finalize
   - Finalize runs during `GC_malloc`; libmongocrypt uses libc free
   - GitHub four-topology CI crashed (double free / SIGSEGV)
+- `Insert.with_ids` keeps BSON binary subtype when it generates `_id`
+  - `[]=` of `Bytes` wrote generic `0x00` and dropped FLE `0x06`
+- UTF simple `createCollection` / `dropCollection` use `Database#create_collection`
+  and `Collection#drop` so Queryable Encryption creates ESC / ECOC and
+  `keyAltName` is resolved (`fle2v2-InsertFind-keyAltName`)
+- Vendored macOS libmongocrypt also writes `libmongocrypt.0.dylib`
+  (dyld runtime ID; Crystal `-lmongocrypt` links `libmongocrypt.dylib`)
+- OP_MSG / OP_REPLY receive copies the frame, then BufferPool checkin,
+  then `BSON.view` of that copy (not view-then-`own_payload`)
+  - Nested `[]?` stays valid after another fiber checkouts the pool
+    (`preview_mt` SIGSEGV/SIGBUS in `error?` / UTF `disable_fail_points`)
+  - Pool stays a read staging buffer (one memcpy). Do not clone every
+    ok:1 hello in `error?`. `BSON.new(BSON)` is a no-op
+  - Command / CommandWrite / WriteConcern still `BSON.new(bytes)` for
+    nested docs stored on the error
+- OP_MSG / OP_REPLY keep the owned receive copy on the message (`@frame`)
+  - `BSON.view` interior slices are not a Darwin GC root
+  - macos-26 standalone SIGBUS in `error?` after copy-then-checkin
+  - Do not clone every ok:1 hello. Do not checkin the owned copy
+  - `BSON.new(BSON)` is a no-op
+- OP_MSG / OP_REPLY wrap the owned receive copy in a heap class
+  (`OwnedReceive`), not `Bytes?` on the message struct
+  - `Bytes` is a Slice struct; `@frame : Bytes?` is not a Darwin GC root
+  - macos-15 standalone SIGBUS in `error?` after Wave 42 (cells swapped)
+  - Do not clone every ok:1 hello. Do not checkin the owned copy
+- OP_MSG / OP_REPLY / Message receive types are classes
+  - Wave 47 `OwnedReceive` on a struct did not close Darwin SIGBUS
+    (`33968324194` macos-15 standalone, same `error?+1604`)
+  - `Connection.receive` copies OpMsg and drops Message; a class field
+    on a struct is not a Darwin GC root
+  - Keep copy-then-checkin and `OwnedReceive` on the class
+  - Do not clone every ok:1 hello. bson.cr stays a struct
+- OP_MSG `error?` / `body` walk through `OwnedReceive#view` (`pin.bytes`)
+  - A pin only in `ensure` is dropped (Crystal 1.21 Parallel + fiber
+    thread switch). ubuntu-26.04 standalone SIGSEGV at `error?` during
+    `create_data_key` insert (`33978516578`)
+  - `SectionBody` holds the same owner class. Do not clone every ok:1
+    hello. bson.cr stays a struct. GitHub ubuntu-26.04 standalone must
+    finish the suite on the next PR 37
+- BSON document type is a class (bson.cr Unreleased on 0.9.2)
+  - Wave 55 `pin.bytes` closed Linux SIGSEGV and failed on Darwin
+    (`33990243466` macos-15 standalone SIGBUS in `OwnedReceive#fetch`)
+  - `error?` still walks `OwnedReceive#view`. Do not clone every ok:1 hello
+  - Extra alloc per view is the GC trade. Do not copy receive bytes twice
+  - ObjectId / Binary / Decimal128 stay structs
+  - GitHub macos-15 and macos-26 standalone must both finish on the next
+    PR 37. ubuntu-26.04 standalone must stay green
+  - cryomongo tracked bson.cr `master` until Wave 62 pinned **0.9.3**
+  - Reopen `copy_with` on `class BSON` (`ext/bson.cr`)
+- OP_MSG `OwnedReceive#fetch` / `error?` keep the owner live during `[]?`
+  - Class BSON was not enough: LLVM drops `OwnedReceive` after `view`
+    returns; `@data` still aliases the receive copy
+  - ubuntu-22.04-arm standalone SIGSEGV in `BSON#fetch` during Drop
+    (`34024439035`, UTF 119 / 306)
+  - Read `@bytes.size` after fetch. Hold the pin until `error?` returns.
+    Do not only pin in `ensure` (Wave 55)
+  - `error?` still walks `OwnedReceive#view`. Do not clone every ok:1 hello
+  - Pins bson.cr **0.9.3** (stop `branch: master`)
+  - GitHub close is after the human updates PR 37. macos-15 and macos-26
+    standalone must keep finishing. ubuntu-26.04 standalone must stay green
+- Load-balanced has no SDAM monitors after the first hello
+  - `on_topology_update` started a monitor; a hello error paused the
+    pool; checkout then waited 30s (`34024439035` ubuntu-22.04 and
+    ubuntu-24.04-arm LB cancelled at 45 min)
+  - Paused LB checkout marks the pool ready at once (no monitors)
+  - UTF turns failCommand off on both mongos (27017 and 27016), not
+    only through HAProxy. GitHub LB close is after the next PR 37
+- Darwin CSOT: wait for timeoutMS in short socket slices so a kqueue
+  `IO::TimeoutError` does not win before the CSOT deadline
+  (getMore / bulkWrite / GridFS UTF). Do not lengthen official waits.
+- Darwin CSOT slices also retry `Socket::Error` / `ETIMEDOUT`
+  (not only `IO::TimeoutError`). Raise `Error::Timeout` only when
+  the CSOT deadline has passed. Hello / handshake uses the same
+  slices until connectTimeoutMS so a 1ms `socketTimeoutMS` cannot
+  beat timeoutMS. Unset connectTimeoutMS is 10s for that wrap
+  (not infinite). Command I/O drops a leaked handshake wrap, then
+  slices until leftover timeoutMS or (Darwin) socketTimeoutMS so a
+  failPoint `blockConnection` still expires. Do not retry ECONNRESET.
+- Darwin CSOT leftover: 10ms socket slices on Darwin so a premature
+  kqueue timeout does not burn 100ms of timeoutMS before getMore /
+  the 3rd insert. Linux stays at 100ms. Do not lengthen official waits.
+- Darwin CSOT leftover: do not `Fiber.yield` after a slice timeout
+  - `Fiber.yield` is `EventLoop.sleep(0)`; Darwin treats 0 as now
+  - That wait burned leftover timeoutMS so the 2nd find / getMore /
+    3rd insert never started (`timeoutMS` 75 / `blockTimeMS` 50)
+- Darwin CSOT leftover: leftover 0 at wrap still raises
+  `IO::TimeoutError` without a last successful read
+  - Wave 43 last-read (`wait` 0) turned a failPoint into success
+    when bytes were already in the kernel (legacy timeouts)
+  - leftover 0 still sends (deadline at first byte). The read then
+    times out. Bytes from a slice that still had leftover still
+    return. Do not shorten Darwin slices. Do not `Fiber.yield`
+- Darwin CSOT leftover: last-read a command sent with leftover >0
+  even if leftover is now 0 and no byte has been returned yet
+  - Darwin first find often takes >75ms (`timeoutMS` 75 /
+    `blockTimeMS` 50). Bytes from the failPoint can sit in the
+    kernel after leftover hits 0 (`@got_data` is not enough)
+  - leftover 0 at wrap still raises (2nd find / update must not
+    succeed). Darwin non-CSOT (`socketTimeoutMS` / handshake) still
+    raises (Wave 48 Shape B)
+- Darwin CSOT leftover: leftover >0 at wrap last-reads with 1ms,
+  not wait 0
+  - Darwin kqueue treats 0 as now; Wave 53 wait 0 was empty when
+    failPoint data was still in flight (`timeoutMS` 75 /
+    `blockTimeMS` 50). 1ms is a real wait, Instant-capped once per
+    wrap so early kqueue retries. `read_greedy` may call `read`
+    more than once; `@got_data` finishes the frame in that 1ms
+  - leftover 0 at wrap still raises with no last-read. Do not wait
+    remaining leftover. Do not shorten Darwin slices. Do not
+    `Fiber.yield`
+- Darwin CSOT leftover: leftover >0 at wrap last-reads one Darwin
+  slice (10ms Instant), not 1ms
+  - GitHub `33990243466`: 1ms Instant was empty when failPoint data
+    was still in flight (`timeoutMS` 75 / `blockTimeMS` 50)
+  - Instant-capped once per wrap, then one wait-0 `LibC.read`
+  - leftover 0 at wrap still raises with no last-read. Do not wait
+    remaining leftover. Do not shorten Darwin slices. Do not
+    `Fiber.yield`. Linux stays 100ms slices. 10ms is not a longer
+    official `timeoutMS`
+- Darwin CSOT leftover: leftover >0 at wrap last-reads two Darwin
+  slices (20ms Instant), not one
+  - GitHub `34024439035`: 10ms Instant was empty when failPoint data
+    was still in flight (`timeoutMS` 75 / `blockTimeMS` 50)
+  - Instant-capped once per wrap, then one wait-0 `LibC.read`
+  - leftover 0 at wrap still raises with no last-read. Do not wait
+    remaining leftover. Do not shorten Darwin slices. Do not
+    `Fiber.yield`. Linux stays 100ms slices. 20ms is not a longer
+    official `timeoutMS`
+- leftover 0 still send keeps a positive `maxTimeMS` (floor 1)
+  - Do not skip `maxTimeMS`. Do not raise remaining timeoutMS <
+    min RTT before that send (LB `bulkWrite` update)
+- Darwin find awaitData: two empty getMores then stop this next()
+  - One empty then stop closed got-3 and broke official refresh
+    (`timeoutMS` 250, `maxAwaitTimeMS` 1, failPoint 150)
+  - Leftover 0 still expires after a getMore
+  - Linux still loops until leftover expires (two-getMore then Timeout)
+  - Change streams still loop (empty getMores until an event)
+  - Do not rewrite `get_more_deadline`. getMore is not retryable
+- Tailable awaitData: `maxAwaitTimeMS` on getMore only, not find
+  - Find uses leftover `timeoutMS` as `maxTimeMS` (CSOT)
+  - Sending `maxAwaitTimeMS` 1 on find made Darwin refresh
+    `MaxTimeMSExpired` after failPoint 150 (`timeoutMS` 250)
+  - Do not add a third empty getMore. getMore is not retryable
+- Tailable awaitData find: original `timeoutMS` as `maxTimeMS`
+  - Leftover still wraps the socket (iteration `without_max_time`)
+  - Leftover-minRTT on find was still Darwin `MaxTimeMSExpired`
+    after Wave 60 (`timeoutMS` 250, failPoint 150)
+  - Do not add a third empty getMore. getMore is not retryable
+
+- Concurrent insert shutdown still marks Unknown when a streaming
+  hello publishes the same topologyVersion while the server is still
+  Primary (Darwin command slices vs one monitor wait;
+  `insert-shutdown-error`)
+  - Equal TV stays stale after Unknown or a new replica-set role
+  - Equal TV on Mongos / load-balanced is spec-stale (not Primary)
+  - Do not drop `wrap_connect_deadline`
+- AwaitData getMore uses a refreshed timeoutMS for each next()
+  (not leftover from find)
+  - After find (timeoutMS 250, failPoint 150) leftover is ~100ms
+  - A blocked getMore then times out or returns empty and next()
+    sends another getMore
+  - If leftover is nil, the socket wait never ends
+  - Empty tailable getMore still expires that next() leftover
+  - Do not start a new timeoutMS per getMore
+  - Linux without CSOT stays a single socket wait
+- `connectTimeoutMS=0` passes nil into `TCPSocket` (Crystal `0` is
+  immediate on Darwin kqueue)
+- GitHub macOS `tls_spec` uses Homebrew openssl@3 (PATH and pkg-config)
+  for `openssl rsa -traditional`. macos-15 `pkg-config openssl` is 1.1;
+  prefer openssl@3 over a generic openssl package. Reject 1.1 / LibreSSL
+  for that conversion. Do not skip macos-15 or macos-26.
+- UTF drops Queryable Encryption ESC / ECOC only when the collection
+  has encryptedFields (not on every file)
+  - Blind `enxcol_.*` majority drops inflated old files on mongos /
+    load-balanced (PR 37 vs PR 35; D50)
+  - After CSFLE UTF, drop leftover `enxcol_.*` in databases that file used
 
 ### Changed
-- **docs:** Phase 4 (CSFLE) is Waves 21–25.
+- Default CSFLE link is official libmongocrypt **1.20.4** (`scripts/vendor-libmongocrypt.sh`).
+  `USE_SYSTEM_LIBMONGOCRYPT=true` uses pkg-config (needs >= 1.20.0).
+  GitHub Ubuntu 24.04 `libmongocrypt-dev` does not export
+  `mongocrypt_setopt_key_expiration`,
+  `mongocrypt_setopt_use_need_mongo_collinfo_with_db_state`, or
+  `mongocrypt_ctx_mongo_db` (PR 37). Default vendor so apt cannot win.
+- GitHub Linux CI: four topologies on Ubuntu **22.04**, **24.04**, and
+  **26.04** (preview) for both x64 and arm64 (24 cells). Pin image labels
+  (`ubuntu-22.04`, `ubuntu-24.04`, `ubuntu-26.04`, `ubuntu-22.04-arm`,
+  `ubuntu-24.04-arm`, `ubuntu-26.04-arm`). Do not use `ubuntu-latest`.
+  Skip `ubuntu-slim`. Cache keys include OS and arch. `fail-fast: false`.
+  `scripts/docker-topology.sh` always passes
+  `-e GLIBC_TUNABLES=glibc.pthread.rseq=1` so Ubuntu 26.04 Docker
+  `mongo:8.0` can start (SERVER-121912). 22.04/24.04 inherit it. Use
+  `rseq=1`, not `rseq=0`. Do not set this env on macOS jobs.
+  Ubuntu 26.04 / 26.04-arm install Crystal from the official 1.21.x
+  tarball (`scripts/ci-install-crystal.sh`) with libpcre2-dev (no
+  libpcre3-dev). 22.04/24.04 keep `crystal-lang/install-crystal@v1`.
+- GitHub macOS CI: four topologies on **macos-15** and **macos-26** (arm64)
+  using native Community MongoDB **8.0.29** (not Docker). Pin labels; do
+  not use `macos-latest`. Skip **macos-14** (deprecated) and intel
+  `macos-*-large`. HAProxy via Homebrew for load-balanced.
+  Vendor writes `libmongocrypt.0.dylib` next to `libmongocrypt.dylib`.
+  Put Homebrew openssl@3 first on PATH and PKG_CONFIG_PATH
+  (`tls_spec` PEM). macos-15 `pkg-config openssl` is 1.1.
+  Windows GitHub is leftover: the driver does not compile (`LibC::SHUT_RDWR`,
+  zstd.cr bash `pkg-libs.sh`, no `mongocrypt.lib` in the 1.20.4 tarball).
+  `windows-11-arm` has no libmongocrypt 1.20.4 tarball.
+- GitHub Specs jobs (`tests` and `tests-macos`) use
+  `timeout-minutes: 45` (Wave 41)
+  - Honest macos-26 sharded wall is ~24 min
+  - A hung cell must not run for GitHub's 6 hour default
+- `scripts/download-crypt-shared.sh` picks linux **x86_64** or **aarch64**
+  and ubuntu2204 (22.04) or ubuntu2404 (24.04 and 26.04), plus official
+  macos **arm64** / **x86_64** `.dylib` and windows x86_64 `.zip`. Official
+  8.0.29 aarch64 and macos-arm64 packages exist. There is no ubuntu2604
+  crypt_shared tarball. Windows CI jobs are not added.
+- **docs:** Phase 4 (CSFLE) is Waves 21–25 plus Wave 27 (vendor 1.20.4).
   Wave 21 is bindings plus explicit local KMS.
-  Auto-encryption is Wave 22.
+  Wave 22 is auto-encryption (`schemaMap`).
+  Wave 23 is Queryable Encryption (`encryptedFieldsMap`, 8.0 equality).
+  Official CSFLE tests are Waves 24–25 (local KMS + 8.0 done;
+  leftover is cloud KMS and 8.2+ text).
+  Wave 27 vendors official libmongocrypt 1.20.4 (GitHub apt was too old).
+  Wave 28 is Linux OS/arch four-topology GitHub CI.
+  Wave 29 is macOS arm64 four-topology GitHub CI (native mongod).
+  Wave 31 vendors the macOS `libmongocrypt.0.dylib` compat name.
+  Wave 32 installs Crystal 1.21.x from the official tarball on
+  Ubuntu 26.04 / 26.04-arm (libpcre2-dev; no libpcre3-dev).
+  Wave 34 is Darwin CSOT slices, `connectTimeoutMS=0` as nil, and
+  Homebrew OpenSSL 3 for macOS `tls_spec` PEM.
+  Wave 35 tears down CSFLE UTF so old files stay near PR 35
+  (drop `enxcol_.*` only when encryptedFields is set).
+  Wave 36 prefers Homebrew openssl@3 on macos-15 `tls_spec`
+  (`rsa -traditional`; pkg-config openssl there is 1.1).
+  Wave 41 caps Specs jobs at 45 minutes (`timeout-minutes`)
+  so a hung cell cannot run for GitHub's 6 hour default.
+  Wave 42 keeps the owned OP_MSG / OP_REPLY receive copy on the
+  message so Darwin GC cannot free it while `error?` walks views.
+  Windows GitHub is leftover (driver does not compile).
   Adapter CI four-topology matrix is Wave 20.
   Phase 3.14 (performance) is later and is not in those waves.
 

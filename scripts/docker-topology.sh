@@ -13,10 +13,15 @@
 # After load-balanced: spec/support/run-load-balancer.sh start && source tmp/lb-uri.env
 #
 # Optional: MONGO_IMAGE (default mongo:8.0).
+# Every docker run passes GLIBC_TUNABLES=glibc.pthread.rseq=1 (SERVER-121912).
 
 set -euo pipefail
 
 IMAGE="${MONGO_IMAGE:-mongo:8.0}"
+# Kernel 6.19+ (GitHub Ubuntu 26.04, this LXC): mongo:8.0 aborts without this
+# (SERVER-121912, fatal 12257600). Same value as mongo-topology.sh. Use rseq=1,
+# not rseq=0. Always set it so GitHub 22.04/24.04 inherit it and stay compatible.
+DOCKER_GLIBC_TUNABLES=(-e GLIBC_TUNABLES=glibc.pthread.rseq=1)
 # minWaitForStreamingHelloMillis=0: mongod 8.0 default is 1000ms, which ignores
 # maxAwaitTimeMS 200–750 and breaks hello-timeout / interruptInUse UTF.
 MONGOD_PARAMS="--setParameter enableTestCommands=1 --setParameter acceptApiVersion2=1 --setParameter transactionLifetimeLimitSeconds=20 --setParameter minWaitForStreamingHelloMillis=0"
@@ -143,7 +148,7 @@ stop_all() {
 
 start_standalone() {
   stop_all
-  docker run --name mongo -d -p 27017:27017 --tmpfs /data/db "$IMAGE" $MONGOD_PARAMS
+  docker run --name mongo -d -p 27017:27017 "${DOCKER_GLIBC_TUNABLES[@]}" --tmpfs /data/db "$IMAGE" $MONGOD_PARAMS
   wait_running mongo
   create_test_user mongo
   echo "standalone is ready on 27017"
@@ -154,6 +159,7 @@ start_replicaset() {
   # Three mongods in one container. Hosts are 127.0.0.1 so the GitHub runner
   # can reach every member (hello.hosts) on published ports 27017-27019.
   docker run -d --name mongo --user root --entrypoint bash \
+    "${DOCKER_GLIBC_TUNABLES[@]}" \
     -p 27017:27017 -p 27018:27018 -p 27019:27019 \
     --tmpfs /data/rs0 --tmpfs /data/rs1 --tmpfs /data/rs2 \
     "$IMAGE" \
@@ -179,9 +185,9 @@ start_sharded() {
   local lb="${1:-}"
   stop_all
   docker network create mongo-test
-  docker run -d --name cfg --network mongo-test --network-alias cfg --tmpfs /data/db "$IMAGE" \
+  docker run -d --name cfg --network mongo-test --network-alias cfg "${DOCKER_GLIBC_TUNABLES[@]}" --tmpfs /data/db "$IMAGE" \
     mongod --configsvr --replSet cfg --port 27019 --bind_ip_all $MONGOD_PARAMS
-  docker run -d --name shard --network mongo-test --network-alias shard --tmpfs /data/db "$IMAGE" \
+  docker run -d --name shard --network mongo-test --network-alias shard "${DOCKER_GLIBC_TUNABLES[@]}" --tmpfs /data/db "$IMAGE" \
     mongod --shardsvr --replSet shard0 --port 27018 --bind_ip_all $MONGOD_PARAMS
   wait_running cfg 27019
   wait_running shard 27018
@@ -201,11 +207,11 @@ start_sharded() {
     mongos2_ports="-p 27016:27017 -p 27051:27051"
   fi
 
-  docker run -d --name mongos --network mongo-test $mongos_ports "$IMAGE" \
+  docker run -d --name mongos --network mongo-test "${DOCKER_GLIBC_TUNABLES[@]}" $mongos_ports "$IMAGE" \
     mongos --configdb cfg/cfg:27019 --bind_ip_all $MONGOS_PARAMS $mongos_lb
   wait_running mongos
   docker exec mongos mongosh --eval 'sh.addShard("shard0/shard:27018")'
-  docker run -d --name mongos2 --network mongo-test $mongos2_ports "$IMAGE" \
+  docker run -d --name mongos2 --network mongo-test "${DOCKER_GLIBC_TUNABLES[@]}" $mongos2_ports "$IMAGE" \
     mongos --configdb cfg/cfg:27019 --bind_ip_all $MONGOS_PARAMS $mongos2_lb
   wait_running mongos2
   create_test_user mongos

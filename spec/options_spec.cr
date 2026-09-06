@@ -66,6 +66,31 @@ describe Mongo::Options do
     deadline.try(&.infinite?).should be_true
   end
 
+  it "reports leftover 0 remaining as zero (leftover 0 still send floors maxTimeMS on send)" do
+    d = Mongo::Deadline.new(Time.instant - 10.milliseconds, 1.millisecond)
+    d.remaining.should eq Time::Span.zero
+    d.expired?.should be_true
+    # leftover 0 is too small for max_time_ms; apply_csot_max_time floors 1
+    d.max_time_ms(Time::Span.zero).should be_nil
+    d.max_time_ms(1.millisecond).should be_nil
+  end
+
+  it "maps connectTimeoutMS=0 to a nil Crystal socket timeout" do
+    _, options, _, _ = Mongo::URI.parse("mongodb://localhost/?connectTimeoutMS=0", Mongo::Options.new)
+    options.connect_timeout.should eq Time::Span.zero
+    Mongo::Connection.uri_timeout(options.connect_timeout).should be_nil
+    Mongo::Connection.uri_timeout(10.seconds).should eq 10.seconds
+    Mongo::Connection.uri_timeout(nil).should be_nil
+  end
+
+  it "uses 10s for handshake when connectTimeoutMS is unset, nil when 0" do
+    Mongo::Connection.handshake_timeout(Mongo::Options.new).should eq 10.seconds
+    _, zero, _, _ = Mongo::URI.parse("mongodb://localhost/?connectTimeoutMS=0", Mongo::Options.new)
+    Mongo::Connection.handshake_timeout(zero).should be_nil
+    _, set, _, _ = Mongo::URI.parse("mongodb://localhost/?connectTimeoutMS=250", Mongo::Options.new)
+    Mongo::Connection.handshake_timeout(set).should eq 250.milliseconds
+  end
+
   it "rejects negative timeoutMS" do
     expect_raises(Mongo::Error, /timeoutMS/) do
       Mongo::URI.parse("mongodb://localhost/?timeoutMS=-1", Mongo::Options.new)
