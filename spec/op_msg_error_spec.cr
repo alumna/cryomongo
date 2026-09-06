@@ -10,9 +10,11 @@ require "./spec_helper"
 # (Wave 52). Wave 55: a pin only in ensure is dropped (ubuntu-26.04
 # SIGSEGV at error? during create_data_key insert). Wave 58: BSON
 # document is a class so `[]?` after `OwnedReceive#view` is a method on a
-# heap object (Darwin SIGBUS `33990243466` macos-15 standalone). Keep
-# scribble / pool / concurrent / GC.collect / Message-drop walks.
-# GC.collect on Linux is not the GitHub Darwin proof.
+# heap object (Darwin SIGBUS `33990243466` macos-15 standalone). Wave 62:
+# keep OwnedReceive live during []? (ubuntu-22.04-arm Drop SIGSEGV
+# `34024439035`). Keep scribble / pool / concurrent / GC.collect /
+# Message-drop / Drop-shaped walks. GC.collect on Linux is not the
+# GitHub arm proof. GitHub close is after the human updates PR 37.
 
 private def serialize_op_msg(doc : BSON) : Bytes
   msg = Mongo::Messages::OpMsg.new(doc)
@@ -325,6 +327,70 @@ describe Mongo::Messages::OpMsg do
           walk_insert_reply(ok_msg)
           err_msg = parse_op_msg_via_message_drop(err_doc)
           walk_op_msg_error(err_msg, true)
+        end
+        failures.send(nil)
+      rescue e
+        failures.send(e)
+      end
+    end
+
+    result = failures.receive
+    stop.send(nil)
+    stopped.receive
+    result.should be_nil
+  end
+
+  # Wave 62: ubuntu-22.04-arm SIGSEGV at OwnedReceive#fetch → BSON#fetch
+  # during Drop / drop_utf_collection (run 34024439035). ok:1 Drop has
+  # no writeErrors. Keep the owner live after fetch. A pin only in
+  # ensure is dropped (Wave 55). GitHub close is after the human
+  # updates PR 37.
+  it "walks drop-shaped error? after Message drop and GC.collect" do
+    drop_doc = BSON.build do |b|
+      b["ok"] = 1.0
+    end
+    msg = parse_op_msg_via_message_drop(drop_doc)
+    32.times { Bytes.new(16_384) }
+    GC.collect
+    err = msg.error?
+    err.should be_nil
+    msg.body["ok"].should eq 1.0
+  end
+
+  it "walks drop-shaped error? while another fiber runs GC.collect" do
+    drop_doc = BSON.build do |b|
+      b["ok"] = 1.0
+    end
+    n = Mongo::Messages::BufferPool::POOL_SIZE * 4
+
+    stop = Channel(Nil).new(1)
+    started = Channel(Nil).new(1)
+    stopped = Channel(Nil).new(1)
+    spawn do
+      started.send(nil)
+      loop do
+        select
+        when stop.receive
+          break
+        else
+          8.times { Bytes.new(16_384) }
+          GC.collect
+          Fiber.yield
+        end
+      end
+      stopped.send(nil)
+    end
+    started.receive
+
+    failures = Channel(Exception?).new(1)
+    spawn do
+      begin
+        n.times do
+          msg = parse_op_msg_via_message_drop(drop_doc)
+          err = msg.error?
+          raise "expected no error, got #{err.inspect}" if err
+          ok = msg.body["ok"]
+          raise "expected ok 1.0, got #{ok.inspect}" unless ok == 1.0
         end
         failures.send(nil)
       rescue e

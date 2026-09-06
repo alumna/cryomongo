@@ -677,7 +677,7 @@ class Mongo::Client
       leftover_positive = left > Time::Span.zero
       # Deadline at first byte: leftover 0 still wraps so the send can
       # run. AwaitReadIO last-reads only when leftover was >0 at wrap
-      # (this command was sent with budget): one Darwin slice (10ms
+      # (this command was sent with budget): two Darwin slices (20ms
       # Instant), Darwin 0 is now. leftover 0 at wrap still sends then
       # raises on read (no last-read).
       expire_at = leftover_positive ? Time.instant + left : Time.instant

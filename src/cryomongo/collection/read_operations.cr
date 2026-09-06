@@ -326,22 +326,26 @@ class Mongo::Collection
     end
     mode, computed = cursor_timeout(timeout_ms, timeout_mode, tailable_flag)
     computed = deadline if deadline
-    # Tailable awaitData: leftover timeoutMS is maxTimeMS on find.
-    # maxAwaitTimeMS belongs on getMore only (same as change streams).
-    # Sending maxAwaitTimeMS (1) on find made Darwin refresh MaxTimeMSExpired
-    # after failPoint block 150ms (timeoutMS 250). Other iteration cursors
-    # still omit maxTimeMS on find.
-    find_deadline = if tailable_flag && await_flag
-                      computed
-                    elsif mode.iteration?
+    # Tailable awaitData find: leftover timeoutMS still wraps the socket.
+    # Do not send leftover-minRTT as maxTimeMS. Darwin refresh then got
+    # MaxTimeMSExpired on find after failPoint 150 (timeoutMS 250).
+    # maxAwaitTimeMS stays on getMore only (Wave 60). Send the original
+    # timeoutMS as maxTimeMS so find still has maxTimeMS. Other iteration
+    # cursors omit maxTimeMS on find.
+    find_deadline = if mode.iteration?
                       computed.try(&.without_max_time)
                     else
                       computed
                     end
     deadline = computed
-    # AwaitData: keep max_time_ms for the cursor (getMore). Do not send it
-    # on this find.
-    find_max_time_ms = tailable_flag && await_flag ? nil : max_time_ms
+    find_max_time_ms = if tailable_flag && await_flag
+                         if (lim = computed.try(&.limit))
+                           ms = lim.total_milliseconds.to_i64
+                           ms < 1 ? 1_i64 : ms
+                         end
+                       else
+                         max_time_ms
+                       end
 
     result = self.command(Commands::Find, filter: filter, session: session, deadline: find_deadline, options: {
       sort:                  sort.try { BSON.new(sort) },

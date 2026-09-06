@@ -286,7 +286,7 @@ class Mongo::Connection
   # Slice waits until *expire_at*. Nil means no deadline (connectTimeoutMS=0).
   # Returns false when the socket is already wrapped (nested command).
   # *csot* and *leftover_positive_at_wrap* select the leftover-0 last-read
-  # (CSOT command sent with leftover >0: one Darwin slice, 10ms Instant,
+  # (CSOT command sent with leftover >0: two Darwin slices, 20ms Instant,
   # then wait 0). Handshake / Darwin socketTimeoutMS keep the defaults
   # (raise at leftover 0, no last-read).
   def wrap_deadline_io(expire_at : Time::Instant?, *, csot : Bool = false, leftover_positive_at_wrap : Bool = false) : Bool

@@ -129,14 +129,27 @@ module Mongo::Unified
       # skips Unknown / paused pools, so leftover failCommand retried the next
       # UTF insert. Direct clients (long poll heartbeat, no URI userinfo) send mode=off
       # on every member, including 27017 when it is a secondary.
+      # Load-balanced: the shared client talks through HAProxy (one mongos).
+      # Leftover failCommand on the other mongos made every later command
+      # wait 30s. Send mode=off to both mongos on 27017 and 27016.
       ic = internal_client
       send_fail_point_off(ic, nil)
-      unless load_balanced_topology?
+      if load_balanced_topology?
+        load_balanced_mongos_addresses.each do |address|
+          fail_point_off_on_address(address)
+        end
+      else
         fail_point_member_addresses.each do |address|
           fail_point_off_on_address(address)
         end
       end
       @fail_point_active = false
+    end
+
+    # Direct mongos, not HAProxy (8000/8001) and not loadBalancerPort
+    # (27050/27051). Those ports need PROXY v2.
+    private def load_balanced_mongos_addresses : Array(String)
+      %w[127.0.0.1:27017 127.0.0.1:27016]
     end
 
     # Topology seeds plus hello.hosts so a member SDAM has not listed yet still

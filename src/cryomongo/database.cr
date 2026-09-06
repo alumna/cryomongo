@@ -159,9 +159,9 @@ class Mongo::Database
                else
                  inherited_deadline
                end
-    cmd_deadline = if await_data
-                     deadline
-                   elsif mode.iteration?
+    # AwaitData runCursorCommand: leftover timeoutMS wraps the socket.
+    # Do not send leftover-minRTT as maxTimeMS (same as awaitData find).
+    cmd_deadline = if await_data || mode.iteration?
                      deadline.try(&.without_max_time)
                    else
                      deadline

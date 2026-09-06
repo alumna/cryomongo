@@ -101,8 +101,26 @@ Client-Side Field Level Encryption (CSFLE)
   - ObjectId / Binary / Decimal128 stay structs
   - GitHub macos-15 and macos-26 standalone must both finish on the next
     PR 37. ubuntu-26.04 standalone must stay green
-  - cryomongo tracks bson.cr `master` until the next bson tag
+  - cryomongo tracked bson.cr `master` until Wave 62 pinned **0.9.3**
   - Reopen `copy_with` on `class BSON` (`ext/bson.cr`)
+- OP_MSG `OwnedReceive#fetch` / `error?` keep the owner live during `[]?`
+  - Class BSON was not enough: LLVM drops `OwnedReceive` after `view`
+    returns; `@data` still aliases the receive copy
+  - ubuntu-22.04-arm standalone SIGSEGV in `BSON#fetch` during Drop
+    (`34024439035`, UTF 119 / 306)
+  - Read `@bytes.size` after fetch. Hold the pin until `error?` returns.
+    Do not only pin in `ensure` (Wave 55)
+  - `error?` still walks `OwnedReceive#view`. Do not clone every ok:1 hello
+  - Pins bson.cr **0.9.3** (stop `branch: master`)
+  - GitHub close is after the human updates PR 37. macos-15 and macos-26
+    standalone must keep finishing. ubuntu-26.04 standalone must stay green
+- Load-balanced has no SDAM monitors after the first hello
+  - `on_topology_update` started a monitor; a hello error paused the
+    pool; checkout then waited 30s (`34024439035` ubuntu-22.04 and
+    ubuntu-24.04-arm LB cancelled at 45 min)
+  - Paused LB checkout marks the pool ready at once (no monitors)
+  - UTF turns failCommand off on both mongos (27017 and 27016), not
+    only through HAProxy. GitHub LB close is after the next PR 37
 - Darwin CSOT: wait for timeoutMS in short socket slices so a kqueue
   `IO::TimeoutError` does not win before the CSOT deadline
   (getMore / bulkWrite / GridFS UTF). Do not lengthen official waits.
@@ -155,6 +173,15 @@ Client-Side Field Level Encryption (CSFLE)
     remaining leftover. Do not shorten Darwin slices. Do not
     `Fiber.yield`. Linux stays 100ms slices. 10ms is not a longer
     official `timeoutMS`
+- Darwin CSOT leftover: leftover >0 at wrap last-reads two Darwin
+  slices (20ms Instant), not one
+  - GitHub `34024439035`: 10ms Instant was empty when failPoint data
+    was still in flight (`timeoutMS` 75 / `blockTimeMS` 50)
+  - Instant-capped once per wrap, then one wait-0 `LibC.read`
+  - leftover 0 at wrap still raises with no last-read. Do not wait
+    remaining leftover. Do not shorten Darwin slices. Do not
+    `Fiber.yield`. Linux stays 100ms slices. 20ms is not a longer
+    official `timeoutMS`
 - leftover 0 still send keeps a positive `maxTimeMS` (floor 1)
   - Do not skip `maxTimeMS`. Do not raise remaining timeoutMS <
     min RTT before that send (LB `bulkWrite` update)
@@ -169,6 +196,11 @@ Client-Side Field Level Encryption (CSFLE)
   - Find uses leftover `timeoutMS` as `maxTimeMS` (CSOT)
   - Sending `maxAwaitTimeMS` 1 on find made Darwin refresh
     `MaxTimeMSExpired` after failPoint 150 (`timeoutMS` 250)
+  - Do not add a third empty getMore. getMore is not retryable
+- Tailable awaitData find: original `timeoutMS` as `maxTimeMS`
+  - Leftover still wraps the socket (iteration `without_max_time`)
+  - Leftover-minRTT on find was still Darwin `MaxTimeMSExpired`
+    after Wave 60 (`timeoutMS` 250, failPoint 150)
   - Do not add a third empty getMore. getMore is not retryable
 
 - Concurrent insert shutdown still marks Unknown when a streaming

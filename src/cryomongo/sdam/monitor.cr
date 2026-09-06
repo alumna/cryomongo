@@ -186,7 +186,10 @@ module Mongo::SDAM
       @topology.update(previous, new_description)
       # Clear with the topology update. Only when leaving a known state so UTF
       # sees one poolClearedEvent (a paused pool would emit again).
-      @client.clear_pool(previous, interrupt_in_use: new_description.error_is_timeout) if new_description.error && known
+      # Load-balanced has no monitors; do not pause that pool.
+      if new_description.error && known && !@client.options.load_balanced
+        @client.clear_pool(previous, interrupt_in_use: new_description.error_is_timeout)
+      end
     end
 
     private def do_check(previous : ServerDescription) : {Commands::Hello::Result, Time::Span, Bool}

@@ -11,6 +11,11 @@
 # must call #view / #fetch so the walk uses `@bytes` and this class
 # stays a GC root. bson.cr document is a class (Wave 58) so `[]?` is a
 # method on a heap object. Do not clone.
+#
+# Wave 62: LLVM can still drop this class after #view returns. BSON
+# `@data` aliases `@bytes` (ubuntu-22.04-arm SIGSEGV in BSON#fetch
+# during Drop, run 34024439035). #fetch reads `@bytes.size` after `[]?`
+# and holds the owner until that call returns. Do not clone every hello.
 class Mongo::Messages::OwnedReceive
   getter bytes : Bytes
 
@@ -37,12 +42,23 @@ class Mongo::Messages::OwnedReceive
   end
 
   # []? through #view so the owner stays live for nested fetches.
+  # Read `@bytes.size` after []? (Wave 62). A pin only in ensure is
+  # dropped (Wave 55). Do not clone.
   def fetch(body : BSON, key : String)
-    view(body.data)[key]?
+    pin_after(view(body.data)[key]?)
   end
 
   # [] through #view. Raises when *key* is missing (same as BSON#[]).
   def must_fetch(body : BSON, key : String)
-    view(body.data)[key]
+    pin_after(view(body.data)[key])
+  end
+
+  # Keep this class live during []? / error_walk (Wave 62).
+  # NoInline so LLVM cannot delete an unused size read. GitHub close is
+  # after the human updates PR 37.
+  @[NoInline]
+  private def pin_after(result)
+    @bytes.size
+    result
   end
 end

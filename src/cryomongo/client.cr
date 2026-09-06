@@ -572,6 +572,17 @@ class Mongo::Client
           fail_checkout(server_description.address, "connectionError", started_at, error)
           raise error
         end
+        # Load-balanced has no monitors. A paused pool would wait out
+        # serverSelectionTimeoutMS (30s) on every later command.
+        if @options.load_balanced
+          live = topology.servers.find { |s| s.address == server_description.address } || server_description
+          ready_pool(live)
+          if pool.paused?
+            fail_checkout(server_description.address, "connectionError", started_at, error)
+            raise error
+          end
+          next
+        end
         # Single can select Unknown at once, so selection does not scan.
         # Wake the monitor or minPoolSize-error waits out heartbeatFrequencyMS.
         @monitors.find(&.server_description.address.== server_description.address).try(&.request_immediate_scan)
@@ -1030,6 +1041,12 @@ class Mongo::Client
     else
       # A notification is already waiting for server selection.
     end
+
+    # Load-balanced has no monitoring sockets. The constructor skips
+    # add_monitor. A later hello used to call this and start one anyway.
+    # That monitor's hello error paused the pool; checkout then waited
+    # 30s (GitHub LB 45 min cancel).
+    return if @options.load_balanced
 
     @topology_lock.synchronize do
       self.topology.servers.each do |server|

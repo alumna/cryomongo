@@ -9,6 +9,7 @@ require "./owned_receive"
 # (split send/receive is not cheap: every command builds OpMsg).
 # Wave 55: error? / body walk through OwnedReceive#view (pin.bytes), not
 # only an ensure local. SectionBody also holds the owner class.
+# Wave 62: keep OwnedReceive live during []? (read pin.bytes after fetch).
 class Mongo::Messages::OpMsg < Mongo::Messages::Part
   @[Field(ignore: true)]
   getter op_code : OpCode = OpCode::Msg
@@ -18,7 +19,8 @@ class Mongo::Messages::OpMsg < Mongo::Messages::Part
   # a struct OpMsg is not enough on Darwin (Wave 47). Outgoing messages
   # leave this nil. Do not serialize (OwnedReceive is not a Part field).
   # Wave 55: the walk must call owner.view / owner.fetch. A pin only in
-  # ensure is dropped on ubuntu-26.04.
+  # ensure is dropped on ubuntu-26.04. Wave 62: hold the pin until
+  # error? returns (LLVM can drop the class after view).
   @[Field(ignore: true)]
   @frame : OwnedReceive? = nil
 
@@ -184,7 +186,9 @@ class Mongo::Messages::OpMsg < Mongo::Messages::Part
   def error? : Exception?
     pin = @frame
     cached_body = with_owner_view(body_payload, pin)
-    error_walk(cached_body, pin)
+    # Hold pin until error? returns (Wave 62). Do not only pin in ensure
+    # (Wave 55). LLVM can drop OwnedReceive after view returns.
+    pin_until_return(pin, error_walk(cached_body, pin))
   end
 
   # failCommand may put labels on the reply or inside writeConcernError.
@@ -260,6 +264,18 @@ class Mongo::Messages::OpMsg < Mongo::Messages::Part
     end
   end
 
+  # Hold *pin* until *value* is returned (Wave 62). Read pin.bytes after
+  # the walk so LLVM cannot drop OwnedReceive during []?. NoInline so
+  # the size read cannot be deleted. A pin only in ensure is dropped
+  # (Wave 55). Do not clone every ok:1 hello.
+  @[NoInline]
+  private def pin_until_return(pin : OwnedReceive?, value)
+    if owner = pin
+      owner.bytes.size
+    end
+    value
+  end
+
   private def clone_view(value, pin : OwnedReceive?) : BSON
     bson = value.as(BSON)
     if owner = pin
@@ -278,7 +294,8 @@ class Mongo::Messages::OpMsg < Mongo::Messages::Part
 
   # Walk errorLabels / ok / writeErrors with pin.bytes on every fetch.
   # A pin only in ensure is dropped (Wave 55 ubuntu-26.04 SIGSEGV at
-  # create_data_key insert_one). Do not clone every ok:1 hello.
+  # create_data_key insert_one). Wave 62 keeps the owner live during
+  # []? (ubuntu-22.04-arm Drop SIGSEGV). Do not clone every ok:1 hello.
   private def error_walk(cached_body : BSON, pin : OwnedReceive?) : Exception?
     err_label_set = labels_from(fetch_field(cached_body, "errorLabels", pin), pin)
 
