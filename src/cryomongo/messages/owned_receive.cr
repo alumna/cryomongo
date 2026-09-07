@@ -14,8 +14,15 @@
 #
 # Wave 62: LLVM can still drop this class after #view returns. BSON
 # `@data` aliases `@bytes` (ubuntu-22.04-arm SIGSEGV in BSON#fetch
-# during Drop, run 34024439035). #fetch reads `@bytes.size` after `[]?`
-# and holds the owner until that call returns. Do not clone every hello.
+# during Drop, run 34024439035). Do not clone every hello.
+#
+# Wave 63: `pin_after(view(body.data)[key]?)` evaluates `[]?` **before**
+# entering pin_after (Crystal argument order). GitHub `34141211854`
+# ubuntu-26.04-arm standalone SIGSEGV and macos-26 standalone SIGBUS in
+# BSON#fetch during insert error? (`0x…0002`), stack still in #fetch.
+# Keep #fetch / #must_fetch NoInline. Hold `self` (this class) across
+# `[]?`; a `Bytes` / Slice local is not a GC root. Do not wrap the walk
+# as a pin argument. A pin only in ensure is dropped (Wave 55).
 class Mongo::Messages::OwnedReceive
   getter bytes : Bytes
 
@@ -41,24 +48,25 @@ class Mongo::Messages::OwnedReceive
     BSON.view(data)
   end
 
-  # []? through #view so the owner stays live for nested fetches.
-  # Read `@bytes.size` after []? (Wave 62). A pin only in ensure is
-  # dropped (Wave 55). Do not clone.
+  # []? through #view. NoInline so this class stays a GC root for the
+  # whole []? (Wave 63). Hold `self` across the walk: `keep = @bytes` is
+  # a Slice and is not a root. Do not wrap []? as pin_after's argument.
+  @[NoInline]
   def fetch(body : BSON, key : String)
-    pin_after(view(body.data)[key]?)
+    owner = self
+    viewed = view(body.data)
+    result = viewed[key]?
+    owner.bytes.size
+    result
   end
 
   # [] through #view. Raises when *key* is missing (same as BSON#[]).
-  def must_fetch(body : BSON, key : String)
-    pin_after(view(body.data)[key])
-  end
-
-  # Keep this class live during []? / error_walk (Wave 62).
-  # NoInline so LLVM cannot delete an unused size read. GitHub close is
-  # after the human updates PR 37.
   @[NoInline]
-  private def pin_after(result)
-    @bytes.size
+  def must_fetch(body : BSON, key : String)
+    owner = self
+    viewed = view(body.data)
+    result = viewed[key]
+    owner.bytes.size
     result
   end
 end

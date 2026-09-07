@@ -183,12 +183,15 @@ class Mongo::Messages::OpMsg < Mongo::Messages::Part
     end
   end
 
+  # NoInline: Crystal evaluates pin_until_return's second argument first,
+  # so wrapping error_walk there did not keep the owner during BSON#fetch
+  # (Wave 63, GitHub `34141211854` insert SIGSEGV/SIGBUS).
+  @[NoInline]
   def error? : Exception?
     pin = @frame
     cached_body = with_owner_view(body_payload, pin)
-    # Hold pin until error? returns (Wave 62). Do not only pin in ensure
-    # (Wave 55). LLVM can drop OwnedReceive after view returns.
-    pin_until_return(pin, error_walk(cached_body, pin))
+    result = error_walk(cached_body, pin)
+    pin_until_return(pin, result)
   end
 
   # failCommand may put labels on the reply or inside writeConcernError.
@@ -264,10 +267,10 @@ class Mongo::Messages::OpMsg < Mongo::Messages::Part
     end
   end
 
-  # Hold *pin* until *value* is returned (Wave 62). Read pin.bytes after
-  # the walk so LLVM cannot drop OwnedReceive during []?. NoInline so
-  # the size read cannot be deleted. A pin only in ensure is dropped
-  # (Wave 55). Do not clone every ok:1 hello.
+  # Read pin.bytes after *value* is already computed. Callers must not
+  # pass the walk as this argument (Wave 63: Crystal evaluates arguments
+  # first). NoInline so the size read cannot be deleted. A pin only in
+  # ensure is dropped (Wave 55). Do not clone every ok:1 hello.
   @[NoInline]
   private def pin_until_return(pin : OwnedReceive?, value)
     if owner = pin

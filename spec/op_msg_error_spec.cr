@@ -12,9 +12,12 @@ require "./spec_helper"
 # document is a class so `[]?` after `OwnedReceive#view` is a method on a
 # heap object (Darwin SIGBUS `33990243466` macos-15 standalone). Wave 62:
 # keep OwnedReceive live during []? (ubuntu-22.04-arm Drop SIGSEGV
-# `34024439035`). Keep scribble / pool / concurrent / GC.collect /
-# Message-drop / Drop-shaped walks. GC.collect on Linux is not the
-# GitHub arm proof. GitHub close is after the human updates PR 37.
+# `34024439035`). Wave 63: do not wrap []? / error_walk as a NoInline
+# argument (ubuntu-26.04-arm standalone SIGSEGV and macos-26 standalone
+# SIGBUS `34141211854` in BSON#fetch during insert). Keep scribble /
+# pool / concurrent / GC.collect / Message-drop / Drop-shaped walks.
+# GC.collect on Linux is not the GitHub arm proof. GitHub close is after
+# the human updates PR 37.
 
 private def serialize_op_msg(doc : BSON) : Bytes
   msg = Mongo::Messages::OpMsg.new(doc)
