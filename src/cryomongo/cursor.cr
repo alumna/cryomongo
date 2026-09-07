@@ -29,6 +29,10 @@ class Mongo::Cursor
   @deadline : Mongo::Deadline? = nil
   # Fresh timeoutMS for one next() when timeoutMode is iteration (change-stream resume uses the same deadline).
   @iteration_deadline : Mongo::Deadline? = nil
+  # Load-balanced getMore network error on a dead pin. close() MUST NOT
+  # killCursors (Behaviour With Cursors). Leftover Instant Timeout is not
+  # this flag.
+  @omit_kill_cursors : Bool = false
 
   protected property server_description : SDAM::ServerDescription? = nil
   protected property session : Session::ClientSession?
@@ -189,7 +193,9 @@ class Mongo::Cursor
   # starts a fresh timeoutMS from the original find/aggregate.
   # Leftover Instant expired on iterate closed the pin (Command Execution).
   # close() still killCursors with a refreshed leftover Instant on a usable
-  # connection (often new). Load-balanced close must still send killCursors.
+  # connection (often new). Load-balanced getMore network error: MUST NOT
+  # killCursors (dead pin). Non-network getMore and killCursors-itself still
+  # send killCursors.
   def close(*, timeout_ms : Int64? = nil)
     drop_dead_cursor_pin
     self.kill(timeout_ms: timeout_ms) unless exhausted?
@@ -229,6 +235,9 @@ class Mongo::Cursor
   protected def kill(*, timeout_ms : Int64? = nil)
     return if @cursor_id == 0
     begin
+      if @omit_kill_cursors
+        return
+      end
       drop_dead_cursor_pin
       deadline = unless timeout_ms.nil?
                    Mongo::Deadline.from_timeout_ms(timeout_ms)
@@ -262,19 +271,32 @@ class Mongo::Cursor
 
     batch_size = next_batch_size
 
-    reply = @client.command(
-      Commands::GetMore,
-      database: @database,
-      collection: @collection,
-      cursor_id: @cursor_id,
-      batch_size: batch_size,
-      max_time_ms: @await_time_ms,
-      comment: @comment,
-      server_description: @server_description,
-      session: @session,
-      connection: @pinned_connection,
-      deadline: get_more_deadline
-    )
+    reply = begin
+      @client.command(
+        Commands::GetMore,
+        database: @database,
+        collection: @collection,
+        cursor_id: @cursor_id,
+        batch_size: batch_size,
+        max_time_ms: @await_time_ms,
+        comment: @comment,
+        server_description: @server_description,
+        session: @session,
+        connection: @pinned_connection,
+        deadline: get_more_deadline
+      )
+    rescue error : Mongo::Error::Network
+      # closeConnection / reset: pin is dead. Timeout leftover Instant is
+      # Error::Timeout (still killCursors). keep_pin io_timeout leaves the
+      # socket open (still killCursors on that pin).
+      if @client.options.load_balanced
+        conn = @pinned_connection
+        if conn && (conn.socket.closed? || conn.interrupted?)
+          @omit_kill_cursors = true
+        end
+      end
+      raise error
+    end
 
     raise Mongo::Error.new("GetMore command failed to return a result") unless reply
 
