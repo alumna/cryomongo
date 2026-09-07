@@ -6,22 +6,62 @@ on:
   pull_request:
     branches: [master]
 
+# Labels from actions/runner-images Available Images (2026-09-04).
+# fail-fast is false. Do not use ubuntu-latest or macos-latest.
+#
+# Linux cells (Wave 28). Skip ubuntu-slim.
+# 6 images × 4 topologies = 24 jobs. Docker MongoDB 8.0 (docker-topology.sh).
+# GitHub Ubuntu 26.04 needs GLIBC_TUNABLES=glibc.pthread.rseq=1 on the
+# container (SERVER-121912, kernel 6.19+ / Azure 7.0.0). The topology
+# script always sets that env, so 22.04 and 24.04 inherit it. Do not set
+# this env on macOS jobs (native mongod, ci-native-topology.sh).
+#
+#   ubuntu-22.04       ubuntu-24.04       ubuntu-26.04         (x64)
+#   ubuntu-22.04-arm   ubuntu-24.04-arm   ubuntu-26.04-arm     (arm64)
+#   × standalone, replicaset, sharded, load-balanced
+#
+# Ubuntu 26.04 / 26.04-arm are preview. GitHub images ship Docker (Azure
+# kernel 7.0.0, not this LXC's zabbly kernel). No ubuntu2604 crypt_shared
+# tarball: download script uses the ubuntu2404 package on 26.04.
+# Ubuntu 26.04 dropped PCRE1. Those cells install Crystal 1.21.x from the
+# official GitHub tarball (scripts/ci-install-crystal.sh, libpcre2-dev).
+# 22.04 / 24.04 keep crystal-lang/install-crystal@v1. macOS keeps that action.
+#
+# macOS cells (Wave 29). Pin macos-15 and macos-26 (arm64). Skip macos-14
+# (deprecated). Skip intel macos-*-large / macos-*-intel (paid larger runners).
+# Native Community MongoDB 8.0.29 (ci-native-topology.sh). Do not call
+# docker-topology.sh (Linux images do not run on GitHub macOS).
+# 2 images × 4 topologies = 8 jobs. HAProxy via Homebrew for load-balanced.
+#
+# Windows leftover (no jobs): Crystal/cryomongo does not compile. See
+# WAVES.md Wave 29 (LibC::SHUT_RDWR, zstd.cr bash pkg-libs.sh, no
+# mongocrypt.lib). windows-11-arm has no libmongocrypt 1.20.4 tarball.
+
 jobs:
   tests:
+    # Wave 41. GitHub default job timeout is 6 hours. PR 37 run
+    # 33920568333: ubuntu-24.04-arm sharded hung in Run Specs past
+    # 60 min with no utf-timing artifact. Honest macos-26 sharded
+    # wall is ~24 min. 45 min kills a hang and still fits that cell.
+    # Do not use 25 min. Do not Linux-only.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - topology: standalone
-            uri: mongodb://bob:pwd123@localhost:27017/?authSource=admin&compressors=snappy,zstd,zlib
-          - topology: replicaset
-            uri: mongodb://bob:pwd123@127.0.0.1:27017/?replicaSet=rs0&authSource=admin&compressors=snappy,zstd,zlib
-          - topology: sharded
-            uri: mongodb://bob:pwd123@localhost:27017,localhost:27016/?authSource=admin&compressors=snappy,zstd,zlib
-          - topology: load-balanced
-            uri: mongodb://bob:pwd123@127.0.0.1:8000/?loadBalanced=true&authSource=admin&compressors=snappy,zstd,zlib
-    runs-on: ubuntu-24.04
-    name: MongoDB 8.0 ${{ matrix.topology }}
+        os:
+          - ubuntu-22.04
+          - ubuntu-24.04
+          - ubuntu-26.04
+          - ubuntu-22.04-arm
+          - ubuntu-24.04-arm
+          - ubuntu-26.04-arm
+        topology:
+          - standalone
+          - replicaset
+          - sharded
+          - load-balanced
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.os }} ${{ matrix.topology }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -37,34 +77,224 @@ jobs:
           spec/support/run-load-balancer.sh start
           cat tmp/lb-uri.env
 
+      # 22.04 / 24.04 still have PCRE1. The action is fine there.
       - name: Install Crystal
+        if: matrix.os != 'ubuntu-26.04' && matrix.os != 'ubuntu-26.04-arm'
         uses: crystal-lang/install-crystal@v1
         with:
           crystal: latest
 
+      # Ubuntu 26.04 dropped PCRE1. Official 1.21.x tarball + libpcre2-dev.
+      # The script never apt-installs the PCRE1 -dev package.
+      - name: Install Crystal (Ubuntu 26.04)
+        if: matrix.os == 'ubuntu-26.04' || matrix.os == 'ubuntu-26.04-arm'
+        run: |
+          set -euo pipefail
+          scripts/ci-install-crystal.sh
+
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y libzstd-dev libmongocrypt-dev
+          sudo apt-get install -y libzstd-dev
           shards install
+
+      - name: Cache libmongocrypt 1.20.4
+        uses: actions/cache@v6
+        with:
+          path: vendor/libmongocrypt
+          key: libmongocrypt-1.20.4-${{ matrix.os }}-${{ runner.arch }}-nocrypto
+
+      - name: Vendor libmongocrypt 1.20.4
+        run: scripts/vendor-libmongocrypt.sh
+
+      - name: Cache crypt_shared
+        uses: actions/cache@v6
+        with:
+          path: tmp/mongo_crypt_v1.so
+          key: crypt-shared-8.0.29-${{ matrix.os }}-${{ runner.arch }}
+
+      - name: Download crypt_shared
+        run: |
+          set -euo pipefail
+          scripts/download-crypt-shared.sh
+          if [[ -f tmp/mongo_crypt_v1.so ]]; then
+            echo "CRYPT_SHARED_LIB_PATH=${PWD}/tmp/mongo_crypt_v1.so" >> "$GITHUB_ENV"
+          else
+            echo "crypt_shared missing; live auto-encryption specs will skip"
+          fi
 
       - name: Run Specs
         env:
           TOPOLOGY: ${{ matrix.topology }}
-          MONGODB_URI: ${{ matrix.uri }}
           SINGLE_MONGOS_LB_URI: mongodb://bob:pwd123@127.0.0.1:8000/?loadBalanced=true&authSource=admin&compressors=snappy,zstd,zlib
           MULTI_MONGOS_LB_URI: mongodb://bob:pwd123@127.0.0.1:8001/?loadBalanced=true&authSource=admin&compressors=snappy,zstd,zlib
           UTF_TIMING_LOG: tmp/utf-timing.log
           CRYSTAL_WORKERS: "2"
           UTF_RUN_TWO_MONGOS: "1"
         run: |
+          set -euo pipefail
           mkdir -p tmp
+          case "${TOPOLOGY}" in
+            standalone)
+              export MONGODB_URI='mongodb://bob:pwd123@localhost:27017/?authSource=admin&compressors=snappy,zstd,zlib'
+              ;;
+            replicaset)
+              export MONGODB_URI='mongodb://bob:pwd123@127.0.0.1:27017/?replicaSet=rs0&authSource=admin&compressors=snappy,zstd,zlib'
+              ;;
+            sharded)
+              export MONGODB_URI='mongodb://bob:pwd123@localhost:27017,localhost:27016/?authSource=admin&compressors=snappy,zstd,zlib'
+              ;;
+            load-balanced)
+              export MONGODB_URI='mongodb://bob:pwd123@127.0.0.1:8000/?loadBalanced=true&authSource=admin&compressors=snappy,zstd,zlib'
+              ;;
+            *)
+              echo "unknown topology ${TOPOLOGY}" >&2
+              exit 1
+              ;;
+          esac
           crystal spec -Dpreview_mt -Dexecution_context
 
       - name: Upload UTF timing log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: utf-timing-${{ matrix.topology }}
+          name: utf-timing-${{ matrix.os }}-${{ matrix.topology }}
+          path: tmp/utf-timing.log
+          if-no-files-found: ignore
+
+  tests-macos:
+    # Same 45 min cap as Linux (Wave 41). macos-26 sharded is ~24 min.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-15
+          - macos-26
+        topology:
+          - standalone
+          - replicaset
+          - sharded
+          - load-balanced
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.os }} ${{ matrix.topology }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: latest
+
+      - name: Install zstd and openssl@3
+        run: |
+          set -euo pipefail
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          brew install zstd pkgconf openssl@3
+          OPENSSL_PREFIX="$(brew --prefix openssl@3)"
+          if [[ ! -x "${OPENSSL_PREFIX}/bin/openssl" ]]; then
+            echo "Homebrew openssl@3 missing at ${OPENSSL_PREFIX}/bin/openssl" >&2
+            exit 1
+          fi
+          # Crystal links Homebrew openssl. tls_spec `openssl rsa -traditional`
+          # needs OpenSSL 3. macos-15 pkg-config openssl is 1.1; macos-26 is 3.
+          # Prefer openssl@3 so macos-15 never picks 1.1. Do not skip macos-15.
+          echo "${OPENSSL_PREFIX}/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=${OPENSSL_PREFIX}/lib/pkgconfig:$(brew --prefix zstd)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Install HAProxy (load-balanced)
+        if: matrix.topology == 'load-balanced'
+        run: |
+          set -euo pipefail
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          brew install haproxy
+          haproxy -v
+
+      - name: Cache MongoDB Community 8.0.29
+        uses: actions/cache@v6
+        with:
+          path: tmp/mongodb
+          key: mongodb-community-8.0.29-mongosh-2.10.0-${{ matrix.os }}-${{ runner.arch }}
+
+      - name: Download MongoDB Community 8.0.29
+        run: |
+          set -euo pipefail
+          scripts/download-mongodb-community.sh
+          echo "${PWD}/tmp/mongodb/bin" >> "$GITHUB_PATH"
+
+      - name: Start MongoDB ${{ matrix.topology }} (native 8.0)
+        run: |
+          set -euo pipefail
+          export PATH="${PWD}/tmp/mongodb/bin:${PATH}"
+          scripts/ci-native-topology.sh ${{ matrix.topology }}
+          if [[ -f tmp/lb-uri.env ]]; then
+            cat tmp/lb-uri.env
+          fi
+
+      - name: Install dependencies
+        run: shards install
+
+      - name: Cache libmongocrypt 1.20.4
+        uses: actions/cache@v6
+        with:
+          path: vendor/libmongocrypt
+          key: libmongocrypt-1.20.4-${{ matrix.os }}-${{ runner.arch }}-universal
+
+      - name: Vendor libmongocrypt 1.20.4
+        run: scripts/vendor-libmongocrypt.sh
+
+      - name: Cache crypt_shared
+        uses: actions/cache@v6
+        with:
+          path: tmp/mongo_crypt_v1.dylib
+          key: crypt-shared-8.0.29-${{ matrix.os }}-${{ runner.arch }}
+
+      - name: Download crypt_shared
+        run: |
+          set -euo pipefail
+          scripts/download-crypt-shared.sh
+          if [[ -f tmp/mongo_crypt_v1.dylib ]]; then
+            echo "CRYPT_SHARED_LIB_PATH=${PWD}/tmp/mongo_crypt_v1.dylib" >> "$GITHUB_ENV"
+          else
+            echo "crypt_shared missing; live auto-encryption specs will skip"
+          fi
+
+      - name: Run Specs
+        env:
+          TOPOLOGY: ${{ matrix.topology }}
+          SINGLE_MONGOS_LB_URI: mongodb://bob:pwd123@127.0.0.1:8000/?loadBalanced=true&authSource=admin&compressors=snappy,zstd,zlib
+          MULTI_MONGOS_LB_URI: mongodb://bob:pwd123@127.0.0.1:8001/?loadBalanced=true&authSource=admin&compressors=snappy,zstd,zlib
+          UTF_TIMING_LOG: tmp/utf-timing.log
+          CRYSTAL_WORKERS: "2"
+          UTF_RUN_TWO_MONGOS: "1"
+        run: |
+          set -euo pipefail
+          mkdir -p tmp
+          case "${TOPOLOGY}" in
+            standalone)
+              export MONGODB_URI='mongodb://bob:pwd123@localhost:27017/?authSource=admin&compressors=snappy,zstd,zlib'
+              ;;
+            replicaset)
+              export MONGODB_URI='mongodb://bob:pwd123@127.0.0.1:27017/?replicaSet=rs0&authSource=admin&compressors=snappy,zstd,zlib'
+              ;;
+            sharded)
+              export MONGODB_URI='mongodb://bob:pwd123@localhost:27017,localhost:27016/?authSource=admin&compressors=snappy,zstd,zlib'
+              ;;
+            load-balanced)
+              export MONGODB_URI='mongodb://bob:pwd123@127.0.0.1:8000/?loadBalanced=true&authSource=admin&compressors=snappy,zstd,zlib'
+              ;;
+            *)
+              echo "unknown topology ${TOPOLOGY}" >&2
+              exit 1
+              ;;
+          esac
+          crystal spec -Dpreview_mt -Dexecution_context
+
+      - name: Upload UTF timing log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: utf-timing-${{ matrix.os }}-${{ matrix.topology }}
           path: tmp/utf-timing.log
           if-no-files-found: ignore

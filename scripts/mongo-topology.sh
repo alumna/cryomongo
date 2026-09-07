@@ -229,6 +229,9 @@ initiate_rs() {
 
 start_sharded() {
   stop_all
+  # Replica-set member 27019 can hold the port until the kernel releases it.
+  # Configsvr binds 27019; without this wait, --fork exits with Address already in use.
+  sleep 1
   mkdir -p "$DATA/cfg" "$DATA/shard"
   mongod --configsvr --replSet cfg --port 27019 --bind_ip 127.0.0.1 \
     --dbpath "$DATA/cfg" --logpath "$DATA/cfg.log" --fork "${MONGOD_PARAMS[@]}"

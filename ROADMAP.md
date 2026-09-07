@@ -13,6 +13,8 @@ This phase focuses on ensuring the driver is safe, doesn't leak resources, and p
 ### Testing Infrastructure
 - [x] **Strict UTF Dispatcher:** Unknown operations raise `SKIP_TEST` (no silent pass).
 - [x] **Topology CI Matrix:** GitHub Actions runs standalone, replica set, sharded, and load-balanced. Push a PR to run that matrix.
+- [x] **Linux OS/arch CI:** Ubuntu 22.04, 24.04, and 26.04 (preview) on x64 and arm64, four topologies each (Wave 28). Pin labels; no `ubuntu-latest`. Skip `ubuntu-slim`. PR 37: 22.04 and 24.04 are green (16 cells). Ubuntu 26.04 Docker start is Wave 30 (SERVER-121912).
+- [x] **macOS CI jobs:** macos-15 and macos-26 (arm64), four topologies each, native Community MongoDB 8.0 (Wave 29). Pin labels; no `macos-latest`. Skip macos-14 and intel `macos-*-large`. Windows GitHub is leftover (driver does not compile). PR 37: native mongod starts; specs need `libmongocrypt.0.dylib` (Wave 31).
 - [x] **Dynamic Test Skipping:** `runOnRequirements` uses live topology or `TOPOLOGY`. Files that still skip because a feature is missing are listed under Remaining work (not AWS / OIDC / MongoDB 8.1+).
 
 ### Core Specifications (JSON & Legacy)
@@ -336,14 +338,18 @@ Not a spec hole. Review every hot path after 3.1–3.13: allocations, `insertOne
 
 ## Phase 4: Client-side encryption (Post-1.0)
 
-In scope for production-grade completeness. Not AWS / OIDC / MongoDB 8.1+. Planned as workbench Waves **21–25** (`/home/coghi/Projects/mongodb/WAVES.md`). Adapter four-topology CI is Wave 20. Do **not** start Phase **3.14** from those waves.
+In scope for production-grade completeness. Not AWS / OIDC / MongoDB 8.1+.
 
-- [ ] **Client-Side Field Level Encryption (CSFLE / Queryable Encryption):** Crystal bindings for `libmongocrypt`, intercept queries, encrypt fields locally, official CSFLE suite (224 files, none copied). Split across workbench Waves **21–25**.
-  - [x] Wave 21: `libmongocrypt` bindings + explicit `create_data_key` / `encrypt` / `decrypt` (local KMS)
-  - [ ] Wave 22: auto-encryption (`schemaMap`)
-  - [ ] Wave 23: Queryable Encryption (`encryptedFieldsMap`)
-  - [ ] Wave 24: first official UTF / prose batch (local + 8.0)
-  - [ ] Wave 25: remaining official local / 8.0 tests
+- [x] **Client-Side Field Level Encryption (CSFLE / Queryable Encryption):** Crystal bindings for `libmongocrypt`, intercept queries, encrypt fields locally, official CSFLE suite that can run on MongoDB 8.0 + local KMS (77 UTF files). Cloud KMS and 8.2+ text stay leftover. Split across implementation phases.
+  - [x] `libmongocrypt` bindings + explicit `create_data_key` / `encrypt` / `decrypt` (local KMS)
+  - [x] auto-encryption (`schemaMap`)
+  - [x] Queryable Encryption (`encryptedFieldsMap`)
+  - [x] first official UTF / prose batch (local + 8.0)
+  - [x] remaining official local / 8.0 tests (leftover listed: cloud KMS, 8.2+ text)
+  - [x] vendor official libmongocrypt **1.20.4** (optional system lib >= 1.20.0)
+  - [x] Linux GitHub CI: Ubuntu 22.04 / 24.04 / 26.04 (preview) × x64 / arm64 × four topologies (Wave 28)
+  - [ ] GitHub Ubuntu 26.04: `GLIBC_TUNABLES` on Docker `mongo:8.0` (Wave 30, SERVER-121912)
+  - [ ] GitHub macOS: vendor `libmongocrypt.0.dylib` (Wave 31)
 
 ## Phase 5: Cloud and External Authentication
 

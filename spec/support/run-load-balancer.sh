@@ -46,7 +46,7 @@ CHECK2="${LB_CHECK_PORT_2:-27016}"
 
 need_haproxy() {
   if ! command -v haproxy >/dev/null 2>&1; then
-    echo "haproxy is not installed. Run: sudo apt-get install -y haproxy" >&2
+    echo "haproxy is not installed. Linux: sudo apt-get install -y haproxy. macOS: brew install haproxy." >&2
     exit 1
   fi
 }

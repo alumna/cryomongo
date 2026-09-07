@@ -1,6 +1,11 @@
 # Flush-on-write timing log for the unified runner.
 # Default path: tmp/utf-timing.log (override with UTF_TIMING_LOG).
 # Each line is one event so a live `tail -f` shows progress.
+#
+# D50 / Wave 35: CSFLE files may add time (standalone ~1.4s, replicaset ~25s,
+# sharded ~75s, load-balanced ~60s on ubuntu-22.04). Old files must stay near
+# PR 35. Do not drop enxcol_.* on non-CSFLE UTF (runner drop_utf_collection).
+# Do not shorten official CSOT / backpressure / change-stream waits.
 module Mongo::Unified::Timing
   extend self
 
