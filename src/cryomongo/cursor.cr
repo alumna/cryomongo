@@ -187,17 +187,11 @@ class Mongo::Cursor
   # Close the cursor and frees underlying resources.
   # timeout_ms, if set, is the timeout for killCursors only. Otherwise killCursors
   # starts a fresh timeoutMS from the original find/aggregate.
+  # Leftover Instant expired on iterate closed the pin (Command Execution).
+  # close() still killCursors with a refreshed leftover Instant on a usable
+  # connection (often new). Load-balanced close must still send killCursors.
   def close(*, timeout_ms : Int64? = nil)
-    conn = @pinned_connection
-    if conn && conn.socket.closed?
-      # Dead pin: return the socket. Load-balanced killCursors must stay on the
-      # same mongos, so do not open a new socket after a network error.
-      @pinned_connection = nil
-      @client.checkin_connection(conn)
-      if @client.options.load_balanced
-        @cursor_id = 0_i64
-      end
-    end
+    drop_dead_cursor_pin
     self.kill(timeout_ms: timeout_ms) unless exhausted?
   rescue e
     # Ignore - client might be dead
@@ -235,6 +229,7 @@ class Mongo::Cursor
   protected def kill(*, timeout_ms : Int64? = nil)
     return if @cursor_id == 0
     begin
+      drop_dead_cursor_pin
       deadline = unless timeout_ms.nil?
                    Mongo::Deadline.from_timeout_ms(timeout_ms)
                  else
@@ -343,6 +338,18 @@ class Mongo::Cursor
   # the call. Same path on every OS. get_more_deadline is unchanged.
   protected def stop_after_empty_await_get_more? : Bool
     !@await_time_ms.nil?
+  end
+
+  # Leftover Instant expired / closer interrupt: discard this pin so
+  # killCursors does not use a shutdown socket. Pool release of a closed
+  # socket is reason "error".
+  private def drop_dead_cursor_pin : Nil
+    conn = @pinned_connection
+    return unless conn
+    return unless conn.socket.closed? || conn.interrupted?
+    @pinned_connection = nil
+    conn.close unless conn.socket.closed?
+    @client.checkin_connection(conn)
   end
 
   # close() always starts a fresh timeoutMS, even if cursor lifetime already expired.

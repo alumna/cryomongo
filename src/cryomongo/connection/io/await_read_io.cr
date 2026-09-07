@@ -32,9 +32,11 @@
 # Time::Span.zero is now. EVFILT_TIMER data=0 is now. A positive slice can
 # sit in wait_readable until the failPoint unblocks (Shape B). After leftover
 # Instant expired, one LibC.read for kernel bytes and Timeout — do not
-# wait_readable(0). Darwin Connection#arm_leftover_read_closer sleeps the
-# remaining leftover Instant (not sleep(0)) and shutdowns so a stuck
-# wait_readable wakes at leftover Instant.
+# wait_readable(0). Darwin Connection#arm_leftover_read_closer slices until
+# leftover Instant (not one remaining leftover Instant wait, not sleep(0))
+# then interrupt_and_wake so a stuck wait_readable wakes. That connection
+# is discarded. close() killCursors uses a fresh leftover Instant on a
+# usable connection.
 #
 # leftover 0 at wrap (leftover 0 still send / Darwin non-CSOT / handshake):
 # raise at once. Do not last-read with wait 0. Crystal 0 is now on Darwin,

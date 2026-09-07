@@ -320,9 +320,12 @@ class Mongo::Connection
   end
 
   # Darwin: leftover Instant is the wait. wait_readable may sit until the
-  # failPoint unblocks (Shape B). Sleep remaining leftover Instant (not
-  # sleep(0)), then shutdown so the read fiber wakes at leftover Instant.
-  # No-op on Linux. Cancel from unwrap so a pooled socket is not shutdown.
+  # failPoint unblocks (Shape B). Slice until leftover Instant (not one
+  # kqueue wait of remaining leftover Instant, not sleep(0)), then
+  # interrupt_and_wake so the read fiber wakes. That socket is discarded
+  # (Command Execution). close() killCursors uses a fresh leftover Instant
+  # on a usable connection. No-op on Linux. Cancel from unwrap so a pooled
+  # socket is not shutdown.
   def arm_leftover_read_closer : Nil
     {% if flag?(:darwin) %}
       io = @socket
@@ -334,9 +337,15 @@ class Mongo::Connection
       gen = @closer_gen.add(1)
       @closer_armed.set(true)
       spawn do
-        rest = expire_at - Time.instant
-        sleep rest if rest > Time::Span.zero
-        if @closer_armed.compare_and_set(true, false) && @closer_gen.get == gen
+        slice = AwaitReadIO::SLICE
+        while @closer_armed.get && @closer_gen.get == gen
+          rest = expire_at - Time.instant
+          break unless rest > Time::Span.zero
+          wait = rest < slice ? rest : slice
+          sleep wait
+        end
+        leftover_expired = (expire_at - Time.instant) <= Time::Span.zero
+        if leftover_expired && @closer_armed.compare_and_set(true, false) && @closer_gen.get == gen
           interrupt_and_wake unless @raw_socket.closed?
         end
       end
