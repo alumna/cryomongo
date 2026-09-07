@@ -1166,7 +1166,9 @@ module Mongo::Unified
         ignore = hash["ignoreExtraEvents"]?.try(&.as_bool) || false
         unless ignore || actual_events.size == expected_events.size
           names = actual_events.map(&.command_name)
-          raise Exception.new("TEST_FAILED: expected #{expected_events.size} events for #{client_id}, got #{actual_events.size}: #{names}")
+          wrap_ms = Mongo::Connection::AwaitReadIO.recorded_leftover_at_wrap.total_milliseconds
+          after_ms = Mongo::Connection::AwaitReadIO.recorded_leftover_after_write.total_milliseconds
+          raise Exception.new("TEST_FAILED: expected #{expected_events.size} events for #{client_id}, got #{actual_events.size}: #{names} leftover_at_wrap_ms=#{wrap_ms} leftover_after_write_ms=#{after_ms}")
         end
 
         expected_events.each_with_index do |expected, index|

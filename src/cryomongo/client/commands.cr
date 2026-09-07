@@ -543,9 +543,8 @@ class Mongo::Client
       if keep_pin
         # Timeout with no reply bytes yet. Keep the pin so close() can drain
         # the late getMore and send killCursors on the same socket. A leftover
-        # Instant closer interrupt_and_wake shuts that socket down; do not
-        # keep it for killCursors (fresh leftover Instant, often a new
-        # connection).
+        # Instant closer SHUT_RD / interrupt marks that socket; do not keep
+        # it for killCursors (fresh leftover Instant, often a new connection).
         connection.mark_pending_reply
       else
         # Mark the socket dead so checkin uses reason "error", not "stale".

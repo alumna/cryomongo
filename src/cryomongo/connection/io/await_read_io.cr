@@ -34,9 +34,12 @@
 # Instant expired, one LibC.read for kernel bytes and Timeout — do not
 # wait_readable(0). Darwin Connection#arm_leftover_read_closer slices until
 # leftover Instant (not one remaining leftover Instant wait, not sleep(0))
-# then interrupt_and_wake so a stuck wait_readable wakes. That connection
-# is discarded. close() killCursors uses a fresh leftover Instant on a
-# usable connection.
+# then SHUT_RD so a stuck wait_readable wakes. Pending kernel bytes stay
+# for that last-read (gridfs timeoutMS 75 / two finds blockTimeMS 50:
+# failPoint unblocks at 50ms, leftover Instant at wrap is above 50ms).
+# Do not raise Closed stream on that interrupt until last-read has run.
+# That connection is discarded. close() killCursors uses a fresh leftover
+# Instant on a usable connection.
 #
 # leftover 0 at wrap (leftover 0 still send / Darwin non-CSOT / handshake):
 # raise at once. Do not last-read with wait 0. Crystal 0 is now on Darwin,
@@ -94,6 +97,13 @@ class Mongo::Connection::AwaitReadIO < IO
 
   def read(slice : Bytes) : Int32
     loop do
+      leftover_expired = deadline_expired?
+      # Darwin leftover Instant closer already waited leftover Instant.
+      # One LibC.read of kernel bytes (no extra wait). Pool-clear interrupt
+      # still raises Closed stream.
+      if closer_last_read?(leftover_expired)
+        return read_kernel_or_timeout(slice)
+      end
       if @connection.interrupted? || @inner.closed?
         raise IO::Error.new("Closed stream")
       end
@@ -108,6 +118,10 @@ class Mongo::Connection::AwaitReadIO < IO
       else
         wait = SLICE
       end
+      leftover_expired = deadline_expired?
+      if closer_last_read?(leftover_expired)
+        return read_kernel_or_timeout(slice)
+      end
       if @connection.interrupted?
         wait = 1.millisecond
         expired = false
@@ -115,14 +129,13 @@ class Mongo::Connection::AwaitReadIO < IO
       # leftover Instant expired: one LibC.read, no wait_readable. Darwin
       # wait_readable(0) is now or never returns (Shape B).
       if expired && wait <= Time::Span.zero
-        n = read_kernel_bytes(slice)
-        if n > 0
-          @got_data = true
-          return n
-        end
-        raise IO::TimeoutError.new("Read timed out")
+        return read_kernel_or_timeout(slice)
       end
       apply_wait(wait)
+      leftover_expired = deadline_expired?
+      if closer_last_read?(leftover_expired)
+        return read_kernel_or_timeout(slice)
+      end
       # interrupt() may have set 1ms, then this loop wrote the slice back.
       # Recheck so close does not start another full slice.
       if @connection.interrupted? || @inner.closed?
@@ -136,6 +149,10 @@ class Mongo::Connection::AwaitReadIO < IO
         # IO::TimeoutError is an IO::Error. Darwin kqueue may instead raise
         # IO::Error / Socket::Error with os_error ETIMEDOUT. os_error is nil
         # on a plain TimeoutError; do not use .not_nil!.
+        leftover_expired = deadline_expired?
+        if closer_last_read?(leftover_expired)
+          return read_kernel_or_timeout(slice)
+        end
         if slice_timeout?(error)
           raise IO::TimeoutError.new("Read timed out") if expired
           # Non-expired slice timed out. Darwin wait_readable does not retry
@@ -188,6 +205,29 @@ class Mongo::Connection::AwaitReadIO < IO
 
   private def slice_timeout?(error : IO::Error) : Bool
     error.is_a?(IO::TimeoutError) || error.os_error == Errno::ETIMEDOUT
+  end
+
+  private def deadline_expired? : Bool
+    if deadline = @deadline
+      (deadline - Time.instant) <= Time::Span.zero
+    else
+      false
+    end
+  end
+
+  # Leftover Instant closer woke this read. Last-read kernel bytes that
+  # arrived before leftover Instant. Do not last-read a pool-clear interrupt.
+  private def closer_last_read?(leftover_expired : Bool) : Bool
+    leftover_expired && last_read_sent_csot? && @connection.interrupted? && !@connection.interrupted_by_clear?
+  end
+
+  private def read_kernel_or_timeout(slice : Bytes) : Int32
+    n = read_kernel_bytes(slice)
+    if n > 0
+      @got_data = true
+      return n
+    end
+    raise IO::TimeoutError.new("Read timed out")
   end
 
   # leftover 0 at wrap / Darwin non-CSOT: raise unless this wrap already

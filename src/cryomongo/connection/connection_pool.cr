@@ -347,6 +347,7 @@ class Mongo::Connection::Pool(T)
   end
 
   # Return a socket to the pool, or close it if it is dead, stale, or the pool is closed.
+  # Leftover Instant closer interrupt (SHUT_RD) is dead: do not idle it.
   # Returns "stale", "error", "poolClosed", or nil when the socket is idle again.
   def release(resource : T) : String?
     sync do
@@ -357,7 +358,8 @@ class Mongo::Connection::Pool(T)
         return "poolClosed"
       end
 
-      if resource.socket.closed?
+      if resource.socket.closed? || resource.interrupted?
+        resource.close unless resource.socket.closed?
         remove(resource)
         signal_available
         return "error"

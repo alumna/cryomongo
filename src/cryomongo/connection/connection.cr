@@ -321,11 +321,11 @@ class Mongo::Connection
 
   # Darwin: leftover Instant is the wait. wait_readable may sit until the
   # failPoint unblocks (Shape B). Slice until leftover Instant (not one
-  # kqueue wait of remaining leftover Instant, not sleep(0)), then
-  # interrupt_and_wake so the read fiber wakes. That socket is discarded
-  # (Command Execution). close() killCursors uses a fresh leftover Instant
-  # on a usable connection. No-op on Linux. Cancel from unwrap so a pooled
-  # socket is not shutdown.
+  # kqueue wait of remaining leftover Instant, not sleep(0)), then SHUT_RD
+  # so the read fiber wakes. Pending kernel bytes stay for last-read.
+  # That socket is discarded (Command Execution). close() killCursors uses
+  # a fresh leftover Instant on a usable connection. No-op on Linux. Cancel
+  # from unwrap so a pooled socket is not shutdown.
   def arm_leftover_read_closer : Nil
     {% if flag?(:darwin) %}
       io = @socket
@@ -346,7 +346,13 @@ class Mongo::Connection
         end
         leftover_expired = (expire_at - Time.instant) <= Time::Span.zero
         if leftover_expired && @closer_armed.compare_and_set(true, false) && @closer_gen.get == gen
-          interrupt_and_wake unless @raw_socket.closed?
+          interrupt
+          raw = @raw_socket
+          unless raw.closed?
+            # SHUT_RD wakes wait_readable. Pending kernel bytes stay for
+            # AwaitReadIO last-read. SHUT_RDWR can drop them (Shape A).
+            LibC.shutdown(raw.fd, LibC::SHUT_RD)
+          end
         end
       end
     {% end %}
