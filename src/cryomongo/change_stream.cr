@@ -150,7 +150,8 @@ module Mongo::ChangeStream
     end
 
     # Idle empty getMores are heartbeats. Do not stop after empty
-    # awaitData getMores (find-cursor got-3). Keep waiting until leftover expires.
+    # awaitData getMores (find-cursor extra getMore). Keep waiting until
+    # leftover Instant expires.
     protected def stop_after_empty_await_get_more? : Bool
       false
     end

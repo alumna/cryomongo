@@ -201,36 +201,29 @@ Client-Side Field Level Encryption (CSFLE)
 - leftover 0 still send keeps a positive `maxTimeMS` (floor 1)
   - Do not skip `maxTimeMS`. Do not raise remaining timeoutMS <
     min RTT before that send (LB `bulkWrite` update)
-- Linux find awaitData: one empty getMore ends this next()
+- Find awaitData: one empty getMore ends this next() on every OS
   - Official refresh (`timeoutMS` 250, `maxAwaitTimeMS` 1, failPoint
     150) is find + one getMore. A second getMore is extra
-  - Wait leftover so `timeoutMS` still covers the call. Do not start
-    a new `timeoutMS` per getMore. Do not copy Darwin's two-empty
-    counter. Change streams still loop. `get_more_deadline` unchanged
-- Darwin find awaitData: two empty getMores then stop this next()
-  - One empty then stop closed got-3 and broke official refresh
-    (`timeoutMS` 250, `maxAwaitTimeMS` 1, failPoint 150)
-  - Leftover 0 still expires after a getMore
-  - Linux find awaitData stops after one empty getMore (not this
-    two-empty counter)
-  - Change streams still loop (empty getMores until an event)
-  - Do not rewrite `get_more_deadline`. getMore is not retryable
+  - Wait leftover Instant so `timeoutMS` still covers the call. Do
+    not start a new `timeoutMS` per getMore. Do not count empty
+    getMores (Linux 1 / Darwin 2 were spec forks). Change streams
+    still loop. `get_more_deadline` unchanged. Last-read unchanged
 - Tailable awaitData: `maxAwaitTimeMS` on getMore only, not find
   - Find uses leftover `timeoutMS` as `maxTimeMS` (CSOT)
   - Sending `maxAwaitTimeMS` 1 on find made Darwin refresh
     `MaxTimeMSExpired` after failPoint 150 (`timeoutMS` 250)
-  - Do not add a third empty getMore. getMore is not retryable
+  - Do not count empty getMores. getMore is not retryable
 - Tailable awaitData find: original `timeoutMS` as `maxTimeMS`
   - Leftover still wraps the socket (iteration `without_max_time`)
   - Leftover-minRTT on find was still Darwin `MaxTimeMSExpired`
     after Wave 60 (`timeoutMS` 250, failPoint 150)
-  - Do not add a third empty getMore. getMore is not retryable
+  - Do not count empty getMores. getMore is not retryable
 - Change-stream aggregate: original `timeoutMS` as `maxTimeMS`
   - Leftover still wraps the socket (iteration `without_max_time`)
   - Leftover-minRTT on aggregate was Darwin `MaxTimeMSExpired`
     after Wave 65 (`timeoutMS` 200, failPoint 150)
-  - Darwin two-empty stop stays. Change streams still loop
-  - Do not add a third empty getMore. getMore is not retryable
+  - Change streams still loop until leftover Instant expires
+  - Do not count empty getMores. getMore is not retryable
 
 - Concurrent insert shutdown still marks Unknown when a streaming
   hello publishes the same topologyVersion while the server is still
