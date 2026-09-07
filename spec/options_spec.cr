@@ -75,6 +75,22 @@ describe Mongo::Options do
     d.max_time_ms(1.millisecond).should be_nil
   end
 
+  it "leftover Instant remaining at wrap is timeoutMS minus elapsed Instant" do
+    # gridfs-download timeoutMS 75 / two finds blockTimeMS 50: leftover Instant
+    # at wrap of the first find must stay above 50ms or the first find Times out
+    # (Shape A got-1-find). Blocking sections before wrap count against leftover.
+    d = Mongo::Deadline.new(Time.instant, 75.milliseconds)
+    d.remaining.should be > 50.milliseconds
+    d.remaining.should be <= 75.milliseconds
+    d.expired?.should be_false
+  end
+
+  it "leftover Instant expired after write is remaining 0 (close + Timeout)" do
+    d = Mongo::Deadline.new(Time.instant - 80.milliseconds, 75.milliseconds)
+    d.remaining.should eq Time::Span.zero
+    d.expired?.should be_true
+  end
+
   it "maps connectTimeoutMS=0 to a nil Crystal socket timeout" do
     _, options, _, _ = Mongo::URI.parse("mongodb://localhost/?connectTimeoutMS=0", Mongo::Options.new)
     options.connect_timeout.should eq Time::Span.zero

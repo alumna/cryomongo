@@ -341,6 +341,22 @@ class Mongo::Client
       end
     }
 
+    # leftover Instant is the wait (Command Execution). After write: leftover
+    # Instant expired → close + Timeout. Else remaining leftover Instant
+    # (sliced). leftover 0 still send already wrote commandStarted.
+    if wrapped_csot_io && (d = deadline) && !d.infinite?
+      left = d.remaining
+      Mongo::Connection::AwaitReadIO.recorded_leftover_after_write = left
+      if ENV["CSOT_WRAP_TRACE"]? == "1"
+        STDERR.puts "CSOT leftover Instant after write leftover_ms=#{left.total_milliseconds} command=#{command_name}"
+      end
+      if left <= Time::Span.zero
+        connection.close
+        raise Error::Timeout.new("leftover timeoutMS expired after write")
+      end
+    end
+    connection.arm_leftover_read_closer if wrapped_csot_io && !unacknowledged
+
     # If the write is unacknowledged - early return.
     if unacknowledged
       if want_apm || want_log
@@ -677,6 +693,10 @@ class Mongo::Client
       left = d.remaining
       leftover_positive = left > Time::Span.zero
       leftover_at_wrap = leftover_positive ? left : Time::Span.zero
+      Mongo::Connection::AwaitReadIO.recorded_leftover_at_wrap = leftover_at_wrap
+      if ENV["CSOT_WRAP_TRACE"]? == "1"
+        STDERR.puts "CSOT leftover Instant at wrap leftover_ms=#{leftover_at_wrap.total_milliseconds}"
+      end
       # Deadline at first byte: leftover 0 still wraps so the send can
       # run. AwaitReadIO last-reads only when leftover was >0 at wrap
       # (this command was sent with budget): 20ms Instant floor, Darwin 0

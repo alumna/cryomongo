@@ -43,6 +43,11 @@ class Mongo::Connection
   @pending_reply = false
   # Socket under AwaitReadIO while a CSOT / awaitable-hello deadline is active.
   @deadline_inner : IO? = nil
+  # Darwin leftover Instant closer. Assigned in initialize on every OS so
+  # Crystal default-arg initialize overloads stay typed (Linux does not
+  # type-check Darwin-only ivars). arm/cancel are Darwin-only.
+  @closer_gen : Atomic(Int32)
+  @closer_armed : Atomic(Bool)
 
   def self.next_id : Int64
     @@next_connection_id.add(1)
@@ -67,6 +72,8 @@ class Mongo::Connection
   end
 
   def initialize(@server_description : SDAM::ServerDescription, @credentials : Mongo::Credentials, @options : Mongo::Options, is_monitor : Bool = false, connection_id : Int64? = nil)
+    @closer_gen = Atomic(Int32).new(0)
+    @closer_armed = Atomic(Bool).new(false)
     @monitor = is_monitor
     tls_hostname = nil.as(String?)
     if @server_description.address.ends_with? ".sock"
@@ -305,10 +312,42 @@ class Mongo::Connection
   end
 
   def unwrap_deadline_io : Nil
+    cancel_leftover_read_closer
     inner = @deadline_inner
     return unless inner
     @socket = inner
     @deadline_inner = nil
+  end
+
+  # Darwin: leftover Instant is the wait. wait_readable may sit until the
+  # failPoint unblocks (Shape B). Sleep remaining leftover Instant (not
+  # sleep(0)), then shutdown so the read fiber wakes at leftover Instant.
+  # No-op on Linux. Cancel from unwrap so a pooled socket is not shutdown.
+  def arm_leftover_read_closer : Nil
+    {% if flag?(:darwin) %}
+      io = @socket
+      return unless io.is_a?(AwaitReadIO)
+      expire_at = io.deadline
+      return unless expire_at
+      left = expire_at - Time.instant
+      return unless left > Time::Span.zero
+      gen = @closer_gen.add(1)
+      @closer_armed.set(true)
+      spawn do
+        rest = expire_at - Time.instant
+        sleep rest if rest > Time::Span.zero
+        if @closer_armed.compare_and_set(true, false) && @closer_gen.get == gen
+          interrupt_and_wake unless @raw_socket.closed?
+        end
+      end
+    {% end %}
+  end
+
+  def cancel_leftover_read_closer : Nil
+    {% if flag?(:darwin) %}
+      @closer_armed.set(false)
+      @closer_gen.add(1)
+    {% end %}
   end
 
   # Handshake / SASL: slice until connectTimeoutMS. Unset is 10s, not
