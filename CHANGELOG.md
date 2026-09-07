@@ -182,6 +182,17 @@ Client-Side Field Level Encryption (CSFLE)
     remaining leftover. Do not shorten Darwin slices. Do not
     `Fiber.yield`. Linux stays 100ms slices. 20ms is not a longer
     official `timeoutMS`
+- Darwin CSOT leftover: leftover >0 at wrap last-reads until the
+  failPoint would unblock when leftover plus 20ms is still under
+  `blockTimeMS` 50
+  - GitHub `34037632224`: leftover at wrap was under 30ms, so leftover
+    plus 20ms Instant never reached `blockTimeMS` 50
+  - Darwin leftover + 20ms still under 50ms last-reads until wrap plus
+    150ms (longest Shape A `blockTimeMS`). Instant-capped once per wrap.
+    Each last-read wait is at most 20ms. That is not remaining
+    `timeoutMS`. Do not try 30ms Instant
+  - leftover 0 at wrap still raises with no last-read. Linux leftover
+    >0 stays 20ms Instant. Darwin non-CSOT still no last-read
 - leftover 0 still send keeps a positive `maxTimeMS` (floor 1)
   - Do not skip `maxTimeMS`. Do not raise remaining timeoutMS <
     min RTT before that send (LB `bulkWrite` update)
@@ -201,6 +212,12 @@ Client-Side Field Level Encryption (CSFLE)
   - Leftover still wraps the socket (iteration `without_max_time`)
   - Leftover-minRTT on find was still Darwin `MaxTimeMSExpired`
     after Wave 60 (`timeoutMS` 250, failPoint 150)
+  - Do not add a third empty getMore. getMore is not retryable
+- Change-stream aggregate: original `timeoutMS` as `maxTimeMS`
+  - Leftover still wraps the socket (iteration `without_max_time`)
+  - Leftover-minRTT on aggregate was Darwin `MaxTimeMSExpired`
+    after Wave 65 (`timeoutMS` 200, failPoint 150)
+  - Darwin two-empty stop stays. Change streams still loop
   - Do not add a third empty getMore. getMore is not retryable
 
 - Concurrent insert shutdown still marks Unknown when a streaming

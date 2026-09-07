@@ -228,8 +228,9 @@ class Mongo::Client
 
     # Deadline at first byte: leftover 0 still sends so commandStarted
     # fires (2nd find / getMore / 3rd insert). AwaitReadIO last-reads
-    # only when leftover was >0 at wrap (one Darwin slice, 10ms Instant,
-    # then wait 0). leftover 0 at wrap raises on read without a last-read.
+    # only when leftover was >0 at wrap (20ms Instant floor; Darwin leftover
+    # plus 20ms still under 50ms until wrap plus 150ms). leftover 0 at wrap
+    # raises on read without a last-read.
     # Do not check! here.
     # Drop a leaked handshake wrap so this command uses timeoutMS or
     # socketTimeoutMS, not connectTimeoutMS / an infinite slice retry.
@@ -675,18 +676,20 @@ class Mongo::Client
     if (d = deadline) && !d.infinite?
       left = d.remaining
       leftover_positive = left > Time::Span.zero
+      leftover_at_wrap = leftover_positive ? left : Time::Span.zero
       # Deadline at first byte: leftover 0 still wraps so the send can
       # run. AwaitReadIO last-reads only when leftover was >0 at wrap
-      # (this command was sent with budget): two Darwin slices (20ms
-      # Instant), Darwin 0 is now. leftover 0 at wrap still sends then
-      # raises on read (no last-read).
+      # (this command was sent with budget): 20ms Instant floor, Darwin 0
+      # is now. Darwin leftover plus 20ms still under blockTimeMS 50
+      # last-reads until wrap plus 150ms. leftover 0 at wrap still sends
+      # then raises on read (no last-read).
       expire_at = leftover_positive ? Time.instant + left : Time.instant
       # Do not set leftover timeoutMS as one socket wait. Darwin kqueue can
       # fire that wait early (bulkWrite UTF then sees two inserts, not three).
       # Slices retry a premature IO::TimeoutError or ETIMEDOUT until the
       # CSOT deadline.
       connection.apply_timeout(nil)
-      return connection.wrap_deadline_io(expire_at, csot: true, leftover_positive_at_wrap: leftover_positive)
+      return connection.wrap_deadline_io(expire_at, csot: true, leftover_at_wrap: leftover_at_wrap)
     end
     sock = Mongo::Connection.uri_timeout(@options.socket_timeout)
     {% if flag?(:darwin) %}

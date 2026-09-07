@@ -309,7 +309,12 @@ module Mongo::ChangeStream
 
       # Aggregate honors cursor.batchSize, not top-level batchSize.
       # maxAwaitTimeMS belongs on getMore only (@await_time_ms).
-      # timeoutMS applies to this aggregate (awaitData-style maxTimeMS).
+      # Change-stream aggregate is awaitData-style: leftover timeoutMS
+      # wraps the socket. Do not send leftover-minRTT as maxTimeMS.
+      # Darwin refresh then got MaxTimeMSExpired on aggregate after
+      # failPoint 150 (timeoutMS 200). Send the original timeoutMS as
+      # maxTimeMS so aggregate still has maxTimeMS.
+      d = aggregate_deadline
       @client.command(
         Commands::Aggregate,
         pipeline: full_pipeline,
@@ -318,11 +323,12 @@ module Mongo::ChangeStream
         read_concern: read_concern,
         read_preference: read_preference,
         session: @session,
-        deadline: aggregate_deadline,
+        deadline: d.try(&.without_max_time),
         options: {
-          cursor:    batch_size.try { {batchSize: batch_size} },
-          collation: collation,
-          comment:   comment,
+          cursor:      batch_size.try { {batchSize: batch_size} },
+          collation:   collation,
+          comment:     comment,
+          max_time_ms: d.try(&.original_max_time_ms),
         }
       )
     end

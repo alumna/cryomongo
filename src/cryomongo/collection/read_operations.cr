@@ -339,10 +339,7 @@ class Mongo::Collection
                     end
     deadline = computed
     find_max_time_ms = if tailable_flag && await_flag
-                         if (lim = computed.try(&.limit))
-                           ms = lim.total_milliseconds.to_i64
-                           ms < 1 ? 1_i64 : ms
-                         end
+                         computed.try(&.original_max_time_ms)
                        else
                          max_time_ms
                        end

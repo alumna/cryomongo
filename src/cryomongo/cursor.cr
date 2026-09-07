@@ -148,6 +148,7 @@ class Mongo::Cursor
             # getMore has the document. A third getMore was got-3. Do not
             # treat MaxTimeMSExpired as a third getMore either. Linux still
             # loops until leftover expires. Change streams keep looping.
+            # Wave 69 does not add a third empty getMore.
             if stop_after_empty_await_get_more?
               empty_await_get_mores += 1
               if empty_await_get_mores >= 2

@@ -31,15 +31,16 @@
 #
 # CSOT wrap created with leftover >0: last-read even if leftover is now 0
 # and this wrap has not seen a byte. Darwin first find often takes >75ms
-# (timeoutMS 75 / blockTimeMS 50). Wave 59 10ms Instant is too short when
-# failPoint data is still in flight after leftover Instant 0.
-# LAST_READ_WAIT is two Darwin slices (20ms Instant), Instant-capped once
-# per wrap so an early kqueue fire does not abort it. Then one wait-0
-# LibC.read. 20ms is not a longer official timeoutMS. Do not use Linux
-# SLICE (100ms). Do not wait remaining leftover (Wave 34). read_greedy
-# may call read more than once; @got_data then finishes the frame inside
-# that 20ms. leftover 0 at wrap does not get this wait. Darwin non-CSOT
-# does not last-read (Wave 48 Shape B).
+# (timeoutMS 75 / blockTimeMS 50). Wave 64 20ms Instant is too short when
+# leftover at wrap plus 20ms is still less than failPoint blockTimeMS 50
+# (GitHub 34037632224: leftover at wrap was under 30ms). LAST_READ_WAIT
+# stays the 20ms floor (do not undo Wave 64). Darwin leftover + 20ms
+# still under 50ms last-reads until wrap plus SHAPE_A_UNBLOCK (150ms,
+# longest Shape A blockTimeMS). Instant-capped once per wrap. Each
+# last-read wait is at most LAST_READ_WAIT (not remaining timeoutMS, not
+# Linux SLICE 100ms, not 30ms Instant). Then one wait-0 LibC.read.
+# leftover 0 at wrap does not get this wait. Darwin non-CSOT does not
+# last-read (Wave 48 Shape B). Linux leftover >0 stays the 20ms floor.
 #
 # Bytes that arrived during a slice that still had leftover still return.
 # Finish a message that already started. Do not spin a 0ms wait until
@@ -51,9 +52,19 @@ class Mongo::Connection::AwaitReadIO < IO
     SLICE = 100.milliseconds
   {% end %}
 
-  # Two Darwin slices. Darwin 0 is now. Instant-capped once per leftover >0 wrap.
+  # Two Darwin slices. Darwin 0 is now. Instant-capped once per leftover >0 wrap
+  # when leftover at wrap plus this wait already covers blockTimeMS 50.
   # Do not use SLICE here: Linux SLICE is 100ms and would finish failPoints.
   LAST_READ_WAIT = 20.milliseconds
+
+  # gridfs Shape A: timeoutMS 75 / blockTimeMS 50. leftover at wrap plus
+  # LAST_READ_WAIT still under this means the first command never finishes.
+  FAILPOINT_UNBLOCK = 50.milliseconds
+
+  # Longest Shape A failPoint blockTimeMS (non-tailable cursor_lifetime 150).
+  # Last-read Instant cap from wrap, only when leftover + LAST_READ_WAIT is
+  # still under FAILPOINT_UNBLOCK. Not remaining timeoutMS.
+  SHAPE_A_UNBLOCK = 150.milliseconds
 
   def initialize(
     @inner : IO,
@@ -62,17 +73,23 @@ class Mongo::Connection::AwaitReadIO < IO
     @connection : Mongo::Connection,
     *,
     @csot : Bool = false,
-    @leftover_positive_at_wrap : Bool = false,
+    @leftover_at_wrap : Time::Span = Time::Span.zero,
   )
     # True after this wrap has returned at least one byte. Leftover 0 then
     # still reads kernel bytes so a partial OP_MSG can finish.
     @got_data = false
-    # Instant cap for LAST_READ_WAIT (20ms). Nil until leftover first hits 0
-    # on a leftover >0 CSOT wrap.
+    # Instant cap for last-read. Nil until leftover first hits 0 on a
+    # leftover >0 CSOT wrap.
     @last_read_until = nil
+    {% if flag?(:darwin) %}
+      @wrap_at = Time.instant
+    {% end %}
   end
 
   @last_read_until : Time::Instant?
+  {% if flag?(:darwin) %}
+    @wrap_at : Time::Instant
+  {% end %}
 
   def read(slice : Bytes) : Int32
     loop do
@@ -163,10 +180,11 @@ class Mongo::Connection::AwaitReadIO < IO
   end
 
   # leftover 0 at wrap / Darwin non-CSOT: raise unless this wrap already
-  # returned a byte. CSOT leftover >0 at wrap: LAST_READ_WAIT Instant
-  # (two Darwin slices, 20ms), expired false until that Instant so early
-  # kqueue retries. After the Instant, one wait-0 LibC.read then raise.
-  # leftover 0 at wrap never enters this wait.
+  # returned a byte. CSOT leftover >0 at wrap: last-read Instant (20ms
+  # floor; Darwin leftover + 20ms still under 50ms until wrap + 150ms),
+  # expired false until that Instant so early kqueue retries. After the
+  # Instant, one wait-0 LibC.read then raise. leftover 0 at wrap never
+  # enters this wait. Each last-read wait is at most LAST_READ_WAIT.
   private def leftover_zero_wait : {Time::Span, Bool}
     unless @got_data || last_read_sent_csot?
       raise IO::TimeoutError.new("Read timed out")
@@ -177,12 +195,13 @@ class Mongo::Connection::AwaitReadIO < IO
     end
     until_at = @last_read_until
     unless until_at
-      until_at = Time.instant + LAST_READ_WAIT
+      until_at = last_read_until_at
       @last_read_until = until_at
     end
     extra = until_at - Time.instant
     if extra > Time::Span.zero
-      {extra, false}
+      wait = extra < LAST_READ_WAIT ? extra : LAST_READ_WAIT
+      {wait, false}
     else
       {Time::Span.zero, true}
     end
@@ -191,7 +210,22 @@ class Mongo::Connection::AwaitReadIO < IO
   # CSOT command sent with leftover >0: finish this response even if leftover
   # is now 0 and no byte has been returned yet.
   private def last_read_sent_csot? : Bool
-    @csot && @leftover_positive_at_wrap
+    @csot && @leftover_at_wrap > Time::Span.zero
+  end
+
+  # 20ms from leftover Instant 0. Darwin leftover at wrap plus 20ms still
+  # under blockTimeMS 50: Instant-cap at wrap plus 150ms so the failPoint
+  # can unblock. Not remaining leftover. Not 30ms Instant.
+  private def last_read_until_at : Time::Instant
+    floor = Time.instant + LAST_READ_WAIT
+    {% if flag?(:darwin) %}
+      leftover = @leftover_at_wrap
+      if leftover > Time::Span.zero && leftover + LAST_READ_WAIT < FAILPOINT_UNBLOCK
+        unblock = @wrap_at + SHAPE_A_UNBLOCK
+        return unblock if unblock > floor
+      end
+    {% end %}
+    floor
   end
 
   # One LibC.read. Crystal 0 is now; LibC.read still runs first.

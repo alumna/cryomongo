@@ -38,6 +38,16 @@ struct Mongo::Deadline
     Deadline.new(@start, @limit, false)
   end
 
+  # Original timeoutMS as maxTimeMS (not leftover-minRTT). AwaitData find
+  # and change-stream aggregate use this so leftover still wraps the socket.
+  def original_max_time_ms : Int64?
+    return nil if infinite?
+    if lim = @limit
+      ms = lim.total_milliseconds.to_i64
+      ms < 1 ? 1_i64 : ms
+    end
+  end
+
   def infinite? : Bool
     @limit.nil?
   end
