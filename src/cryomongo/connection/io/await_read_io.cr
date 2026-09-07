@@ -81,15 +81,14 @@ class Mongo::Connection::AwaitReadIO < IO
     # Instant cap for last-read. Nil until leftover first hits 0 on a
     # leftover >0 CSOT wrap.
     @last_read_until = nil
-    {% if flag?(:darwin) %}
-      @wrap_at = Time.instant
-    {% end %}
+    # Always assign. Crystal 1.21 on Darwin still wants this ivar set in
+    # initialize. A Darwin-only {% if %} assign left it nilable
+    # (GitHub 34083113570). Linux does not read it.
+    @wrap_at = Time.instant
   end
 
   @last_read_until : Time::Instant?
-  {% if flag?(:darwin) %}
-    @wrap_at : Time::Instant
-  {% end %}
+  @wrap_at : Time::Instant
 
   def read(slice : Bytes) : Int32
     loop do

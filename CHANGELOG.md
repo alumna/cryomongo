@@ -193,6 +193,11 @@ Client-Side Field Level Encryption (CSFLE)
     `timeoutMS`. Do not try 30ms Instant
   - leftover 0 at wrap still raises with no last-read. Linux leftover
     >0 stays 20ms Instant. Darwin non-CSOT still no last-read
+- Darwin CSOT: always initialize `@wrap_at` (`Time.instant`)
+  - Wave 68 Darwin-only assign left the ivar nilable (Crystal 1.21)
+  - GitHub `34083113570`: all 8 macOS jobs died at compile (~30s)
+  - Last-read until wrap plus 150ms stays Darwin-only. Linux keeps
+    the Instant unused. Do not retune `LAST_READ_WAIT`
 - leftover 0 still send keeps a positive `maxTimeMS` (floor 1)
   - Do not skip `maxTimeMS`. Do not raise remaining timeoutMS <
     min RTT before that send (LB `bulkWrite` update)
