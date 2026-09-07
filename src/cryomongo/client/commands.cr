@@ -542,9 +542,9 @@ class Mongo::Client
                  !connection.interrupted?
       if keep_pin
         # Timeout with no reply bytes yet. Keep the pin so close() can drain
-        # the late getMore and send killCursors on the same socket. A leftover
-        # Instant closer SHUT_RD / interrupt marks that socket; do not keep
-        # it for killCursors (fresh leftover Instant, often a new connection).
+        # the late getMore and send killCursors on the same socket. interrupt
+        # (client close / monitor interrupt_in_use) marks that socket; do not
+        # keep it for killCursors (fresh leftover Instant, often a new connection).
         connection.mark_pending_reply
       else
         # Mark the socket dead so checkin uses reason "error", not "stale".

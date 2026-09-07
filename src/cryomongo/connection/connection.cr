@@ -319,43 +319,11 @@ class Mongo::Connection
     @deadline_inner = nil
   end
 
-  # Darwin: leftover Instant is the wait. wait_readable may sit until the
-  # failPoint unblocks (Shape B). Slice until leftover Instant (not one
-  # kqueue wait of remaining leftover Instant, not sleep(0)), then SHUT_RD
-  # so the read fiber wakes. Pending kernel bytes stay for last-read.
-  # That socket is discarded (Command Execution). close() killCursors uses
-  # a fresh leftover Instant on a usable connection. No-op on Linux. Cancel
-  # from unwrap so a pooled socket is not shutdown.
+  # Darwin leftover Instant wait is LibC.read + sleep(slice) in AwaitReadIO
+  # (not wait_readable). GitHub `baa1c0f` SHUT_RD last-read left gridfs
+  # Shape A 8/8. Do not shutdown this socket to wake kqueue. interrupt_and_wake
+  # (SHUT_RDWR) is still client close / interrupt_in_use. No-op on Linux.
   def arm_leftover_read_closer : Nil
-    {% if flag?(:darwin) %}
-      io = @socket
-      return unless io.is_a?(AwaitReadIO)
-      expire_at = io.deadline
-      return unless expire_at
-      left = expire_at - Time.instant
-      return unless left > Time::Span.zero
-      gen = @closer_gen.add(1)
-      @closer_armed.set(true)
-      spawn do
-        slice = AwaitReadIO::SLICE
-        while @closer_armed.get && @closer_gen.get == gen
-          rest = expire_at - Time.instant
-          break unless rest > Time::Span.zero
-          wait = rest < slice ? rest : slice
-          sleep wait
-        end
-        leftover_expired = (expire_at - Time.instant) <= Time::Span.zero
-        if leftover_expired && @closer_armed.compare_and_set(true, false) && @closer_gen.get == gen
-          interrupt
-          raw = @raw_socket
-          unless raw.closed?
-            # SHUT_RD wakes wait_readable. Pending kernel bytes stay for
-            # AwaitReadIO last-read. SHUT_RDWR can drop them (Shape A).
-            LibC.shutdown(raw.fd, LibC::SHUT_RD)
-          end
-        end
-      end
-    {% end %}
   end
 
   def cancel_leftover_read_closer : Nil

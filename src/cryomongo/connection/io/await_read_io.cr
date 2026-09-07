@@ -30,16 +30,15 @@
 #
 # Darwin kqueue wait_readable does not always expire at leftover Instant.
 # Time::Span.zero is now. EVFILT_TIMER data=0 is now. A positive slice can
-# sit in wait_readable until the failPoint unblocks (Shape B). After leftover
-# Instant expired, one LibC.read for kernel bytes and Timeout — do not
-# wait_readable(0). Darwin Connection#arm_leftover_read_closer slices until
-# leftover Instant (not one remaining leftover Instant wait, not sleep(0))
-# then SHUT_RD so a stuck wait_readable wakes. Pending kernel bytes stay
-# for that last-read (gridfs timeoutMS 75 / two finds blockTimeMS 50:
-# failPoint unblocks at 50ms, leftover Instant at wrap is above 50ms).
-# Do not raise Closed stream on that interrupt until last-read has run.
-# That connection is discarded. close() killCursors uses a fresh leftover
-# Instant on a usable connection.
+# sit in wait_readable until the failPoint unblocks (Shape B). GitHub
+# `baa1c0f`: closer SHUT_RD then last-read still left gridfs Shape A 8/8
+# (wrap leftover Instant 62–70ms, got one find). Darwin `shutdown` does
+# not keep those kernel bytes; inner.read after SHUT can return 0/EOF.
+# Darwin leftover Instant wait is LibC.read then sleep(slice) until leftover
+# Instant (not wait_readable, not one kqueue wait, not sleep(0), not SHUT).
+# After leftover Instant expired: one LibC.read, no sleep. TLS still uses
+# inner.read. Linux still uses wait_readable. close() killCursors uses a
+# fresh leftover Instant on a usable connection.
 #
 # leftover 0 at wrap (leftover 0 still send / Darwin non-CSOT / handshake):
 # raise at once. Do not last-read with wait 0. Crystal 0 is now on Darwin,
@@ -96,6 +95,10 @@ class Mongo::Connection::AwaitReadIO < IO
   @last_read_until : Time::Instant?
 
   def read(slice : Bytes) : Int32
+    {% if flag?(:darwin) %}
+      # Raw socket: do not wait_readable. GitHub SHUT_RD last-read failed.
+      return read_deadline_poll(slice) if @inner.same?(@raw)
+    {% end %}
     loop do
       leftover_expired = deadline_expired?
       # Darwin leftover Instant closer already waited leftover Instant.
@@ -214,6 +217,51 @@ class Mongo::Connection::AwaitReadIO < IO
       false
     end
   end
+
+  # Darwin leftover Instant wait. LibC.read, then sleep a positive slice
+  # (not sleep(0)). FailPoint bytes stay in the kernel. leftover Instant
+  # expired: Timeout. Do not wait_readable. Do not shutdown.
+  {% if flag?(:darwin) %}
+  private def read_deadline_poll(slice : Bytes) : Int32
+    loop do
+      if @connection.interrupted_by_clear? || @inner.closed?
+        raise IO::Error.new("Closed stream")
+      end
+      leftover_expired = deadline_expired?
+      ret = LibC.read(@raw.fd, slice.to_unsafe.as(Void*), LibC::SizeT.new(slice.size))
+      if ret > 0
+        @got_data = true
+        return ret.to_i
+      end
+      if ret == 0
+        raise IO::TimeoutError.new("Read timed out") if leftover_expired
+        raise IO::Error.new("Closed stream")
+      end
+      err = Errno.value
+      unless err == Errno::EAGAIN || err == Errno::EWOULDBLOCK || err == Errno::ETIMEDOUT || err == Errno::EINTR
+        raise IO::Error.from_os_error("read", err)
+      end
+      if leftover_expired
+        raise IO::TimeoutError.new("Read timed out")
+      end
+      wait = poll_slice_wait
+      if wait <= Time::Span.zero
+        raise IO::TimeoutError.new("Read timed out")
+      end
+      sleep wait
+    end
+  end
+
+  private def poll_slice_wait : Time::Span
+    if deadline = @deadline
+      left = deadline - Time.instant
+      return Time::Span.zero if left <= Time::Span.zero
+      left < SLICE ? left : SLICE
+    else
+      SLICE
+    end
+  end
+  {% end %}
 
   # Leftover Instant closer woke this read. Last-read kernel bytes that
   # arrived before leftover Instant. Do not last-read a pool-clear interrupt.
