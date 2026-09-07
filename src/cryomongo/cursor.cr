@@ -146,14 +146,29 @@ class Mongo::Cursor
             # broke official refresh (timeoutMS 250, maxAwaitTimeMS 1,
             # failPoint 150): the blocked getMore can be empty, the next
             # getMore has the document. A third getMore was got-3. Do not
-            # treat MaxTimeMSExpired as a third getMore either. Linux still
-            # loops until leftover expires. Change streams keep looping.
-            # Wave 69 does not add a third empty getMore.
+            # treat MaxTimeMSExpired as a third getMore either. Linux find
+            # awaitData stops after one empty getMore (not this counter).
+            # Change streams keep looping.
             if stop_after_empty_await_get_more?
               empty_await_get_mores += 1
               if empty_await_get_mores >= 2
                 raise Mongo::Error::Timeout.new("Operation exceeded timeoutMS")
               end
+            end
+          {% else %}
+            # Linux find awaitData: one empty getMore ends this next().
+            # Official refresh (timeoutMS 250, maxAwaitTimeMS 1, failPoint
+            # 150) is find + one getMore. A second getMore is extra (L1).
+            # Do not copy Darwin's two-empty counter. Do not start a new
+            # timeoutMS for that second getMore. Wait leftover so timeoutMS
+            # still covers this next(). Change streams keep looping until
+            # leftover expires (hook is false).
+            if stop_after_empty_await_get_more?
+              if d = @iteration_deadline || @deadline
+                left = d.remaining
+                sleep(left) if left > Time::Span.zero
+              end
+              raise Mongo::Error::Timeout.new("Operation exceeded timeoutMS")
             end
           {% end %}
         end
@@ -343,16 +358,14 @@ class Mongo::Cursor
     end
   end
 
-  # Darwin find awaitData only. Linux compiles this out of next() so the
-  # empty-expire loop and get_more_deadline stay as they are.
-  # next() stops after two empty awaitData getMores (not one).
-  # ChangeStream::Cursor returns false (idle empty getMores must wait).
+  # Find awaitData only. ChangeStream::Cursor returns false (idle empty
+  # getMores must wait until leftover expires).
+  # Darwin next() stops after two empty awaitData getMores (not one).
+  # Linux next() stops after one empty awaitData getMore so official
+  # refresh cannot emit a second getMore. That is not Darwin's two-empty
+  # counter. get_more_deadline is unchanged.
   protected def stop_after_empty_await_get_more? : Bool
-    {% if flag?(:darwin) %}
-      !@await_time_ms.nil?
-    {% else %}
-      false
-    {% end %}
+    !@await_time_ms.nil?
   end
 
   # close() always starts a fresh timeoutMS, even if cursor lifetime already expired.

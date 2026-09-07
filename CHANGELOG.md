@@ -201,11 +201,18 @@ Client-Side Field Level Encryption (CSFLE)
 - leftover 0 still send keeps a positive `maxTimeMS` (floor 1)
   - Do not skip `maxTimeMS`. Do not raise remaining timeoutMS <
     min RTT before that send (LB `bulkWrite` update)
+- Linux find awaitData: one empty getMore ends this next()
+  - Official refresh (`timeoutMS` 250, `maxAwaitTimeMS` 1, failPoint
+    150) is find + one getMore. A second getMore is extra
+  - Wait leftover so `timeoutMS` still covers the call. Do not start
+    a new `timeoutMS` per getMore. Do not copy Darwin's two-empty
+    counter. Change streams still loop. `get_more_deadline` unchanged
 - Darwin find awaitData: two empty getMores then stop this next()
   - One empty then stop closed got-3 and broke official refresh
     (`timeoutMS` 250, `maxAwaitTimeMS` 1, failPoint 150)
   - Leftover 0 still expires after a getMore
-  - Linux still loops until leftover expires (two-getMore then Timeout)
+  - Linux find awaitData stops after one empty getMore (not this
+    two-empty counter)
   - Change streams still loop (empty getMores until an event)
   - Do not rewrite `get_more_deadline`. getMore is not retryable
 - Tailable awaitData: `maxAwaitTimeMS` on getMore only, not find

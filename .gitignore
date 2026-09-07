@@ -21,7 +21,7 @@ drivers-evergreen-tools/
 # Temporary
 FIXES.md
 LOCAL_TESTING.md
+cryomongo.o
 
 # Local workbench only. GitHub shards install uses shard.yml (bson.cr master).
 /shard.override.yml
-
