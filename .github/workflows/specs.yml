@@ -63,11 +63,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.os }} ${{ matrix.topology }}
     steps:
+      - name: Force apt update (Linux only)
+        if: ${{ runner.os == 'Linux' }}
+        run: sudo -n apt-get update
+
       - name: Checkout repository
         uses: actions/checkout@v7
 
       - name: Start MongoDB ${{ matrix.topology }} (8.0)
         run: scripts/docker-topology.sh ${{ matrix.topology }}
+
       - name: Install HAProxy (load-balanced)
         if: matrix.topology == 'load-balanced'
         run: |

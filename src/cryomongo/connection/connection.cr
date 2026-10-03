@@ -319,10 +319,13 @@ class Mongo::Connection
     @deadline_inner = nil
   end
 
-  # Darwin leftover Instant wait is LibC.read + sleep(slice) in AwaitReadIO
-  # (not wait_readable). GitHub `baa1c0f` SHUT_RD last-read left gridfs
-  # Shape A 8/8. Do not shutdown this socket to wake kqueue. interrupt_and_wake
-  # (SHUT_RDWR) is still client close / interrupt_in_use. No-op on Linux.
+  # Darwin raw reads poll in AwaitReadIO (LibC.read + sleep). That poll
+  # observes `interrupt` and times out without shutdown. GitHub `baa1c0f`
+  # SHUT_RD last-read left gridfs Shape A 8/8. GitHub `c119912` removed
+  # this closer and the poll ignored `interrupt` (retryable reads ~10s,
+  # job cap 45m). Do not shutdown this socket to wake kqueue.
+  # interrupt_and_wake (SHUT_RDWR) is still client close / interrupt_in_use.
+  # No-op on Linux.
   def arm_leftover_read_closer : Nil
   end
 

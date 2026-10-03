@@ -34,11 +34,15 @@
 # `baa1c0f`: closer SHUT_RD then last-read still left gridfs Shape A 8/8
 # (wrap leftover Instant 62–70ms, got one find). Darwin `shutdown` does
 # not keep those kernel bytes; inner.read after SHUT can return 0/EOF.
-# Darwin leftover Instant wait is LibC.read then sleep(slice) until leftover
-# Instant (not wait_readable, not one kqueue wait, not sleep(0), not SHUT).
-# After leftover Instant expired: one LibC.read, no sleep. TLS still uses
-# inner.read. Linux still uses wait_readable. close() killCursors uses a
-# fresh leftover Instant on a usable connection.
+# Darwin raw-socket wait is LibC.read then sleep(slice) until the deadline
+# (not wait_readable, not one kqueue wait, not sleep(0), not SHUT).
+# GitHub `c119912`: that poll ignored `interrupted?`. cancel_check only sets
+# the flag (no shutdown). Streaming hello then ran out heartbeatFrequencyMS
+# (~10s) and retryable-read tests blew the 45 minute cap. The poll must
+# see `interrupt` within one slice. Non-CSOT bytes after the deadline are
+# a socket timeout, not success (retryability-legacy). CSOT timeout sets
+# `interrupt` with no shutdown so close() drops the pin. TLS still uses
+# inner.read. Linux still uses wait_readable.
 #
 # leftover 0 at wrap (leftover 0 still send / Darwin non-CSOT / handshake):
 # raise at once. Do not last-read with wait 0. Crystal 0 is now on Darwin,
@@ -96,7 +100,7 @@ class Mongo::Connection::AwaitReadIO < IO
 
   def read(slice : Bytes) : Int32
     {% if flag?(:darwin) %}
-      # Raw socket: do not wait_readable. GitHub SHUT_RD last-read failed.
+      # Raw socket: LibC.read + sleep. Must observe interrupt (no SHUT).
       return read_deadline_poll(slice) if @inner.same?(@raw)
     {% end %}
     loop do
@@ -218,23 +222,30 @@ class Mongo::Connection::AwaitReadIO < IO
     end
   end
 
-  # Darwin leftover Instant wait. LibC.read, then sleep a positive slice
-  # (not sleep(0)). FailPoint bytes stay in the kernel. leftover Instant
-  # expired: Timeout. Do not wait_readable. Do not shutdown.
+  # Darwin raw-socket wait. LibC.read, then sleep a positive slice
+  # (not sleep(0)). Do not wait_readable. Do not shutdown.
+  # `interrupt` is checked every slice: monitor cancel_check does not
+  # shutdown, and a 1ms read_timeout does not wake this poll.
+  # Non-CSOT: a packet after the deadline is Timeout (socketTimeoutMS).
+  # CSOT leftover >0: that packet is the last-read (kernel bytes). A CSOT
+  # timeout with no bytes sets `interrupt` so the pin is not reused.
   {% if flag?(:darwin) %}
   private def read_deadline_poll(slice : Bytes) : Int32
     loop do
-      if @connection.interrupted_by_clear? || @inner.closed?
+      if @connection.interrupted_by_clear? || @inner.closed? || @connection.interrupted?
         raise IO::Error.new("Closed stream")
       end
       leftover_expired = deadline_expired?
       ret = LibC.read(@raw.fd, slice.to_unsafe.as(Void*), LibC::SizeT.new(slice.size))
       if ret > 0
+        if leftover_expired && !last_read_sent_csot?
+          raise_poll_timeout
+        end
         @got_data = true
         return ret.to_i
       end
       if ret == 0
-        raise IO::TimeoutError.new("Read timed out") if leftover_expired
+        raise_poll_timeout if leftover_expired
         raise IO::Error.new("Closed stream")
       end
       err = Errno.value
@@ -242,14 +253,21 @@ class Mongo::Connection::AwaitReadIO < IO
         raise IO::Error.from_os_error("read", err)
       end
       if leftover_expired
-        raise IO::TimeoutError.new("Read timed out")
+        raise_poll_timeout
       end
       wait = poll_slice_wait
       if wait <= Time::Span.zero
-        raise IO::TimeoutError.new("Read timed out")
+        raise_poll_timeout
       end
       sleep wait
     end
+  end
+
+  # CSOT: mark the pin so close() does not killCursors on this socket.
+  # No shutdown. Non-CSOT stays a plain socket timeout.
+  private def raise_poll_timeout : NoReturn
+    @connection.interrupt if @csot && !@connection.interrupted?
+    raise IO::TimeoutError.new("Read timed out")
   end
 
   private def poll_slice_wait : Time::Span

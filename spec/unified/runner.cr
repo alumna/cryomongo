@@ -375,7 +375,11 @@ module Mongo::Unified
             else
               test_ms = Timing.elapsed_ms(test_started)
               Timing.record_test(@file_path, test.description, test_ms)
-              Timing.line("TEST", file: @file_path, name: test.description, status: "error", duration_ms: test_ms)
+              # Job cancel drops buffered crystal spec stdout. The timing
+              # artifact is the only GitHub record of why a UTF case failed.
+              detail = e.message.to_s.gsub('\n', " ")
+              detail = detail[0, 500] if detail.bytesize > 500
+              Timing.line("TEST", file: @file_path, name: test.description, status: "error", duration_ms: test_ms, error: detail)
               file_ms = Timing.elapsed_ms(file_started)
               Timing.record_file(@file_path, file_ms)
               Timing.line("FILE", file: @file_path, status: "error", executed: executed, skipped: skipped, duration_ms: file_ms)
