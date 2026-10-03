@@ -319,13 +319,12 @@ class Mongo::Connection
     @deadline_inner = nil
   end
 
-  # No-op. Darwin reads wake on bytes via wait_readable (10ms slices).
+  # No-op. Darwin CSOT raw reads poll in AwaitReadIO (LibC.read + one
+  # 10ms sleep). Handshakes and streaming hellos stay on wait_readable.
   # `interrupt` sets a 1ms read_timeout so a streaming hello notices
-  # cancel_check within one slice. GitHub `baa1c0f` SHUT_RD last-read left
-  # gridfs Shape A 8/8. GitHub `c119912` / `8cb330d` slept instead of
-  # waiting for readability and macOS tests paid ~1s each. Do not shutdown
-  # this socket to wake kqueue. interrupt_and_wake (SHUT_RDWR) is still
-  # client close / interrupt_in_use. No-op on Linux.
+  # cancel_check within one slice. Do not shutdown this socket to wake
+  # kqueue. interrupt_and_wake (SHUT_RDWR) is still client close /
+  # interrupt_in_use. No-op on Linux.
   def arm_leftover_read_closer : Nil
   end
 
