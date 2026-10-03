@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0-bta - 2026-10-03
+## 1.0.0-beta - 2026-10-03
 
 Client-Side Field Level Encryption (CSFLE) on Linux, for MongoDB 8.0. Unreleased as **1.0.0-beta** until tagged.
 
