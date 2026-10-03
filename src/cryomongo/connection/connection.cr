@@ -231,11 +231,11 @@ class Mongo::Connection
     round_trip_time = started.elapsed
 
     if error = response.error?
-      # Fallback to legacy isMaster if 'hello' command is not found (Mongo < 4.4)
-      # The Versioned API spec mandates NOT using legacy commands if an API is requested.
-      if first && !use_legacy && error.is_a?(Mongo::Error::Command) && error.code == 59 && @options.server_api.nil?
-        return handshake(send_metadata: send_metadata, appname: appname, legacy: true, client_metadata: client_metadata, load_balanced: load_balanced)
-      end
+      # No isMaster retry. hello has existed since 4.4 (wire 9). This driver
+      # targets MongoDB 8.0 and newer. Code 59 is a command error.
+      # The Versioned API spec still forbids a legacy command when an API
+      # was requested. That path never reaches here: server API handshakes
+      # already send hello.
       raise error
     end
 

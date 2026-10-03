@@ -4,7 +4,7 @@
 # for that PCRE1 package on those images. Crystal 1.21 needs PCRE2.
 #
 # 22.04 / 24.04 keep crystal-lang/install-crystal@v1 (YAML if).
-# macOS jobs keep that action too. This script refuses non-Linux and
+# macOS is not a supported target. This script refuses non-Linux and
 # Ubuntu other than 26.04 so Linux CI cannot mix the two install paths.
 #
 # Writes cryomongo/tmp/crystal/ (gitignored). Does not write /usr/bin/crystal.
@@ -37,8 +37,8 @@ arch="$(uname -m 2>/dev/null || echo unknown)"
 
 if [[ "$os" != "Linux" ]]; then
   echo "scripts/ci-install-crystal.sh is for GitHub Ubuntu 26.04 / 26.04-arm." >&2
-  echo "macOS CI uses crystal-lang/install-crystal@v1." >&2
-  echo "Windows GitHub is leftover (the driver does not compile)." >&2
+  echo "macOS is not a supported target." >&2
+  echo "Windows is not a supported target." >&2
   exit 1
 fi
 

@@ -26,10 +26,17 @@ class Mongo::Client
 
   alias NetworkError = IO::Error | Socket::Error
 
-  # The mininum wire protocol version supported by this driver.
+  # Product target is MongoDB 8.0 and newer (wire 25 through 29).
+  # The enforced floor stays 6 until the legacy SDAM / max-staleness
+  # fixtures, which still use maxWireVersion 21 as a stand-in for a
+  # current server, are updated. Raising this constant alone marks those
+  # descriptions incompatible and fails the Linux legacy suites.
+  # The minimum wire protocol version supported by this driver.
   MIN_WIRE_VERSION = 6
   # The maximum wire protocol version supported by this driver.
-  MAX_WIRE_VERSION = 25
+  # 8.0 is wire 25. 9.0 is wire 29. Keep the ceiling at 29 so a newer
+  # server whose minWireVersion is still <= 29 is not rejected.
+  MAX_WIRE_VERSION = 29
 
   # :nodoc:
   getter! topology : SDAM::TopologyDescription

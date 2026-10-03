@@ -31,7 +31,8 @@ Client-Side Field Level Encryption (CSFLE). Local KMS and MongoDB 8.0. Stays Unr
 
 ### Changed
 - Default CSFLE link is vendored libmongocrypt **1.20.4** (`scripts/vendor-libmongocrypt.sh`). `USE_SYSTEM_LIBMONGOCRYPT=true` uses pkg-config (>= 1.20.0). GitHub does not install `libmongocrypt-dev`. Linux official tarball is nocrypto; the driver registers OpenSSL hooks
-- GitHub Specs: four topologies on Ubuntu 22.04 / 24.04 / 26.04 (x64 and arm64) and macos-15 / macos-26 (arm64, native MongoDB 8.0.29). Pin image labels. `fail-fast: false`. `timeout-minutes: 45`. `GLIBC_TUNABLES=glibc.pthread.rseq=1` on Linux Docker only. Ubuntu 26.04 installs Crystal from the official 1.21.x tarball. crypt_shared uses ubuntu2404 on 26.04. Windows GitHub is leftover (the driver does not compile)
+- Linux only. Specs CI is the 24 Ubuntu cells. A Darwin compile raises. `hello` no longer falls back to `isMaster` when the server returns code 59 (that fallback was MongoDB before 4.4). Wire ceiling is **29** (MongoDB 9.0). The enforced floor stays **6** until the legacy SDAM fixtures move off wire 21
+- GitHub Specs: four topologies on Ubuntu 22.04 / 24.04 / 26.04 (x64 and arm64). Pin image labels. `fail-fast: false`. `timeout-minutes: 45`. `GLIBC_TUNABLES=glibc.pthread.rseq=1` on Linux Docker only. Ubuntu 26.04 installs Crystal from the official 1.21.x tarball. crypt_shared uses ubuntu2404 on 26.04. macOS and Windows are not targets
 
 ## 0.17.5 - 2026-09-02
 

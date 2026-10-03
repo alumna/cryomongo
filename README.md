@@ -9,7 +9,7 @@
 
 <hr/>
 
-A MongoDB driver in Crystal (no mongo-c-driver). Tested against **MongoDB 8.0**. zstd wire compression links libzstd. Client-side encryption links official **libmongocrypt 1.20.4** (vendored). Auto-encryption also needs **crypt_shared** (`mongo_crypt_v1.so` on linux, `.dylib` on macOS).
+A MongoDB driver in Crystal (no mongo-c-driver). **Linux only.** Tested against **MongoDB 8.0**. zstd wire compression links libzstd. Client-side encryption links official **libmongocrypt 1.20.4** (vendored). Auto-encryption also needs **crypt_shared** (`mongo_crypt_v1.so`). macOS is not a supported target.
 
 > If you are looking for a higher-level object-document mapper, see [`moongoon`](https://github.com/elbywan/moongoon).
 
@@ -39,11 +39,11 @@ A MongoDB driver in Crystal (no mongo-c-driver). Tested against **MongoDB 8.0**.
 
 ## This fork
 
-`alumna/cryomongo` is a fork of [`elbywan/cryomongo`](https://github.com/elbywan/cryomongo). The work here is for **MongoDB 8.0** (max wire version **25**, OP_MSG-only) and **Crystal 1.21**. It is meant to merge into the upstream repository.
+`alumna/cryomongo` is a fork of [`elbywan/cryomongo`](https://github.com/elbywan/cryomongo). The work here is for **MongoDB 8.0 and newer** (wire version **25** through **29**) and **Crystal 1.21** on **Linux**. It is meant to merge into the upstream repository.
 
 The driver is **0.x**. Phases 1–3 of [ROADMAP.md](ROADMAP.md) are done (CRUD, sessions, transactions, CSOT, load balancer, CMAP/SDAM, compression). Phase 4 Waves 21–25 ship CSFLE with local KMS (explicit, auto-encryption, Queryable Encryption equality and 8.0 range, official UTF that can run without cloud accounts). **1.0** still waits on cloud auth (Phase 5: AWS / OIDC). Phase **3.14** (performance) is later and is not in those waves.
 
-Not in this fork: Atlas Search, MongoDB newer than 8.0, `MONGODB-AWS`, `MONGODB-OIDC`. Open work: [ROADMAP.md](ROADMAP.md).
+Not in this fork: Atlas Search, macOS, Windows, `MONGODB-AWS`, `MONGODB-OIDC`. Open work: [ROADMAP.md](ROADMAP.md).
 
 ## Features
 
@@ -84,7 +84,7 @@ zstd wire compression links **libzstd**. On Debian/Ubuntu: `sudo apt-get install
 
 Explicit client-side encryption links official **libmongocrypt 1.20.4**. Run `scripts/vendor-libmongocrypt.sh` (writes `vendor/libmongocrypt/`, gitignored). GitHub Ubuntu 24.04 `libmongocrypt-dev` is too old for `mongocrypt_setopt_key_expiration` and related APIs (PR 37). The default link does not use pkg-config, so apt cannot win. Distro packages and CVE hotfixes may set `USE_SYSTEM_LIBMONGOCRYPT=true` (needs **>= 1.20.0**). Compile with `-Dwithout_libmongocrypt` to skip the link. Then `Mongo::ClientEncryption` raises a clear error, and live encrypt specs do not run. A CVE in libmongocrypt needs a pin bump of 1.20.4 in this shard, then a human release. Linux official tarballs are nocrypto; the driver supplies OpenSSL hooks.
 
-Auto-encryption also needs **crypt_shared** (`mongo_crypt_v1.so` on linux, `mongo_crypt_v1.dylib` on macOS), not mongocryptd. Set `extraOptions.cryptSharedLibPath` or the env var `CRYPT_SHARED_LIB_PATH` to the absolute path of that file. Download MongoDB 8.0.x `crypt_shared` from the [MongoDB download center](https://www.mongodb.com/try/download/enterprise) (package `crypt_shared`), or run `scripts/download-crypt-shared.sh` (writes `tmp/mongo_crypt_v1.so` or `.dylib`, gitignored). Linux: ubuntu2204 on 22.04, ubuntu2404 on 24.04 and 26.04 (there is no ubuntu2604 package), **x86_64** or **aarch64**. macOS: official `macos-arm64` / `macos-x86_64` tarballs. GitHub CI downloads it in `.github/workflows/specs.yml` and does not commit the binary. Specs skip the live auto-encryption path when libmongocrypt or crypt_shared is missing.
+Auto-encryption also needs **crypt_shared** (`mongo_crypt_v1.so`), not mongocryptd. Set `extraOptions.cryptSharedLibPath` or the env var `CRYPT_SHARED_LIB_PATH` to the absolute path of that file. Download MongoDB 8.0.x `crypt_shared` from the [MongoDB download center](https://www.mongodb.com/try/download/enterprise) (package `crypt_shared`), or run `scripts/download-crypt-shared.sh` (writes `tmp/mongo_crypt_v1.so`, gitignored). Linux packages: ubuntu2204 on 22.04, ubuntu2404 on 24.04 and 26.04 (there is no ubuntu2604 package), **x86_64** or **aarch64**. GitHub CI downloads it in `.github/workflows/specs.yml` and does not commit the binary. Specs skip the live auto-encryption path when libmongocrypt or crypt_shared is missing.
 
 ## Usage
 
@@ -516,7 +516,7 @@ Needs **libmongocrypt** (official 1.20.4 by default). Local KMS only in this ver
 
 Automatic encryption is an Enterprise feature (crypt_shared). It only applies to collection commands. A local `schemaMap` is safer than a schema from the server. Other JSON Schema rules in that map are not enforced and error. The authenticated user needs the `listCollections` privilege. Enabling auto-encryption reduces the maximum write batch size.
 
-Set `cryptSharedLibPath` or `CRYPT_SHARED_LIB_PATH` to the `mongo_crypt_v1.so` (linux) or `mongo_crypt_v1.dylib` (macOS) file, not a directory. All `Mongo::Client` objects in one process should use the same path.
+Set `cryptSharedLibPath` or `CRYPT_SHARED_LIB_PATH` to the `mongo_crypt_v1.so` file, not a directory. All `Mongo::Client` objects in one process should use the same path.
 
 The unified runner copies official CSFLE UTF that can run on MongoDB 8.0 + local KMS (77 files). Cloud KMS, KMIP, and MongoDB 8.2+ / 9.0 text (prefix / suffix / substring) files are leftover on purpose.
 
@@ -937,7 +937,7 @@ See [BENCHMARK.md](BENCHMARK.md) (how to run, then the numbers). BSON-only: `cry
 4. Push to the branch (`git push origin my-new-feature`)
 5. Create a new Pull Request
 
-Spec CI runs `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=snappy,zstd,zlib` (snappy is first, so the suite uses snappy; zlib and zstd run in compression prose). Linux GitHub is a 24-cell matrix: Ubuntu 22.04, 24.04, and 26.04 (preview) on x64 and arm64, each with standalone, replica set, sharded, and load-balanced (`docker-topology.sh`). macOS GitHub is 8 cells: **macos-15** and **macos-26** (arm64) × the same four topologies, native Community MongoDB 8.0.29 (`ci-native-topology.sh`, not Docker). Labels are pinned. Do not use `ubuntu-latest` or `macos-latest`. Skip `ubuntu-slim`, **macos-14** (deprecated), and intel `macos-*-large`. Windows GitHub is leftover (the driver does not compile). Cache keys include OS and arch (libmongocrypt linux x86_64 glibc_2_7 vs arm64 glibc_2_17 vs macos universal; crypt_shared must match arch). UTF holds one cluster lock per JSON file so failCommand and step-down do not overlap. Live prose that talks to mongod uses the same lock. Retryable writes wait for a replica-set primary instead of sending the first write to a lone Unknown seed (GitHub 27017 is often a secondary). Replica-set leftover failCommand is turned off with `directConnection` (long poll heartbeat, no URI userinfo) so an Unknown member cannot keep it.
+Spec CI runs `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=snappy,zstd,zlib` (snappy is first, so the suite uses snappy; zlib and zstd run in compression prose). Linux GitHub is a 24-cell matrix: Ubuntu 22.04, 24.04, and 26.04 (preview) on x64 and arm64, each with standalone, replica set, sharded, and load-balanced (`docker-topology.sh`). macOS and Windows are not targets (a Darwin compile raises). Labels are pinned. Do not use `ubuntu-latest`. Skip `ubuntu-slim`. Cache keys include OS and arch (libmongocrypt linux x86_64 glibc_2_7 vs arm64 glibc_2_17; crypt_shared must match arch). UTF holds one cluster lock per JSON file so failCommand and step-down do not overlap. Live prose that talks to mongod uses the same lock. Retryable writes wait for a replica-set primary instead of sending the first write to a lone Unknown seed (GitHub 27017 is often a secondary). Replica-set leftover failCommand is turned off with `directConnection` (long poll heartbeat, no URI userinfo) so an Unknown member cannot keep it.
 
 ## Contributors
 
