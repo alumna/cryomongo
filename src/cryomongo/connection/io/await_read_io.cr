@@ -60,6 +60,13 @@
 # non-CSOT reads stay on `wait_readable`. GitHub `8cb330d` slept on every
 # read and each macOS test paid ~0.4–1.5s.
 #
+# GitHub `88092b7` / `37117968709`: that poll reaches the deadline and
+# `LibC.read` is still empty (bulkWrite waited ~200ms against a 120ms
+# block). Do not sleep longer. Bytes already in Crystal's socket buffer,
+# or still queued in the kernel (`FIONREAD`) when `read` returned
+# `EAGAIN`, are returned with no extra wait. A timeout records
+# `maxTimeMS`, bytes read, `FIONREAD`, buffered bytes, and wall time.
+#
 # leftover 0 at wrap (leftover 0 still send / Darwin non-CSOT / handshake):
 # raise at once. Do not last-read with wait 0. Crystal 0 is now on Darwin,
 # but LibC.read still runs first on a non-blocking socket. If the failPoint
@@ -95,12 +102,68 @@ class Mongo::Connection::AwaitReadIO < IO
   # Set only when a CSOT read raises. Cleared on the next CSOT wrap.
   # waited is from the first read of this wrap until the raise.
   # leftover_at_timeout is deadline minus now at the raise (negative if late).
+  # wall_waited is Time.utc over that same span (server blockTimeMS is wall
+  # time). max_time_ms is the value appended to the command, or nil when
+  # the spec says not to send it. csot_bytes / fionread / buffered / same_fd
+  # are set only by the Darwin CSOT poll.
   class_property recorded_waited : Time::Span? = nil
   class_property recorded_leftover_at_timeout : Time::Span? = nil
+  class_property recorded_wall_waited : Time::Span? = nil
+  class_property recorded_max_time_ms : Int64? = nil
+  class_property recorded_csot_bytes : Int64? = nil
+  class_property recorded_fionread : Int32? = nil
+  class_property recorded_buffered : Int32? = nil
+  class_property recorded_same_fd : Bool? = nil
 
   def self.clear_csot_read_timeout : Nil
     self.recorded_waited = nil
     self.recorded_leftover_at_timeout = nil
+    self.recorded_wall_waited = nil
+    self.recorded_max_time_ms = nil
+    self.recorded_csot_bytes = nil
+    self.recorded_fionread = nil
+    self.recorded_buffered = nil
+    self.recorded_same_fd = nil
+  end
+
+  # Fields for a CSOT read that raised. Empty when this read did not time out.
+  def self.csot_timeout_detail : String
+    parts = [] of String
+    if span = recorded_waited
+      parts << "waited_ms=#{span.total_milliseconds}"
+    end
+    if span = recorded_leftover_at_timeout
+      parts << "leftover_at_timeout_ms=#{span.total_milliseconds}"
+    end
+    if span = recorded_wall_waited
+      parts << "wall_ms=#{span.total_milliseconds}"
+    end
+    if ms = recorded_max_time_ms
+      parts << "max_time_ms=#{ms}"
+    else
+      parts << "max_time_ms=none"
+    end
+    if bytes = recorded_csot_bytes
+      parts << "csot_bytes=#{bytes}"
+    else
+      parts << "csot_bytes=none"
+    end
+    if queued = recorded_fionread
+      parts << "fionread=#{queued}"
+    else
+      parts << "fionread=none"
+    end
+    if buffered = recorded_buffered
+      parts << "buffered=#{buffered}"
+    else
+      parts << "buffered=none"
+    end
+    if same = recorded_same_fd
+      parts << "same_fd=#{same ? 1 : 0}"
+    else
+      parts << "same_fd=none"
+    end
+    parts.join(' ')
   end
 
   def initialize(
@@ -120,15 +183,24 @@ class Mongo::Connection::AwaitReadIO < IO
     @last_read_until = nil
     # First read() of this wrap. The write happens before that.
     @wait_started = nil
+    @wait_started_utc = nil
+    {% if flag?(:darwin) %}
+      @csot_bytes = 0_i64
+    {% end %}
   end
 
   getter deadline : Time::Instant?
 
   @last_read_until : Time::Instant?
   @wait_started : Time::Instant?
+  @wait_started_utc : Time?
+  {% if flag?(:darwin) %}
+    @csot_bytes : Int64 = 0_i64
+  {% end %}
 
   def read(slice : Bytes) : Int32
     @wait_started ||= Time.instant
+    @wait_started_utc ||= Time.utc
     {% if flag?(:darwin) %}
       # CSOT only. wait_readable on this path returned 42–136ms late
       # (GitHub `5e6eb21`). Non-CSOT, handshake, and streaming hello stay
@@ -262,38 +334,99 @@ class Mongo::Connection::AwaitReadIO < IO
   # Expiry is Time.instant, not the moment wait_readable returns. Bytes
   # already in the kernel are returned, including one slice after the
   # deadline (the reply arrived during that sleep). No shutdown.
+  # Crystal's read buffer and a final FIONREAD check are not a longer wait:
+  # they only return bytes that are already queued.
   {% if flag?(:darwin) %}
   private def read_csot_poll(slice : Bytes) : Int32
+    self.class.recorded_same_fd = true
     loop do
       if @connection.interrupted_by_clear? || @inner.closed? || @connection.interrupted?
         raise IO::Error.new("Closed stream")
       end
+      if n = take_buffered(slice)
+        @got_data = true
+        @csot_bytes += n
+        return n
+      end
       expired = deadline_expired?
-      ret = LibC.read(@raw.fd, slice.to_unsafe.as(Void*), LibC::SizeT.new(slice.size))
+      ret = read_raw(slice)
       if ret > 0
         @got_data = true
-        return ret.to_i
+        @csot_bytes += ret
+        return ret
       end
       if ret == 0
         raise_read_timeout if expired
         raise IO::Error.new("Closed stream")
       end
-      err = Errno.value
-      if err == Errno::EINTR
-        next
-      end
-      unless err == Errno::EAGAIN || err == Errno::EWOULDBLOCK || err == Errno::ETIMEDOUT
-        raise IO::Error.from_os_error("read", err)
-      end
       if expired
+        if n = take_kernel_if_pending(slice)
+          @got_data = true
+          @csot_bytes += n
+          return n
+        end
         raise_read_timeout
       end
       wait = csot_slice_wait
       if wait <= Time::Span.zero
+        if n = take_kernel_if_pending(slice)
+          @got_data = true
+          @csot_bytes += n
+          return n
+        end
         raise_read_timeout
       end
       sleep wait
     end
+  end
+
+  # LibC.read. Positive is a byte count. 0 is EOF. -1 is EAGAIN
+  # (caller sleeps or raises). EINTR retries here. A hard error raises.
+  private def read_raw(slice : Bytes) : Int32
+    loop do
+      ret = LibC.read(@raw.fd, slice.to_unsafe.as(Void*), LibC::SizeT.new(slice.size))
+      return ret.to_i if ret >= 0
+      err = Errno.value
+      next if err == Errno::EINTR
+      return -1 if err == Errno::EAGAIN || err == Errno::EWOULDBLOCK || err == Errno::ETIMEDOUT
+      raise IO::Error.from_os_error("read", err)
+    end
+  end
+
+  # Bytes a previous buffered read already took out of the kernel.
+  # Empty buffer returns nil. Does not call read, so it cannot wait.
+  private def take_buffered(slice : Bytes) : Int32?
+    inner = @inner
+    return nil unless inner.is_a?(::Socket)
+    n = inner.mongo_take_buffered(slice)
+    n > 0 ? n : nil
+  end
+
+  # FIONREAD > 0 means the kernel has bytes this poll's read missed.
+  # One more read, then recv. No sleep.
+  private def take_kernel_if_pending(slice : Bytes) : Int32?
+    pending = uninitialized LibC::Int
+    pending = 0
+    ret = MongoCsotProbe.ioctl(@raw.fd, 0x4004667f_u64, pointerof(pending))
+    if ret == -1
+      self.class.recorded_fionread = nil
+      return nil
+    end
+    self.class.recorded_fionread = pending.to_i32
+    return nil if pending <= 0
+    n = read_raw(slice)
+    return n if n > 0
+    # MSG_DONTWAIT so this cannot block if the fd is not O_NONBLOCK.
+    recvd = LibC.recv(@raw.fd, slice.to_unsafe.as(Void*), LibC::SizeT.new(slice.size), 0x80)
+    return recvd.to_i if recvd > 0
+    nil
+  end
+
+  private def probe_kernel_queued : Nil
+    pending = uninitialized LibC::Int
+    pending = 0
+    ret = MongoCsotProbe.ioctl(@raw.fd, 0x4004667f_u64, pointerof(pending))
+    self.class.recorded_fionread = ret == -1 ? nil : pending.to_i32
   end
 
   private def csot_slice_wait : Time::Span
@@ -316,14 +449,32 @@ class Mongo::Connection::AwaitReadIO < IO
       if started = @wait_started
         self.class.recorded_waited = Time.instant - started
       end
+      if started = @wait_started_utc
+        self.class.recorded_wall_waited = Time.utc - started
+      end
       if deadline = @deadline
         self.class.recorded_leftover_at_timeout = deadline - Time.instant
       end
+      {% if flag?(:darwin) %}
+        if self.class.recorded_same_fd
+          self.class.recorded_csot_bytes = @csot_bytes
+          inner = @inner
+          if inner.is_a?(::Socket)
+            self.class.recorded_buffered = inner.mongo_buffered_unread
+          end
+          probe_kernel_queued if self.class.recorded_fionread.nil?
+        end
+      {% end %}
     end
     {% if flag?(:darwin) %}
       @connection.interrupt if @csot && !@connection.interrupted?
     {% end %}
-    raise IO::TimeoutError.new("Read timed out")
+    detail = @csot ? self.class.csot_timeout_detail : ""
+    if detail.empty?
+      raise IO::TimeoutError.new("Read timed out")
+    else
+      raise IO::TimeoutError.new("Read timed out #{detail}")
+    end
   end
 
   # Leftover Instant closer woke this read. Last-read kernel bytes that
@@ -400,3 +551,28 @@ class Mongo::Connection::AwaitReadIO < IO
     end
   end
 end
+
+{% if flag?(:darwin) %}
+  @[Link("c")]
+  lib MongoCsotProbe
+    # Darwin FIONREAD (_IOR('f', 127, int) == 0x4004667f). Bytes queued on the fd.
+    fun ioctl(fd : LibC::Int, request : LibC::ULong, arg : LibC::Int*) : LibC::Int
+  end
+
+  class ::Socket
+    # Bytes already copied into Crystal's read buffer. Does not touch the fd.
+    def mongo_buffered_unread : Int32
+      @in_buffer_rem.size
+    end
+
+    # Move those bytes into *slice*. Empty buffer returns 0 and does not read.
+    def mongo_take_buffered(slice : Bytes) : Int32
+      pending = @in_buffer_rem
+      return 0 if pending.empty? || slice.empty?
+      n = pending.size < slice.size ? pending.size : slice.size
+      slice.copy_from(pending.to_unsafe, n)
+      @in_buffer_rem += n
+      n
+    end
+  end
+{% end %}

@@ -750,9 +750,14 @@ class Mongo::Client
   # CSOT: remaining timeout minus min RTT. getMore on a non-awaitData cursor
   # must not get maxTimeMS. AwaitData getMore already has maxTimeMS (maxAwaitTimeMS).
   private def apply_csot_max_time(body : BSON, command, deadline : Mongo::Deadline?, server_description : SDAM::ServerDescription) : BSON
-    return body unless deadline
-    return body if deadline.infinite?
-    return body if command != Commands::GetMore && !deadline.send_max_time?
+    unless deadline && !deadline.infinite?
+      Mongo::Connection::AwaitReadIO.recorded_max_time_ms = nil
+      return body
+    end
+    if command != Commands::GetMore && !deadline.send_max_time?
+      Mongo::Connection::AwaitReadIO.recorded_max_time_ms = nil
+      return body
+    end
 
     leftover_zero = deadline.remaining <= Time::Span.zero
     if leftover_zero
@@ -769,7 +774,10 @@ class Mongo::Client
     end
 
     if command == Commands::GetMore
-      return body unless body.has_key?("maxTimeMS")
+      unless body.has_key?("maxTimeMS")
+        Mongo::Connection::AwaitReadIO.recorded_max_time_ms = nil
+        return body
+      end
       existing = body["maxTimeMS"]?
       existing_ms = case existing
                     when Int
@@ -778,9 +786,11 @@ class Mongo::Client
                       max_time_ms
                     end
       capped = existing_ms < max_time_ms ? existing_ms : max_time_ms
+      Mongo::Connection::AwaitReadIO.recorded_max_time_ms = capped
       return body.copy_with({maxTimeMS: capped})
     end
 
+    Mongo::Connection::AwaitReadIO.recorded_max_time_ms = max_time_ms
     body.copy_with({maxTimeMS: max_time_ms})
   end
 

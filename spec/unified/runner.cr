@@ -1121,6 +1121,26 @@ module Mongo::Unified
       end
     end
 
+    # maxTimeMS on the last commandStarted in this failure. "none" when the
+    # spec says that command must not carry the field.
+    private def sent_max_time_ms(events) : String
+      found = "none"
+      events.each do |event|
+        if event.is_a?(Mongo::Monitoring::Commands::CommandStartedEvent)
+          value = event.command["maxTimeMS"]?
+          found = case value
+                  when Int
+                    value.to_i64.to_s
+                  when Nil
+                    "none"
+                  else
+                    value.to_s
+                  end
+        end
+      end
+      found
+    end
+
     private def verify_events(expect_events : JSON::Any?)
       return unless expect_events
       return unless event_groups = expect_events.as_a?
@@ -1176,7 +1196,9 @@ module Mongo::Unified
           left_at_timeout = Mongo::Connection::AwaitReadIO.recorded_leftover_at_timeout
           waited_ms = waited ? waited.total_milliseconds : "none"
           timeout_ms = left_at_timeout ? left_at_timeout.total_milliseconds : "none"
-          raise Exception.new("TEST_FAILED: expected #{expected_events.size} events for #{client_id}, got #{actual_events.size}: #{names} leftover_at_wrap_ms=#{wrap_ms} leftover_after_write_ms=#{after_ms} waited_ms=#{waited_ms} leftover_at_timeout_ms=#{timeout_ms}")
+          probe = Mongo::Connection::AwaitReadIO.csot_timeout_detail
+          sent_max = sent_max_time_ms(actual_events)
+          raise Exception.new("TEST_FAILED: expected #{expected_events.size} events for #{client_id}, got #{actual_events.size}: #{names} leftover_at_wrap_ms=#{wrap_ms} leftover_after_write_ms=#{after_ms} waited_ms=#{waited_ms} leftover_at_timeout_ms=#{timeout_ms} sent_max_time_ms=#{sent_max} #{probe}")
         end
 
         expected_events.each_with_index do |expected, index|
