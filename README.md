@@ -9,15 +9,18 @@
 
 <hr/>
 
-A MongoDB driver in Crystal (no mongo-c-driver). **Linux only.** Tested against **MongoDB 8.0**. zstd wire compression links libzstd. Client-side encryption links official **libmongocrypt 1.20.4** (vendored). Auto-encryption also needs **crypt_shared** (`mongo_crypt_v1.so`). macOS is not a supported target.
+A MongoDB driver in Crystal. **1.0.0-beta.** No mongo-c-driver. **Linux only**, tested on **MongoDB 8.0** with Crystal 1.21. macOS and Windows are not supported.
 
-> If you are looking for a higher-level object-document mapper, see [`moongoon`](https://github.com/elbywan/moongoon).
+zstd needs libzstd. Field encryption needs **libmongocrypt 1.20.4**. Auto-encryption also needs **crypt_shared** (`mongo_crypt_v1.so`). Setup is in [Encryption](#encryption).
+
+> For an object-document mapper, see [`moongoon`](https://github.com/elbywan/moongoon).
 
 ## Contents
 
-- [This fork](#this-fork)
+- [This shard](#this-shard)
 - [Features](#features)
 - [Installation](#installation)
+- [Encryption](#encryption)
 - [Usage](#usage)
 - [Conventions](#conventions)
 - [Connection](#connection)
@@ -37,13 +40,13 @@ A MongoDB driver in Crystal (no mongo-c-driver). **Linux only.** Tested against 
 - [Contributing](#contributing)
 - [Contributors](#contributors)
 
-## This fork
+## This shard
 
-`alumna/cryomongo` is a fork of [`elbywan/cryomongo`](https://github.com/elbywan/cryomongo). The work here is for **MongoDB 8.0 and newer** (wire version **25** through **29**) and **Crystal 1.21** on **Linux**. It is meant to merge into the upstream repository.
+[`elbywan/cryomongo`](https://github.com/elbywan/cryomongo) is the original driver. Its author is no longer maintaining that shard. This repository, [`alumna/cryomongo`](https://github.com/alumna/cryomongo), began as a temporary fork and is now the shard to install.
 
-The driver is **0.x**. Phases 1–3 of [ROADMAP.md](ROADMAP.md) are done (CRUD, sessions, transactions, CSOT, load balancer, CMAP/SDAM, compression). Phase 4 Waves 21–25 ship CSFLE with local KMS (explicit, auto-encryption, Queryable Encryption equality and 8.0 range, official UTF that can run without cloud accounts). **1.0** still waits on cloud auth (Phase 5: AWS / OIDC). Phase **3.14** (performance) is later and is not in those waves.
+**1.0.0-beta** is Linux, Crystal 1.21, and MongoDB 8.0 (wire 25 through 29). It includes the core driver and local-KMS client-side encryption. The public API can still change before 1.0.0.
 
-Not in this fork: Atlas Search, macOS, Windows, `MONGODB-AWS`, `MONGODB-OIDC`. Open work: [ROADMAP.md](ROADMAP.md).
+Not in this version: macOS, Windows, Atlas Search, cloud KMS, `MONGODB-AWS`, `MONGODB-OIDC`, and Queryable Encryption prefix / suffix / substring (MongoDB 8.2+). Open work: [ROADMAP.md](ROADMAP.md).
 
 ## Features
 
@@ -66,25 +69,84 @@ Not in this fork: Atlas Search, macOS, Windows, `MONGODB-AWS`, `MONGODB-OIDC`. O
 - **[Versioned API](https://www.mongodb.com/docs/manual/reference/versioned-api/)**
 - **Raw commands** - `command`, `Database#run_command` / `#run_cursor_command`
 
-Generated API pages live in [`docs/`](docs/Mongo.html). That folder is stale until it is regenerated.
+Generated API pages live in [`docs/`](docs/Mongo.html). Regenerate them before trusting that folder.
 
 ## Installation
 
-1. Add the dependency to your `shard.yml`:
+Linux. CI tests Crystal 1.21. `shard.yml` allows >= 1.20.0.
 
 ```yaml
 dependencies:
   cryomongo:
     github: alumna/cryomongo
+    version: 1.0.0-beta
 ```
 
-2. Run `shards install`
+Then `shards install`.
 
-zstd wire compression links **libzstd**. On Debian/Ubuntu: `sudo apt-get install libzstd-dev`. snappy is pure Crystal. zlib is in the Crystal stdlib.
+**zstd.** Install `libzstd-dev` (`sudo apt-get install libzstd-dev` on Debian/Ubuntu). snappy is pure Crystal. zlib comes with Crystal.
 
-Explicit client-side encryption links official **libmongocrypt 1.20.4**. Run `scripts/vendor-libmongocrypt.sh` (writes `vendor/libmongocrypt/`, gitignored). GitHub Ubuntu 24.04 `libmongocrypt-dev` is too old for `mongocrypt_setopt_key_expiration` and related APIs (PR 37). The default link does not use pkg-config, so apt cannot win. Distro packages and CVE hotfixes may set `USE_SYSTEM_LIBMONGOCRYPT=true` (needs **>= 1.20.0**). Compile with `-Dwithout_libmongocrypt` to skip the link. Then `Mongo::ClientEncryption` raises a clear error, and live encrypt specs do not run. A CVE in libmongocrypt needs a pin bump of 1.20.4 in this shard, then a human release. Linux official tarballs are nocrypto; the driver supplies OpenSSL hooks.
+The default compile links libmongocrypt and stops if that library is missing. [Encryption](#encryption) is how to vendor it, use a system package, or build without it.
 
-Auto-encryption also needs **crypt_shared** (`mongo_crypt_v1.so`), not mongocryptd. Set `extraOptions.cryptSharedLibPath` or the env var `CRYPT_SHARED_LIB_PATH` to the absolute path of that file. Download MongoDB 8.0.x `crypt_shared` from the [MongoDB download center](https://www.mongodb.com/try/download/enterprise) (package `crypt_shared`), or run `scripts/download-crypt-shared.sh` (writes `tmp/mongo_crypt_v1.so`, gitignored). Linux packages: ubuntu2204 on 22.04, ubuntu2404 on 24.04 and 26.04 (there is no ubuntu2604 package), **x86_64** or **aarch64**. GitHub CI downloads it in `.github/workflows/specs.yml` and does not commit the binary. Specs skip the live auto-encryption path when libmongocrypt or crypt_shared is missing.
+## Encryption
+
+Field encryption is optional. Pick one row. API samples are in [Client-side encryption](#client-side-encryption).
+
+| You need | What to install |
+| --- | --- |
+| No field encryption | nothing; compile with `-Dwithout_libmongocrypt` |
+| Explicit encrypt and decrypt | libmongocrypt 1.20.4 |
+| Auto-encryption or Queryable Encryption | libmongocrypt 1.20.4 and `mongo_crypt_v1.so` |
+
+This driver does not spawn mongocryptd. Cloud KMS is not in 1.0.0-beta.
+
+### Without encryption
+
+Add `-Dwithout_libmongocrypt` to the compile of your program. `Mongo::ClientEncryption` raises if you construct it. Encrypt specs do not run. The rest of the driver is the same.
+
+### Explicit encryption
+
+Link official libmongocrypt **1.20.4**, then compile with no extra flag.
+
+From an application, after `shards install`:
+
+```
+lib/cryomongo/scripts/vendor-libmongocrypt.sh
+```
+
+From this repository:
+
+```
+scripts/vendor-libmongocrypt.sh
+```
+
+The script writes gitignored `vendor/libmongocrypt/` next to the driver sources. `shards update` can remove that directory; run the script again after an update. The Linux archive has no crypto library of its own. The driver registers OpenSSL hooks.
+
+Ubuntu 24.04 `libmongocrypt-dev` is too old. For a system package **>= 1.20.0**, set `USE_SYSTEM_LIBMONGOCRYPT=true` on that compile. `pkg-config` must find the package. Leave the variable unset when you use the vendored library.
+
+### Auto-encryption
+
+Queryable Encryption uses this same pair of libraries. Finish [Explicit encryption](#explicit-encryption) first, then download crypt_shared.
+
+From an application:
+
+```
+lib/cryomongo/scripts/download-crypt-shared.sh
+```
+
+From this repository:
+
+```
+scripts/download-crypt-shared.sh
+```
+
+The script writes gitignored `tmp/mongo_crypt_v1.so` and prints `CRYPT_SHARED_LIB_PATH=...`.
+
+Pass that file to every client in the process. Use the `.so` path, not the directory that contains it. Export `CRYPT_SHARED_LIB_PATH`, or set `extraOptions.cryptSharedLibPath` as in the [sample](#client-side-encryption). One path for the whole process.
+
+To fetch the MongoDB 8.0 package yourself: `ubuntu2204` on Ubuntu 22.04, `ubuntu2404` on 24.04 and 26.04 (there is no `ubuntu2604` package), `x86_64` or `aarch64`.
+
+Specs skip live auto-encryption when either library is missing.
 
 ## Usage
 
@@ -184,16 +246,20 @@ puts cursor.of(User).to_a.to_pretty_json
 ```crystal
 require "cryomongo"
 
-# Mongo::Client is the root object for interacting with a MongoDB deployment.
-# It is responsible for monitoring the cluster, routing the requests and managing the socket pools.
+# Mongo::Client monitors the cluster, routes commands, and owns the pools.
 
 # A client can be instantiated using a standard mongodb connection string.
 # Replica set:
 #   Mongo::Client.new("mongodb://localhost:27017/?replicaSet=rs0")
 # Load balancer:
 #   Mongo::Client.new("mongodb://localhost:8000/?loadBalanced=true")
-# CSOT (one deadline for selection, checkout, and maxTimeMS):
+# Stable API (not a URI option):
+#   options = Mongo::Options.new
+#   options.server_api = Mongo::ServerApi.new(version: "1", strict: true)
+#   Mongo::Client.new("mongodb://localhost:27017", options)
+# CSOT. One deadline for selection, checkout, and maxTimeMS. 0 means no timeout.
 #   Mongo::Client.new("mongodb://localhost:27017/?timeoutMS=5000")
+#   collection.find({one: 1}, timeout_ms: 500)
 
 # Client options can be passed as query parameters…
 client = Mongo::Client.new("mongodb://address:port/database?appname=MyApp")
@@ -211,8 +277,7 @@ if database = client.default_database
   collection = database["collection_name"]
 end
 
-# The overwhelming majority of programs should use a single client and should not bother with closing clients.
-# Otherwise, to free the underlying resources a client must be manually closed.
+# One client per process is the usual shape. Call #close when you are done with it.
 client.close
 ```
 
@@ -227,11 +292,6 @@ ssl_client = Mongo::Client.new uri
 # Wire compression. The driver uses the first name that the server also has.
 uri = "mongodb://localhost:27017/?compressors=snappy,zlib,zstd"
 client = Mongo::Client.new uri
-```
-
-```crystal
-# CSOT: remaining timeoutMS becomes maxTimeMS. timeoutMS=0 means no timeout.
-client = Mongo::Client.new("mongodb://localhost:27017/?timeoutMS=5000")
 ```
 
 **Links**
@@ -288,8 +348,15 @@ document.try { |d| puts d.to_json }
 
 # Find multiple documents.
 cursor = collection.find({ qty: { "$gt": 4 }})
-elements = cursor.to_a # cursor is an Iterator(BSON)
-cursor.close           # send killCursors if the server cursor is still open
+elements = cursor.to_a # to_a uses #each, which closes the cursor
+# Call #close yourself only when you stop early with #next.
+
+# Collation applies to this operation only.
+collection.find({name: "jose"}, collation: Mongo::Collation.new(locale: "en", strength: 2)).to_a
+
+# Tailable awaitData. max_time_ms is the getMore wait.
+tailable = collection.find({ts: {"$gt": 1}}, tailable: true, await_data: true, max_time_ms: 1000)
+tailable.close
 
 ## Update
 
@@ -360,7 +427,7 @@ counter = collection.count({ age: { "$lt": 18 }})
 # Raw command (not retryable; database read/write concern is not applied).
 database = client["database_name"]
 ping = database.run_command({ping: 1})
-puts ping["ok"]
+puts ping["ok"] # => 1.0
 
 # Command that returns a cursor. getMore stays on the same server.
 cursor = database.run_cursor_command({find: "collection_name", batchSize: 2}, batch_size: 2)
@@ -399,6 +466,7 @@ pp bulk.execute(write_concern: Mongo::WriteConcern.new(w: 1))
 Client `bulkWrite` (MongoDB 8.0) can write to more than one namespace in one command:
 
 ```crystal
+client = Mongo::Client.new
 result = client.bulk_write([
   Mongo::ClientBulk::InsertOne.new("database_name.collection_name", {number: 1}),
   Mongo::ClientBulk::DeleteOne.new("database_name.other", {number: 1}),
@@ -447,15 +515,15 @@ collection.create_index(
   }
 )
 
-# Follow the same rules to create multiple indexes with a single method call.
+# Several indexes in one command. String keys keep every model the same Crystal type.
 collection.create_indexes([
-  {
-    keys: { a: 1 }
-  },
-  {
-    keys: { b: 2 }, options: { expire_after_seconds: 3600 }
-  }
+  {keys: {"a" => 1}, options: {unique: true}},
+  {keys: {"c" => 1}, options: {unique: false}},
 ])
+collection.create_index(keys: {"b" => 1}, options: {expire_after_seconds: 3600})
+
+collection.list_indexes.try(&.each { |index| puts index["name"] })
+collection.drop_index("index_name")
 ```
 
 **Links**
@@ -482,7 +550,8 @@ end
 # Download
 stream = IO::Memory.new
 gridfs.download_to_stream(id, stream)
-puts stream.rewind.gets_to_end
+stream.rewind
+puts stream.gets_to_end
 
 # Find
 files = gridfs.find({
@@ -492,13 +561,11 @@ files.each do |file|
   puts file.filename
 end
 
-# Delete by id or by filename
-gridfs.delete(id)
-gridfs.delete_by_name("file.txt")
-
-# Rename by id or by filename
+# Rename, then delete. delete_by_name is the other way to remove a file.
 gridfs.rename(id, "new.txt")
-gridfs.rename_by_name("file.txt", "new.txt")
+gridfs.rename_by_name("new.txt", "newer.txt")
+gridfs.delete(id)
+# gridfs.delete_by_name("newer.txt")
 
 # Drop the files and chunks collections
 gridfs.drop
@@ -512,23 +579,20 @@ gridfs.drop
 
 ## Client-side encryption
 
-Needs **libmongocrypt** (official 1.20.4 by default). Local KMS only in this version (including named `local:name`). The local master key is 96 bytes (binary or base64). Encrypted values are BSON binary subtype `0x06`. Always call `#close`. The GC does not free the libmongocrypt handle.
+Local KMS only in 1.0.0-beta, including named `local:name`. The master key is 96 bytes (binary or base64). Ciphertext is BSON binary subtype `0x06`. Call `#close`. The GC must not destroy the libmongocrypt handle. Library setup is in [Encryption](#encryption).
 
-Automatic encryption is an Enterprise feature (crypt_shared). It only applies to collection commands. A local `schemaMap` is safer than a schema from the server. Other JSON Schema rules in that map are not enforced and error. The authenticated user needs the `listCollections` privilege. Enabling auto-encryption reduces the maximum write batch size.
-
-Set `cryptSharedLibPath` or `CRYPT_SHARED_LIB_PATH` to the `mongo_crypt_v1.so` file, not a directory. All `Mongo::Client` objects in one process should use the same path.
-
-The unified runner copies official CSFLE UTF that can run on MongoDB 8.0 + local KMS (77 files). Cloud KMS, KMIP, and MongoDB 8.2+ / 9.0 text (prefix / suffix / substring) files are leftover on purpose.
+Auto-encryption needs crypt_shared and applies to collection commands. Prefer a local `schemaMap`. Other JSON Schema rules in that map are not enforced and raise. The user needs `listCollections`. Auto-encryption lowers the maximum write batch size. Set `cryptSharedLibPath` or `CRYPT_SHARED_LIB_PATH` to the `.so` file, not a directory, and use the same path for every client in the process. Cloud KMS and MongoDB 8.2+ text search stay out.
 
 ```crystal
 require "cryomongo"
 require "random/secure"
 
-client = Mongo::Client.new
+uri = "mongodb://localhost:27017"
+client = Mongo::Client.new(uri)
 master_key = Random::Secure.random_bytes(96)
 kms = BSON.build do |bson|
   bson.document("local") do
-    bson["key"] = BSON::Binary.new(:generic, master_key)
+    bson["key"] = BSON::Binary.new(BSON::Binary::SubType::Generic, master_key)
   end
 end
 
@@ -547,11 +611,11 @@ encrypted = encryption.encrypt(
 plain = encryption.decrypt(encrypted) # => "secret"
 # Key vault: get_key, get_keys, delete_key, add_key_alt_name,
 # remove_key_alt_name, get_key_by_alt_name, rewrap_many_data_key
-encryption.close
-client.close
 ```
 
 The deterministic algorithm is `Mongo::ClientEncryption::ALGORITHM_DETERMINISTIC`. Same plaintext then gives the same ciphertext.
+
+The next two samples continue this program (`uri`, `kms`, `key_id`). Call `#close` on the encryption handle and the client when the program ends.
 
 Auto-encryption encrypts marked fields on write and decrypts them on read:
 
@@ -589,9 +653,9 @@ auto["hr"]["people"].insert_one({ssn: "123-45-6789", name: "Ada"})
 auto.close
 ```
 
-Do not encrypt `_id` unless you mean to. Key-vault commands on that client bypass auto-encryption. `bypass_auto_encryption: true` skips encrypt and still decrypts. `bypass_query_analysis: true` skips crypt_shared (writes still encrypt from the map / collinfo). This version does not spawn mongocryptd.
+Do not encrypt `_id` unless that is the goal. Key-vault commands on an auto-encrypting client bypass encryption. `bypass_auto_encryption: true` still decrypts. `bypass_query_analysis: true` skips crypt_shared. This driver does not spawn mongocryptd.
 
-Queryable Encryption (MongoDB 8.0 equality and range) uses `encrypted_fields_map` instead of `schemaMap`. Do not put the same collection in both. `create_encrypted_collection` generates data keys for null `keyId`, then creates the collection (plus ESC / ECOC). Configure auto-encryption on a **new** client with the returned `encryptedFields`. `compact_structured_encryption_data` needs that auto-encrypting client. Queryable Encryption collections need a replica set or sharded cluster (not standalone). Prefix / suffix / substring need MongoDB 8.2+ and are not in this version.
+Queryable Encryption (MongoDB 8.0 equality and range) uses `encrypted_fields_map`, not `schemaMap`. Do not put one collection in both. `create_encrypted_collection` fills null `keyId` values, then creates the collection plus ESC and ECOC. Pass the returned `encryptedFields` to a **new** client. `compact_structured_encryption_data` uses that client. A standalone cannot host these collections.
 
 ```crystal
 ef = BSON.build do |bson|
@@ -601,6 +665,7 @@ ef = BSON.build do |bson|
       bson["bsonType"] = "string"
       bson["keyId"] = nil
       bson.document("queries") { bson["queryType"] = "equality" }
+      # Range uses queryType "range" on a number or date, plus contention, trimFactor, and sparsity.
     end
   end
 end
@@ -612,6 +677,7 @@ _coll, filled = encryption.create_encrypted_collection(
   kms_provider: "local"
 )
 encryption.close
+client.close
 
 qe_map = BSON.build { |bson| bson["hr.people"] = filled }
 qe = Mongo::Client.new(
@@ -647,12 +713,13 @@ spawn do
     ],
     max_await_time_ms: 10000
   )
-  # `#each` / `#next` wait while the stream is open. An empty getMore does not stop.
-  # Use `#try_next` when you want one poll (and the latest resume_token) without blocking.
+  # `#each` and `#next` wait while the stream is open. An empty getMore does not stop.
+  # `#try_next` is one poll and updates `resume_token`.
+  # `#of(BSON)` yields `ChangeStream::Document(BSON)`.
   begin
     cursor.of(BSON).each do |doc|
       puts doc.document_key
-      puts doc.full_document.to_json
+      puts doc.full_document.try(&.to_json)
     end
   ensure
     cursor.close
@@ -686,7 +753,7 @@ client = Mongo::Client.new
 result = client.command(Mongo::Commands::ServerStatus, options: {
   repl: 0
 })
-puts result.to_bson
+puts result.to_json
 
 # The .command method can also be called against a Database…
 client["database"].command(Mongo::Commands::Create, name: "collection")
@@ -694,6 +761,7 @@ client["database"].command(Mongo::Commands::Drop, name: "collection")
 # …or a Collection.
 client["database"]["collection"].command(Mongo::Commands::Validate)
 ```
+
 **Links**
 
 - [Mongo::Commands](docs/Mongo/Commands.html)
@@ -711,7 +779,7 @@ read_concern = Mongo::ReadConcern.new(level: "majority")
 write_concern = Mongo::WriteConcern.new(w: 1, j: true)
 read_preference = Mongo::ReadPreference.new(mode: "primary")
 
-# They can be set at the client, database or client level…
+# They can be set on the client, the database, or the collection…
 client = Mongo::Client.new
 database = client["database_name"]
 collection = database["collection_name"]
@@ -937,12 +1005,12 @@ See [BENCHMARK.md](BENCHMARK.md) (how to run, then the numbers). BSON-only: `cry
 4. Push to the branch (`git push origin my-new-feature`)
 5. Create a new Pull Request
 
-Spec CI runs `crystal spec -Dpreview_mt -Dexecution_context` with `CRYSTAL_WORKERS=2` and `compressors=snappy,zstd,zlib` (snappy is first, so the suite uses snappy; zlib and zstd run in compression prose). Linux GitHub is a 24-cell matrix: Ubuntu 22.04, 24.04, and 26.04 (preview) on x64 and arm64, each with standalone, replica set, sharded, and load-balanced (`docker-topology.sh`). macOS and Windows are not targets (a Darwin compile raises). Labels are pinned. Do not use `ubuntu-latest`. Skip `ubuntu-slim`. Cache keys include OS and arch (libmongocrypt linux x86_64 glibc_2_7 vs arm64 glibc_2_17; crypt_shared must match arch). UTF holds one cluster lock per JSON file so failCommand and step-down do not overlap. Live prose that talks to mongod uses the same lock. Retryable writes wait for a replica-set primary instead of sending the first write to a lone Unknown seed (GitHub 27017 is often a secondary). Replica-set leftover failCommand is turned off with `directConnection` (long poll heartbeat, no URI userinfo) so an Unknown member cannot keep it.
+Specs use `crystal spec -Dpreview_mt -Dexecution_context` and `CRYSTAL_WORKERS=2`. GitHub runs that on Ubuntu 22.04, 24.04, and 26.04, x64 and arm64, for standalone, replica set, sharded, and load-balanced. A Darwin compile raises.
 
 ## Contributors
 
-- [elbywan](https://github.com/elbywan) - creator and maintainer
-- [paulocoghi](https://github.com/paulocoghi) - contributor
+- [elbywan](https://github.com/elbywan) - original author
+- [paulocoghi](https://github.com/paulocoghi) - maintainer
 
 ## Credit
 

@@ -5,7 +5,9 @@ class Mongo::Collection
     macro method_missing(call)
       @collection.{{call.name.id}}(
         {% for arg in call.args %}{{arg}},{% end %}
-        {% for narg in call.named_args %}{{narg.name.id}}: {{narg.value}},{% end %}
+        {% if call.named_args %}
+          {% for narg in call.named_args %}{{narg.name.id}}: {{narg.value}},{% end %}
+        {% end %}
         session: @session
       )
     end

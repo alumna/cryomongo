@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Client-Side Field Level Encryption (CSFLE) on Linux, for MongoDB 8.0. Stays Unreleased on **0.17.5** until tagged.
+Client-Side Field Level Encryption (CSFLE) on Linux, for MongoDB 8.0. Unreleased as **1.0.0-beta** until tagged.
 
 ### Added
 - Explicit encryption (`Mongo::ClientEncryption`): vendored libmongocrypt **1.20.4**; `create_data_key`, `encrypt`, `decrypt`; key-vault helpers; `rewrap_many_data_key`; encrypted values are BSON binary `0x06`; `-Dwithout_libmongocrypt` skips the link
