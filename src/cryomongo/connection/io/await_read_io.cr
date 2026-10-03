@@ -30,19 +30,25 @@
 #
 # Darwin kqueue wait_readable does not always expire at leftover Instant.
 # Time::Span.zero is now. EVFILT_TIMER data=0 is now. A positive slice can
-# sit in wait_readable until the failPoint unblocks (Shape B). GitHub
-# `baa1c0f`: closer SHUT_RD then last-read still left gridfs Shape A 8/8
-# (wrap leftover Instant 62–70ms, got one find). Darwin `shutdown` does
+# sit in wait_readable until the failPoint unblocks (Shape B). Slices stay
+# 10ms so one early fire cannot burn a 200ms budget. Do not wait the
+# remaining leftover Instant as one kqueue wait.
+# GitHub `baa1c0f`: closer SHUT_RD then last-read still left gridfs Shape A
+# 8/8 (wrap leftover Instant 62–70ms, got one find). Darwin `shutdown` does
 # not keep those kernel bytes; inner.read after SHUT can return 0/EOF.
-# Darwin raw-socket wait is LibC.read then sleep(slice) until the deadline
-# (not wait_readable, not one kqueue wait, not sleep(0), not SHUT).
-# GitHub `c119912`: that poll ignored `interrupted?`. cancel_check only sets
-# the flag (no shutdown). Streaming hello then ran out heartbeatFrequencyMS
-# (~10s) and retryable-read tests blew the 45 minute cap. The poll must
-# see `interrupt` within one slice. Non-CSOT bytes after the deadline are
-# a socket timeout, not success (retryability-legacy). CSOT timeout sets
-# `interrupt` with no shutdown so close() drops the pin. TLS still uses
-# inner.read. Linux still uses wait_readable.
+# Do not SHUT to wake wait_readable. The closer stays a no-op.
+# GitHub `c119912` replaced this wait with LibC.read + sleep and ignored
+# `interrupted?`. cancel_check only sets the flag (no shutdown). Streaming
+# hello then ran out heartbeatFrequencyMS (~10s) and macOS jobs hit the
+# 45 minute cap. GitHub `8cb330d` checked the flag inside that sleep poll.
+# Run `37106011512`: the 10s hang was gone, and every Darwin test paid
+# ~0.4–1.5s because the poll does not wake when bytes arrive. Raw sockets
+# use this sliced wait_readable again (wake on bytes, or on the slice
+# timer). `interrupt` sets a 1ms read_timeout, which wakes the in-flight
+# wait; the next loop sees the flag. A streaming hello therefore notices
+# cancel within one slice. Non-CSOT: slice timeout at the deadline raises
+# before taking kernel bytes. CSOT timeout sets `interrupt` with no
+# shutdown so close() drops the pin. Linux stays on this same loop.
 #
 # leftover 0 at wrap (leftover 0 still send / Darwin non-CSOT / handshake):
 # raise at once. Do not last-read with wait 0. Crystal 0 is now on Darwin,
@@ -99,10 +105,11 @@ class Mongo::Connection::AwaitReadIO < IO
   @last_read_until : Time::Instant?
 
   def read(slice : Bytes) : Int32
-    {% if flag?(:darwin) %}
-      # Raw socket: LibC.read + sleep. Must observe interrupt (no SHUT).
-      return read_deadline_poll(slice) if @inner.same?(@raw)
-    {% end %}
+    # Raw sockets and TLS both use sliced wait_readable. Bytes wake the
+    # fiber. A slice timer wakes it when the server is still holding the
+    # reply, so `interrupt` is visible within one slice. Do not LibC.read
+    # + sleep: that poll does not wake when the packet arrives (GitHub
+    # `8cb330d`, run `37106011512`).
     loop do
       leftover_expired = deadline_expired?
       # Darwin leftover Instant closer already waited leftover Instant.
@@ -161,7 +168,7 @@ class Mongo::Connection::AwaitReadIO < IO
           return read_kernel_or_timeout(slice)
         end
         if slice_timeout?(error)
-          raise IO::TimeoutError.new("Read timed out") if expired
+          raise_read_timeout if expired
           # Non-expired slice timed out. Darwin wait_readable does not retry
           # LibC.read, so bytes that arrived during the wait sit in the kernel.
           # Take them before leftover hits 0 on the next loop.
@@ -222,64 +229,16 @@ class Mongo::Connection::AwaitReadIO < IO
     end
   end
 
-  # Darwin raw-socket wait. LibC.read, then sleep a positive slice
-  # (not sleep(0)). Do not wait_readable. Do not shutdown.
-  # `interrupt` is checked every slice: monitor cancel_check does not
-  # shutdown, and a 1ms read_timeout does not wake this poll.
-  # Non-CSOT: a packet after the deadline is Timeout (socketTimeoutMS).
-  # CSOT leftover >0: that packet is the last-read (kernel bytes). A CSOT
-  # timeout with no bytes sets `interrupt` so the pin is not reused.
-  {% if flag?(:darwin) %}
-  private def read_deadline_poll(slice : Bytes) : Int32
-    loop do
-      if @connection.interrupted_by_clear? || @inner.closed? || @connection.interrupted?
-        raise IO::Error.new("Closed stream")
-      end
-      leftover_expired = deadline_expired?
-      ret = LibC.read(@raw.fd, slice.to_unsafe.as(Void*), LibC::SizeT.new(slice.size))
-      if ret > 0
-        if leftover_expired && !last_read_sent_csot?
-          raise_poll_timeout
-        end
-        @got_data = true
-        return ret.to_i
-      end
-      if ret == 0
-        raise_poll_timeout if leftover_expired
-        raise IO::Error.new("Closed stream")
-      end
-      err = Errno.value
-      unless err == Errno::EAGAIN || err == Errno::EWOULDBLOCK || err == Errno::ETIMEDOUT || err == Errno::EINTR
-        raise IO::Error.from_os_error("read", err)
-      end
-      if leftover_expired
-        raise_poll_timeout
-      end
-      wait = poll_slice_wait
-      if wait <= Time::Span.zero
-        raise_poll_timeout
-      end
-      sleep wait
-    end
-  end
-
-  # CSOT: mark the pin so close() does not killCursors on this socket.
-  # No shutdown. Non-CSOT stays a plain socket timeout.
-  private def raise_poll_timeout : NoReturn
-    @connection.interrupt if @csot && !@connection.interrupted?
+  # CSOT: mark the pin so close() drops it and killCursors uses a fresh
+  # leftover Instant. No shutdown. Non-CSOT stays a plain socket timeout.
+  # Linux does not set the flag here (Ubuntu 24/24 already closes the socket
+  # in the command rescue). Darwin only: GitHub `8cb330d`.
+  private def raise_read_timeout : NoReturn
+    {% if flag?(:darwin) %}
+      @connection.interrupt if @csot && !@connection.interrupted?
+    {% end %}
     raise IO::TimeoutError.new("Read timed out")
   end
-
-  private def poll_slice_wait : Time::Span
-    if deadline = @deadline
-      left = deadline - Time.instant
-      return Time::Span.zero if left <= Time::Span.zero
-      left < SLICE ? left : SLICE
-    else
-      SLICE
-    end
-  end
-  {% end %}
 
   # Leftover Instant closer woke this read. Last-read kernel bytes that
   # arrived before leftover Instant. Do not last-read a pool-clear interrupt.
@@ -293,7 +252,7 @@ class Mongo::Connection::AwaitReadIO < IO
       @got_data = true
       return n
     end
-    raise IO::TimeoutError.new("Read timed out")
+    raise_read_timeout
   end
 
   # leftover 0 at wrap / Darwin non-CSOT: raise unless this wrap already
@@ -305,7 +264,7 @@ class Mongo::Connection::AwaitReadIO < IO
   # (wrap+150ms). Do not wait_readable after leftover Instant expired.
   private def leftover_zero_wait : {Time::Span, Bool}
     unless @got_data || last_read_sent_csot?
-      raise IO::TimeoutError.new("Read timed out")
+      raise_read_timeout
     end
     unless last_read_sent_csot?
       # Finish a partial OP_MSG. Crystal 0 is now; LibC.read still runs.
