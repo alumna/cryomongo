@@ -2,37 +2,27 @@
 
 ## Unreleased
 
-Client-Side Field Level Encryption (CSFLE). Local KMS and MongoDB 8.0. Stays Unreleased on **0.17.5** until tagged.
+Client-Side Field Level Encryption (CSFLE) on Linux, for MongoDB 8.0. Stays Unreleased on **0.17.5** until tagged.
 
 ### Added
 - Explicit encryption (`Mongo::ClientEncryption`): vendored libmongocrypt **1.20.4**; `create_data_key`, `encrypt`, `decrypt`; key-vault helpers; `rewrap_many_data_key`; encrypted values are BSON binary `0x06`; `-Dwithout_libmongocrypt` skips the link
-- Auto-encryption (`Mongo::AutoEncryption`, FLE1 `schemaMap`): local KMS; crypt_shared for query analysis (`CRYPT_SHARED_LIB_PATH` / `extraOptions.cryptSharedLibPath`); key-vault commands bypass auto-encryption; `bypass_query_analysis`; mongocryptd is not spawned
-- Queryable Encryption (`encryptedFieldsMap`, MongoDB 8.0 equality): `create_encrypted_collection`; ESC / ECOC / `__safeContent__`; `compact_structured_encryption_data`; needs a replica set or sharded cluster; 8.0 range UTF included; prefix / suffix / substring and MongoDB 8.2+ stay out
-- Official CSFLE UTF that can run on MongoDB 8.0 + local KMS (explicit, `autoEncryptOpts`, named local KMS, key cache, QE equality / range). Cloud KMS and 8.2+ text stay out. Specs skip when libmongocrypt or crypt_shared is missing
+- Auto-encryption (`Mongo::AutoEncryption`, FLE1 `schemaMap`): local KMS; crypt_shared for query analysis; key-vault commands bypass auto-encryption; `bypass_query_analysis`; mongocryptd is not spawned
+- Queryable Encryption (`encryptedFieldsMap`, MongoDB 8.0 equality and range): `create_encrypted_collection`; ESC / ECOC / `__safeContent__`; `compact_structured_encryption_data`; needs a replica set or sharded cluster. Prefix / suffix / substring and MongoDB 8.2+ stay out
+- Official CSFLE UTF for MongoDB 8.0 and local KMS (explicit, auto-encryption, named local KMS, key cache, equality, range). Cloud KMS (AWS, Azure, GCP, KMIP) stays out
 
 ### Fixed
-- Do not call `mongocrypt_destroy` from GC finalize (double free during `GC_malloc`). Always `#close`
-- `Insert.with_ids` keeps BSON binary subtype `0x06` (writing `Bytes` used generic `0x00`)
-- UTF `createCollection` / `dropCollection` use `Database#create_collection` and `Collection#drop` so QE creates ESC / ECOC
-- Vendored macOS libmongocrypt also writes `libmongocrypt.0.dylib` (dyld runtime ID)
-- Receive `Message` / `OpMsg` / `OpReply` are classes. Copy the frame, then BufferPool checkin, then `BSON.view` of `OwnedReceive`. Walk `error?` through `pin.bytes`; `OwnedReceive#fetch` is NoInline, holds `self` across `[]?` as a statement (do not wrap the walk as a pin argument; a Slice of `@bytes` is not a root). BSON document is a class (bson.cr **0.9.3**). Do not clone every ok:1 hello. Do not `BSON.new(BSON)`
-- Load-balanced has no SDAM monitors after the first hello. Paused LB checkout marks the pool ready at once. UTF failCommand off goes to both mongos
-- UTF event-count failures also print `waited_ms` and `leftover_at_timeout_ms` for the CSOT read that raised (`none` when that read did not time out)
-- Darwin CSOT still stops at the deadline (no longer sleep, no shutdown). Bytes already in Crystal's socket buffer, or queued in the kernel (`FIONREAD`) after `read` returned empty, are returned with no extra wait. `ioctl` is variadic so arm64 Darwin passes the buffer pointer on the stack. A timeout records `maxTimeMS`, bytes read, `FIONREAD`, the ioctl errno, buffered bytes, wall time, and whether the write and the read used the same fd
-- Darwin CSOT raw reads poll with non-blocking `LibC.read` and a 10ms sleep. The clock decides expiry. Handshakes, streaming hellos, and non-CSOT reads stay on `wait_readable`. No shutdown. GitHub `5e6eb21` showed `wait_readable` returning 42–136ms after the deadline
-- Darwin CSOT socket wait uses 10ms slices (Linux 100ms) so kqueue does not fire early. leftover Instant is the wait: after write, leftover Instant expired → close + Timeout; else remaining leftover Instant (sliced). leftover Instant expired: one LibC.read, no wait_readable. leftover 0 at wrap raises with no last-read; leftover 0 still sends (`maxTimeMS` floor 1). leftover >0 at wrap last-reads 20ms Instant (kernel bytes after Instant 0). Do not last-read past leftover Instant (wrap+150ms). Darwin raw sockets use sliced `wait_readable` again (wake when bytes arrive). GitHub `c119912` / `8cb330d` slept in `LibC.read` and every macOS test paid ~0.4–1.5s (`37106011512`). `interrupt` sets a 1ms read timeout so a streaming hello notices cancel within one slice. A slice timeout at the deadline raises before taking kernel bytes. CSOT timeout sets `interrupt` with no shutdown so `close()` drops the pin. Do not SHUT to wake kqueue. `interrupt_and_wake` SHUT_RDWR is still client close / interrupt_in_use. Do not checkin an interrupted socket. `close()` killCursors uses a fresh leftover Instant on a usable connection. Load-balanced getMore network error MUST NOT killCursors; leftover Instant Timeout still does. Darwin non-CSOT (`socketTimeoutMS`) does not last-read. Handshake / command IO uses the same slices until leftover Instant or `connectTimeoutMS` (unset is 10s). Retry `Socket::Error` / `ETIMEDOUT` until leftover Instant; do not retry `ECONNRESET`
-- Find awaitData: one empty getMore, wait leftover Instant, then Timeout (same path on every OS). Change streams still loop. `get_more_deadline` unchanged
-- Tailable awaitData find and change-stream aggregate: original `timeoutMS` as `maxTimeMS`; leftover wraps the socket. `maxAwaitTimeMS` on getMore only
-- AwaitData getMore uses a refreshed `timeoutMS` for each `next()` (not leftover from find). Empty tailable getMore still expires that `next()` leftover
-- Concurrent insert shutdown still marks Unknown when a streaming hello publishes the same topologyVersion while the server is still Primary
-- `connectTimeoutMS=0` is `nil` into `TCPSocket` (Crystal `0` is immediate on Darwin kqueue)
-- GitHub macOS `tls_spec` uses Homebrew openssl@3 (macos-15 `pkg-config openssl` is 1.1)
-- UTF drops QE ESC / ECOC only when the collection has encryptedFields
+- Do not call `mongocrypt_destroy` from GC finalize. Always `#close`
+- `Insert.with_ids` keeps BSON binary subtype `0x06`
+- UTF `createCollection` / `dropCollection` use `Database#create_collection` and `Collection#drop`, so QE creates ESC / ECOC. Those extra collections are dropped only when the collection has `encryptedFields`
+- Receive `Message` / `OpMsg` / `OpReply` are classes. Copy the frame, then return it to the pool, then view it. `OwnedReceive#fetch` is NoInline and holds `self` across `[]?`. The BSON document is a class (bson.cr **0.9.3**)
+- Load-balanced has no SDAM monitors after the first hello. A getMore network error does not killCursors. A CSOT timeout still does
+- CSOT `timeoutMS` covers the whole operation. AwaitData getMore refreshes it for each `next()`. `maxAwaitTimeMS` is getMore only. `close()` uses a fresh `timeoutMS`
+- An insert shutdown still marks the server Unknown when a streaming hello repeats the same topologyVersion
 
 ### Changed
-- Default CSFLE link is vendored libmongocrypt **1.20.4** (`scripts/vendor-libmongocrypt.sh`). `USE_SYSTEM_LIBMONGOCRYPT=true` uses pkg-config (>= 1.20.0). GitHub does not install `libmongocrypt-dev`. Linux official tarball is nocrypto; the driver registers OpenSSL hooks
-- Linux only. Specs CI is the 24 Ubuntu cells. A Darwin compile raises. `hello` no longer falls back to `isMaster` when the server returns code 59 (that fallback was MongoDB before 4.4). Wire ceiling is **29** (MongoDB 9.0). The enforced floor stays **6** until the legacy SDAM fixtures move off wire 21
-- GitHub Specs: four topologies on Ubuntu 22.04 / 24.04 / 26.04 (x64 and arm64). Pin image labels. `fail-fast: false`. `timeout-minutes: 45`. `GLIBC_TUNABLES=glibc.pthread.rseq=1` on Linux Docker only. Ubuntu 26.04 installs Crystal from the official 1.21.x tarball. crypt_shared uses ubuntu2404 on 26.04. macOS and Windows are not targets
+- Linux only. A Darwin compile raises. macOS and Windows are not targets
+- `hello` does not fall back to `isMaster` on code 59. Wire ceiling is **29** (MongoDB 9.0). The floor stays **6** until the legacy SDAM fixtures move off wire 21
+- Specs CI is 24 Ubuntu cells: 22.04, 24.04, and 26.04, x64 and arm64, four topologies. Ubuntu 26.04 installs Crystal 1.21.x from the official tarball. crypt_shared on 26.04 uses the ubuntu2404 package. The default CSFLE link is vendored libmongocrypt **1.20.4**
 
 ## 0.17.5 - 2026-09-02
 
