@@ -44,6 +44,22 @@ Log.setup(:info)
 
 SYSTEM_DATABASES = {"admin", "local", "config"}
 
+# crypt_shared is mongo_crypt_v1.so (linux), .dylib (macos), or .dll (windows).
+# CI sets CRYPT_SHARED_LIB_PATH. Fallbacks are for a local tmp/ copy.
+def spec_crypt_shared_path : String?
+  if p = ENV["CRYPT_SHARED_LIB_PATH"]?
+    return p if File.file?(p)
+  end
+  root = File.expand_path("..", __DIR__)
+  {"mongo_crypt_v1.so", "mongo_crypt_v1.dylib", "mongo_crypt_v1.dll"}.each do |name|
+    path = File.join(root, "tmp", name)
+    return path if File.file?(path)
+  end
+  local = "/usr/local/lib/mongo_crypt_v1.so"
+  File.file?(local) ? local : nil
+end
+
+
 # mongodb://host:port plus options must use /? not ?. The driver accepts the
 # slash-less form, but Crystal's URI type would otherwise keep a trailing slash
 # in the last option if a caller reconstructs the string the wrong way.

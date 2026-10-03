@@ -1,4 +1,7 @@
-abstract struct Mongo::Messages::Part
+# Class so receive OpMsg / OpReply can be classes (Wave 52). Crystal cannot
+# have `class OpMsg < Part` while Part is a struct. A class field on a
+# struct OpMsg is not a Darwin GC root (Wave 47). Header stays a struct.
+abstract class Mongo::Messages::Part
   annotation Field; end
 
   def self.field_size(field)

@@ -15,6 +15,16 @@ describe Mongo::ClientEncryption do
   end
 
   if Mongo::ClientEncryption.lib_linked?
+    it "reports the linked libmongocrypt version" do
+      ver = Mongo::ClientEncryption.lib_version
+      ver.should be_a(String)
+      if v = ver
+        unless ENV["USE_SYSTEM_LIBMONGOCRYPT"]? == "true"
+          v.starts_with?("1.20.4").should be_true
+        end
+      end
+    end
+
     it "creates a local data key, encrypts a string, and decrypts it" do
       Mongo::SpecCluster.exclusive do
         client = Mongo::Client.new(mongodb_uri_with(ENV["MONGODB_URI"], "serverSelectionTimeoutMS=5000"))

@@ -1,6 +1,12 @@
 require "log"
 require "bson"
 
+# macOS is not a supported target. Darwin-only branches stay in the
+# source and are not maintained. Linux is the suite.
+{% if flag?(:darwin) %}
+  {% raise "cryomongo supports Linux only. macOS is not a supported target." %}
+{% end %}
+
 module Mongo
   VERSION = "0.17.5"
 

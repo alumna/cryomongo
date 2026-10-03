@@ -11,6 +11,7 @@ module Mongo::Commands::Insert
 
   # Generate `_id` on each document and put it first (CRUD prose: generated identifiers are the first field).
   # If `_id` is already present, leave the document as-is. BSON.new is a no-op for BSON.
+  # When rebuilding, keep binary subtype (encrypted `0x06`). `[]=` of Bytes is generic `0x00`.
   def with_ids(documents : Array) : Array(BSON)
     documents.map { |elt|
       src = BSON.new(elt)
@@ -20,9 +21,13 @@ module Mongo::Commands::Insert
         id = BSON::ObjectId.new
         BSON.build do |builder|
           builder["_id"] = id
-          src.each { |key, value, code|
+          # Keep binary subtype (encrypted 0x06, UUID 0x04). `[]=` of Bytes is generic 0x00.
+          src.each { |key, value, code, subtype|
             if value.is_a?(BSON) && code.array?
               builder.append_array(key, value)
+            elsif code.binary? && value.is_a?(Bytes)
+              st = subtype || BSON::Binary::SubType::Generic
+              builder[key] = BSON::Binary.new(st, value)
             else
               builder[key] = value
             end

@@ -29,6 +29,10 @@ class Mongo::Cursor
   @deadline : Mongo::Deadline? = nil
   # Fresh timeoutMS for one next() when timeoutMode is iteration (change-stream resume uses the same deadline).
   @iteration_deadline : Mongo::Deadline? = nil
+  # Load-balanced getMore network error on a dead pin. close() MUST NOT
+  # killCursors (Behaviour With Cursors). Leftover Instant Timeout is not
+  # this flag.
+  @omit_kill_cursors : Bool = false
 
   protected property server_description : SDAM::ServerDescription? = nil
   protected property session : Session::ClientSession?
@@ -121,12 +125,35 @@ class Mongo::Cursor
         # Only a closed cursor (id 0) means the iteration is over.
         return Iterator::Stop::INSTANCE if @cursor_id == 0
 
+        # Deadline at first byte: leftover 0 still sends getMore so
+        # commandStarted fires. AwaitReadIO raises on read when leftover
+        # was already 0 at wrap.
         fetch_more
 
         # Non-tailable: an empty getMore means the result is exhausted.
         # Tailable / change streams stay open and wait again.
         if !@tailable && batch_empty?
           return Iterator::Stop::INSTANCE
+        end
+
+        # Empty tailable getMore: expire this next() instead of looping
+        # forever. A getMore with no leftover timeoutMS never returns
+        # (ARM sharded hung). Do not start a new timeoutMS per getMore.
+        if @tailable && batch_empty?
+          check_iteration_expired!
+          # Find awaitData: one empty getMore ends this next(). Official
+          # refresh is find + one getMore (maxTimeMS 1). A second getMore
+          # is extra. Spec leftover Instant covers the whole next(): wait
+          # leftover, then Timeout. Do not count empty getMores (Linux 1 /
+          # Darwin 2 were spec forks). Change streams keep looping (hook
+          # is false) until leftover Instant expires.
+          if stop_after_empty_await_get_more?
+            if d = @iteration_deadline || @deadline
+              left = d.remaining
+              sleep(left) if left > Time::Span.zero
+            end
+            raise Mongo::Error::Timeout.new("Operation exceeded timeoutMS")
+          end
         end
       end
     ensure
@@ -164,17 +191,13 @@ class Mongo::Cursor
   # Close the cursor and frees underlying resources.
   # timeout_ms, if set, is the timeout for killCursors only. Otherwise killCursors
   # starts a fresh timeoutMS from the original find/aggregate.
+  # Leftover Instant expired on iterate closed the pin (Command Execution).
+  # close() still killCursors with a refreshed leftover Instant on a usable
+  # connection (often new). Load-balanced getMore network error: MUST NOT
+  # killCursors (dead pin). Non-network getMore and killCursors-itself still
+  # send killCursors.
   def close(*, timeout_ms : Int64? = nil)
-    conn = @pinned_connection
-    if conn && conn.socket.closed?
-      # Dead pin: return the socket. Load-balanced killCursors must stay on the
-      # same mongos, so do not open a new socket after a network error.
-      @pinned_connection = nil
-      @client.checkin_connection(conn)
-      if @client.options.load_balanced
-        @cursor_id = 0_i64
-      end
-    end
+    drop_dead_cursor_pin
     self.kill(timeout_ms: timeout_ms) unless exhausted?
   rescue e
     # Ignore - client might be dead
@@ -212,6 +235,10 @@ class Mongo::Cursor
   protected def kill(*, timeout_ms : Int64? = nil)
     return if @cursor_id == 0
     begin
+      if @omit_kill_cursors
+        return
+      end
+      drop_dead_cursor_pin
       deadline = unless timeout_ms.nil?
                    Mongo::Deadline.from_timeout_ms(timeout_ms)
                  else
@@ -244,19 +271,32 @@ class Mongo::Cursor
 
     batch_size = next_batch_size
 
-    reply = @client.command(
-      Commands::GetMore,
-      database: @database,
-      collection: @collection,
-      cursor_id: @cursor_id,
-      batch_size: batch_size,
-      max_time_ms: @await_time_ms,
-      comment: @comment,
-      server_description: @server_description,
-      session: @session,
-      connection: @pinned_connection,
-      deadline: get_more_deadline
-    )
+    reply = begin
+      @client.command(
+        Commands::GetMore,
+        database: @database,
+        collection: @collection,
+        cursor_id: @cursor_id,
+        batch_size: batch_size,
+        max_time_ms: @await_time_ms,
+        comment: @comment,
+        server_description: @server_description,
+        session: @session,
+        connection: @pinned_connection,
+        deadline: get_more_deadline
+      )
+    rescue error : Mongo::Error::Network
+      # closeConnection / reset: pin is dead. Timeout leftover Instant is
+      # Error::Timeout (still killCursors). keep_pin io_timeout leaves the
+      # socket open (still killCursors on that pin).
+      if @client.options.load_balanced
+        conn = @pinned_connection
+        if conn && (conn.socket.closed? || conn.interrupted?)
+          @omit_kill_cursors = true
+        end
+      end
+      raise error
+    end
 
     raise Mongo::Error.new("GetMore command failed to return a result") unless reply
 
@@ -276,24 +316,62 @@ class Mongo::Cursor
   # Change streams set @iteration_deadline first so this returns false.
   private def start_iteration_deadline : Bool
     return false unless @timeout_mode.iteration?
-    return false unless @timeout_ms
+    return false if @timeout_ms.nil?
     return false if @iteration_deadline
     @iteration_deadline = Mongo::Deadline.from_timeout_ms(@timeout_ms)
     true
   end
 
+  # timeoutMode iteration: each next/try_next gets a fresh timeoutMS.
+  # AwaitData getMore must use that, not leftover from find.
+  # After find (timeoutMS 250, failPoint 150) leftover is ~100ms. A blocked
+  # getMore then times out or returns empty and next() sends another getMore
+  # (official test: find + one getMore). If leftover is nil, wrap_command_io
+  # waits forever and the cell hangs. Do not start a new timeoutMS per
+  # getMore inside one next() — that never expires.
   private def get_more_deadline : Mongo::Deadline?
-    if @timeout_mode.iteration? && @timeout_ms
-      d = @iteration_deadline || Mongo::Deadline.from_timeout_ms(@timeout_ms)
-      @iteration_deadline = d
-      if @tailable && @await_time_ms
-        d
-      else
-        d.try(&.without_max_time)
+    if @timeout_mode.iteration?
+      ms = @timeout_ms
+      unless ms.nil?
+        d = @iteration_deadline
+        if d.nil?
+          d = Mongo::Deadline.from_timeout_ms(ms)
+          @iteration_deadline = d
+        end
+        if @tailable && @await_time_ms
+          return d
+        else
+          return d.try(&.without_max_time)
+        end
       end
-    else
-      @deadline
     end
+    @deadline
+  end
+
+  private def check_iteration_expired! : Nil
+    if d = @iteration_deadline || @deadline
+      d.check!
+    end
+  end
+
+  # Find awaitData only. ChangeStream::Cursor returns false (idle empty
+  # getMores must wait until leftover Instant expires).
+  # One empty getMore ends this next(); leftover Instant still covers
+  # the call. Same path on every OS. get_more_deadline is unchanged.
+  protected def stop_after_empty_await_get_more? : Bool
+    !@await_time_ms.nil?
+  end
+
+  # Leftover Instant expired / closer interrupt: discard this pin so
+  # killCursors does not use a shutdown socket. Pool release of a closed
+  # socket is reason "error".
+  private def drop_dead_cursor_pin : Nil
+    conn = @pinned_connection
+    return unless conn
+    return unless conn.socket.closed? || conn.interrupted?
+    @pinned_connection = nil
+    conn.close unless conn.socket.closed?
+    @client.checkin_connection(conn)
   end
 
   # close() always starts a fresh timeoutMS, even if cursor lifetime already expired.

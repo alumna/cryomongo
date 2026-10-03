@@ -7,6 +7,7 @@ require "./dispatcher"
 require "./matcher"
 require "./parse"
 require "./timing"
+require "./csfle"
 
 module Mongo::Unified
   class Skip < Exception
@@ -128,14 +129,27 @@ module Mongo::Unified
       # skips Unknown / paused pools, so leftover failCommand retried the next
       # UTF insert. Direct clients (long poll heartbeat, no URI userinfo) send mode=off
       # on every member, including 27017 when it is a secondary.
+      # Load-balanced: the shared client talks through HAProxy (one mongos).
+      # Leftover failCommand on the other mongos made every later command
+      # wait 30s. Send mode=off to both mongos on 27017 and 27016.
       ic = internal_client
       send_fail_point_off(ic, nil)
-      unless load_balanced_topology?
+      if load_balanced_topology?
+        load_balanced_mongos_addresses.each do |address|
+          fail_point_off_on_address(address)
+        end
+      else
         fail_point_member_addresses.each do |address|
           fail_point_off_on_address(address)
         end
       end
       @fail_point_active = false
+    end
+
+    # Direct mongos, not HAProxy (8000/8001) and not loadBalancerPort
+    # (27050/27051). Those ports need PROXY v2.
+    private def load_balanced_mongos_addresses : Array(String)
+      %w[127.0.0.1:27017 127.0.0.1:27016]
     end
 
     # Topology seeds plus hello.hosts so a member SDAM has not listed yet still
@@ -286,6 +300,7 @@ module Mongo::Unified
           # Needs two mongos serviceIds from one client. roundrobin + health-check
           # still sometimes sends both sockets to one mongos (got extra
           # connectionCreated after pool clear). Skip unless UTF_RUN_TWO_MONGOS=1.
+          # Wave 51: that extra Created is HAProxy, not Mongos Unknown-on-equal-TV.
           if test.description == "only connections for a specific serviceId are closed when pools are cleared" && ENV["UTF_RUN_TWO_MONGOS"]? != "1"
             skipped += 1
             Timing.line("TEST", file: @file_path, name: test.description, status: "skip", reason: "needs two serviceIds from HAProxy", duration_ms: Timing.elapsed_ms(test_started))
@@ -329,8 +344,12 @@ module Mongo::Unified
 
             # Drop leftover collections on the internal client. The test client
             # must keep an empty pool (CMAP) and an unused session pool (txnNumber).
+            # Pass encryptedFields when this file's initialData has them so QE
+            # ESC / ECOC go away. Ordinary files pass nil (no enxcol_ drops).
             @registry.collections.each_value do |coll|
-              internal_client[coll.database.name].command(Mongo::Commands::Drop, name: coll.name) rescue nil
+              db_name = coll.database.name
+              coll_name = coll.name.to_s
+              drop_utf_collection(internal_client[db_name], coll_name, utf_encrypted_fields_for(db_name, coll_name))
             end
 
             setup_initial_data(@test_file.initialData)
@@ -356,7 +375,11 @@ module Mongo::Unified
             else
               test_ms = Timing.elapsed_ms(test_started)
               Timing.record_test(@file_path, test.description, test_ms)
-              Timing.line("TEST", file: @file_path, name: test.description, status: "error", duration_ms: test_ms)
+              # Job cancel drops buffered crystal spec stdout. The timing
+              # artifact is the only GitHub record of why a UTF case failed.
+              detail = e.message.to_s.gsub('\n', " ")
+              detail = detail[0, 500] if detail.bytesize > 500
+              Timing.line("TEST", file: @file_path, name: test.description, status: "error", duration_ms: test_ms, error: detail)
               file_ms = Timing.elapsed_ms(file_started)
               Timing.record_file(@file_path, file_ms)
               Timing.line("FILE", file: @file_path, status: "error", executed: executed, skipped: skipped, duration_ms: file_ms)
@@ -365,6 +388,8 @@ module Mongo::Unified
           ensure
             disable_fail_points
             kill_all_sessions
+            # CSFLE only: leftover enxcol_.* on mongos must not follow the next file.
+            drop_csfle_utf_leftovers
             @registry.close_all
             @registry = Registry.new
           end
@@ -560,6 +585,19 @@ module Mongo::Unified
           end
         end
 
+        if csfle_req = req.csfle
+          if csfle_req.as_bool? == false
+            ok = false if Csfle.supported?
+          else
+            ok = false unless Csfle.supported?
+            if h = csfle_req.as_h?
+              if min = h["minLibmongocryptVersion"]?.try(&.as_s?)
+                ok = false unless Csfle.libmongocrypt_at_least?(min)
+              end
+            end
+          end
+        end
+
         ok
       end
     end
@@ -580,6 +618,65 @@ module Mongo::Unified
           entity.timeout_ms = ms if entity.responds_to?(:timeout_ms=)
         end
       end
+    end
+
+    # UTF autoEncryptOpts → Mongo::AutoEncryption. Local KMS only. Inject crypt_shared.
+    private def parse_utf_auto_encryption(opts : JSON::Any) : Mongo::AutoEncryption
+      unless Csfle.supported?
+        raise Skip.new("CSFLE needs libmongocrypt and crypt_shared")
+      end
+      path = Csfle.crypt_shared_path
+      unless path
+        raise Skip.new("CSFLE needs crypt_shared (CRYPT_SHARED_LIB_PATH)")
+      end
+      kms_json = Csfle.local_kms_providers(opts["kmsProviders"])
+      extra_h = opts["extraOptions"]?.try(&.as_h).try(&.dup) || {} of String => JSON::Any
+      bypass_qa = opts["bypassQueryAnalysis"]?.try(&.as_bool) || false
+      unless extra_h.has_key?("cryptSharedLibPath")
+        unless bypass_qa
+          extra_h["cryptSharedLibPath"] = JSON::Any.new(path)
+          extra_h["cryptSharedLibRequired"] = JSON::Any.new(true)
+        end
+      end
+      kv_client_id = opts["keyVaultClient"]?.try(&.as_s?)
+      kv_client = if id = kv_client_id
+                    found = @registry.clients[id]?
+                    raise Skip.new("keyVaultClient #{id} not found") unless found
+                    found
+                  end
+      Mongo::AutoEncryption.new(
+        key_vault_namespace: opts["keyVaultNamespace"].as_s,
+        kms_providers: BSON.from_json(kms_json.to_json),
+        schema_map: opts["schemaMap"]?.try { |v| BSON.from_json(v.to_json) },
+        encrypted_fields_map: opts["encryptedFieldsMap"]?.try { |v| BSON.from_json(v.to_json) },
+        extra_options: extra_h.empty? ? nil : BSON.from_json(JSON::Any.new(extra_h).to_json),
+        key_vault_client: kv_client,
+        bypass_auto_encryption: opts["bypassAutoEncryption"]?.try(&.as_bool) || false,
+        bypass_query_analysis: bypass_qa,
+        key_expiration_ms: Csfle.json_i64(opts["keyExpirationMS"]?),
+      )
+    end
+
+    private def create_utf_client_encryption(req : EntityRequest) : Mongo::ClientEncryption
+      unless Csfle.supported?
+        raise Skip.new("CSFLE needs libmongocrypt and crypt_shared")
+      end
+      opts = req.clientEncryptionOpts
+      unless opts
+        raise Skip.new("missing clientEncryptionOpts")
+      end
+      kv_client_id = opts["keyVaultClient"].as_s
+      kv_client = @registry.clients[kv_client_id]?
+      unless kv_client
+        raise "Parent client '#{kv_client_id}' not found for clientEncryption"
+      end
+      kms = BSON.from_json(Csfle.local_kms_providers(opts["kmsProviders"]).to_json)
+      Mongo::ClientEncryption.new(
+        kv_client,
+        key_vault_namespace: opts["keyVaultNamespace"].as_s,
+        kms_providers: kms,
+        key_expiration_ms: Csfle.json_i64(opts["keyExpirationMS"]?),
+      )
     end
 
     def create_entities(entities : Array(Hash(String, EntityRequest))?)
@@ -621,7 +718,8 @@ module Mongo::Unified
               )
             end
 
-            client = Mongo::Client.new(uri, options: options, start_monitoring: false)
+            auto_enc = req.autoEncryptOpts.try { |ae| parse_utf_auto_encryption(ae) }
+            client = Mongo::Client.new(uri, options: options, start_monitoring: false, auto_encryption: auto_enc)
             @registry.clients[client_id] = client
             # Local arrays so a closed client's late callback cannot append to
             # the next test's registry (same client id "client", @registry reassigned).
@@ -828,6 +926,9 @@ module Mongo::Unified
           when "thread"
             thread_id = req.thread.try(&.id) || req.id || raise "Missing thread id"
             @registry.threads[thread_id] = Channel(Exception?).new
+          when "clientEncryption"
+            ce_id = req.id || raise "Missing clientEncryption id"
+            @registry.client_encryptions[ce_id] = create_utf_client_encryption(req)
           end
         end
       end
@@ -887,26 +988,123 @@ module Mongo::Unified
       initial_data.each do |data|
         db = client[data.databaseName]
         coll = db[data.collectionName]
+        encrypted_fields = utf_create_encrypted_fields(data.createOptions)
 
-        db.command(Mongo::Commands::Drop, name: data.collectionName, write_concern: majority) rescue nil
-        if co = data.createOptions.try(&.as_h?)
+        drop_utf_collection(db, data.collectionName, encrypted_fields)
+
+        if ef = encrypted_fields
+          db.create_collection(data.collectionName, encrypted_fields: ef)
+        elsif co = data.createOptions.try(&.as_h?)
           capped = co["capped"]?.try(&.as_bool)
           size = co["size"]?.try { |s| s.as_i? || s.as_i64?.try(&.to_i32) }
           max = co["max"]?.try { |s| s.as_i? || s.as_i64?.try(&.to_i32) }
+          validator = co["validator"]?.try { |v| BSON.from_json(v.to_json) }
           db.command(Mongo::Commands::Create, name: data.collectionName, write_concern: majority, options: {
-            capped: capped,
-            size:   size,
-            max:    max,
+            capped:    capped,
+            size:      size,
+            max:       max,
+            validator: validator,
           }) rescue nil
         else
           db.command(Mongo::Commands::Create, name: data.collectionName, write_concern: majority) rescue nil
         end
 
         unless data.documents.empty?
-          docs = data.documents.map { |d| BSON.from_json(d.to_json) }
-          coll.insert_many(docs, write_concern: majority)
+          docs = data.documents.map { |d| Parse.json_to_bson(d) }
+          # QE collections reject ciphertext that is not from auto-encrypt
+          # (no `__safeContent__`). Official UTF uses bypass on fixtures.
+          coll.insert_many(docs, write_concern: majority, bypass_document_validation: true)
         end
       end
+    end
+
+    private def utf_create_encrypted_fields(create_options : JSON::Any?) : BSON?
+      return nil unless create_options
+      if h = create_options.as_h?
+        if ef = h["encryptedFields"]?
+          return BSON.from_json(ef.to_json)
+        end
+      end
+      nil
+    end
+
+    # Drop the data collection. Drop Queryable Encryption ESC / ECOC only when
+    # this collection has encryptedFields. Blind enxcol_.* drops on every UTF
+    # file added majority round-trips on mongos / load-balanced (D50: PR 37
+    # old-file inflation; backpressure-retry-loop 18s → 58s on 24.04 x64 LB).
+    private def drop_utf_collection(db : Mongo::Database, name : String, encrypted_fields : BSON?) : Nil
+      majority = Mongo::WriteConcern.new(w: "majority")
+      db.command(Mongo::Commands::Drop, name: name, write_concern: majority) rescue nil
+      if ef = encrypted_fields
+        drop_qe_state_collections(db, name, ef, majority)
+      end
+    end
+
+    private def drop_qe_state_collections(db : Mongo::Database, name : String, encrypted_fields : BSON, majority : Mongo::WriteConcern) : Nil
+      esc = "enxcol_.#{name}.esc"
+      ecoc = "enxcol_.#{name}.ecoc"
+      if s = string_bson_field(encrypted_fields, "escCollection")
+        esc = s
+      end
+      if s = string_bson_field(encrypted_fields, "ecocCollection")
+        ecoc = s
+      end
+      db.command(Mongo::Commands::Drop, name: esc, write_concern: majority) rescue nil
+      db.command(Mongo::Commands::Drop, name: ecoc, write_concern: majority) rescue nil
+    end
+
+    private def utf_encrypted_fields_for(db_name : String, coll_name : String) : BSON?
+      @test_file.initialData.try &.each do |data|
+        if data.databaseName == db_name && data.collectionName == coll_name
+          return utf_create_encrypted_fields(data.createOptions)
+        end
+      end
+      nil
+    end
+
+    private def csfle_utf_file? : Bool
+      @file_path.includes?("/client-side-encryption/")
+    end
+
+    # After CSFLE UTF, leftover ESC / ECOC on mongos can slow later files.
+    # Ordinary UTF must not list or drop enxcol_.* (D50).
+    private def drop_csfle_utf_leftovers : Nil
+      return unless csfle_utf_file?
+      majority = Mongo::WriteConcern.new(w: "majority")
+      ic = internal_client
+      utf_touched_database_names.each do |db_name|
+        db = ic[db_name]
+        begin
+          db.list_collections(name_only: true).each do |info|
+            raw = info["name"]?
+            next unless raw
+            n = raw.as?(String)
+            next unless n
+            next unless n.starts_with?("enxcol_.")
+            db.command(Mongo::Commands::Drop, name: n, write_concern: majority) rescue nil
+          end
+        rescue
+        end
+      end
+    end
+
+    private def utf_touched_database_names : Set(String)
+      names = Set(String).new
+      @registry.collections.each_value { |c| names << c.database.name }
+      @registry.databases.each_value { |d| names << d.name }
+      @test_file.initialData.try &.each { |data| names << data.databaseName }
+      names
+    end
+
+    private def string_bson_field(doc : BSON, name : String) : String?
+      doc.each do |key, value, _code|
+        next unless key == name
+        if s = value.as?(String)
+          return s unless s.empty?
+        end
+        return nil
+      end
+      nil
     end
 
     private def verify_outcome(outcome : Array(CollectionData)?)
@@ -921,6 +1119,26 @@ module Mongo::Unified
           raise Exception.new("TEST_FAILED: outcome mismatch for #{data.databaseName}.#{data.collectionName}: expected #{data.documents.inspect}, got #{actual_docs.map(&.to_canonical_extjson)}")
         end
       end
+    end
+
+    # maxTimeMS on the last commandStarted in this failure. "none" when the
+    # spec says that command must not carry the field.
+    private def sent_max_time_ms(events) : String
+      found = "none"
+      events.each do |event|
+        if event.is_a?(Mongo::Monitoring::Commands::CommandStartedEvent)
+          value = event.command["maxTimeMS"]?
+          found = case value
+                  when Int
+                    value.to_i64.to_s
+                  when Nil
+                    "none"
+                  else
+                    value.to_s
+                  end
+        end
+      end
+      found
     end
 
     private def verify_events(expect_events : JSON::Any?)
@@ -972,7 +1190,15 @@ module Mongo::Unified
         ignore = hash["ignoreExtraEvents"]?.try(&.as_bool) || false
         unless ignore || actual_events.size == expected_events.size
           names = actual_events.map(&.command_name)
-          raise Exception.new("TEST_FAILED: expected #{expected_events.size} events for #{client_id}, got #{actual_events.size}: #{names}")
+          wrap_ms = Mongo::Connection::AwaitReadIO.recorded_leftover_at_wrap.total_milliseconds
+          after_ms = Mongo::Connection::AwaitReadIO.recorded_leftover_after_write.total_milliseconds
+          waited = Mongo::Connection::AwaitReadIO.recorded_waited
+          left_at_timeout = Mongo::Connection::AwaitReadIO.recorded_leftover_at_timeout
+          waited_ms = waited ? waited.total_milliseconds : "none"
+          timeout_ms = left_at_timeout ? left_at_timeout.total_milliseconds : "none"
+          probe = Mongo::Connection::AwaitReadIO.csot_timeout_detail
+          sent_max = sent_max_time_ms(actual_events)
+          raise Exception.new("TEST_FAILED: expected #{expected_events.size} events for #{client_id}, got #{actual_events.size}: #{names} leftover_at_wrap_ms=#{wrap_ms} leftover_after_write_ms=#{after_ms} waited_ms=#{waited_ms} leftover_at_timeout_ms=#{timeout_ms} sent_max_time_ms=#{sent_max} #{probe}")
         end
 
         expected_events.each_with_index do |expected, index|

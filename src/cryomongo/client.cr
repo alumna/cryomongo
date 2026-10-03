@@ -1,6 +1,7 @@
 require "socket"
 require "wait_group"
 require "sync/exclusive"
+require "./auto_encryption"
 require "./database"
 require "./messages/**"
 require "./commands/**"
@@ -25,10 +26,17 @@ class Mongo::Client
 
   alias NetworkError = IO::Error | Socket::Error
 
-  # The mininum wire protocol version supported by this driver.
+  # Product target is MongoDB 8.0 and newer (wire 25 through 29).
+  # The enforced floor stays 6 until the legacy SDAM / max-staleness
+  # fixtures, which still use maxWireVersion 21 as a stand-in for a
+  # current server, are updated. Raising this constant alone marks those
+  # descriptions incompatible and fails the Linux legacy suites.
+  # The minimum wire protocol version supported by this driver.
   MIN_WIRE_VERSION = 6
   # The maximum wire protocol version supported by this driver.
-  MAX_WIRE_VERSION = 25
+  # 8.0 is wire 25. 9.0 is wire 29. Keep the ceiling at 29 so a newer
+  # server whose minWireVersion is still <= 29 is not rejected.
+  MAX_WIRE_VERSION = 29
 
   # :nodoc:
   getter! topology : SDAM::TopologyDescription
@@ -75,6 +83,8 @@ class Mongo::Client
   @pending_setup_lock = Sync::Mutex.new
   @fiber_sessions = {} of Fiber => Session::ClientSession
   @fiber_sessions_lock = Sync::Mutex.new
+  # Nil when auto-encryption is off. Command path is one pointer check and no extra alloc.
+  @auto_encryption : Mongo::AutoEncryption::Engine?
 
   # The default auth database is optionally provided as a part of the connection string uri.
   #
@@ -88,12 +98,13 @@ class Mongo::Client
   #
   # client = Mongo::Client.new "mongodb://127.0.0.1/?appname=client-example"
   # ```
-  def initialize(connection_string : String = "mongodb://localhost:27017", options : Mongo::Options = Mongo::Options.new)
-    initialize(connection_string: connection_string, options: options, start_monitoring: true)
+  def initialize(connection_string : String = "mongodb://localhost:27017", options : Mongo::Options = Mongo::Options.new, auto_encryption : Mongo::AutoEncryption? = nil)
+    initialize(connection_string: connection_string, options: options, start_monitoring: true, auto_encryption: auto_encryption)
   end
 
   # :nodoc:
-  def initialize(connection_string : String = "mongodb://localhost:27017", *, options : Mongo::Options = Mongo::Options.new, start_monitoring = true)
+  def initialize(connection_string : String = "mongodb://localhost:27017", *, options : Mongo::Options = Mongo::Options.new, start_monitoring = true, auto_encryption : Mongo::AutoEncryption? = nil)
+    @auto_encryption = nil
     seeds, @options, @credentials, @default_auth_db = Mongo::URI.parse(connection_string, options)
     @monitoring_enabled = start_monitoring
     @defer_sdam_events = !start_monitoring
@@ -175,11 +186,24 @@ class Mongo::Client
     # Later topology events must reach subscribers (legacy SDAM JSON). Constructor
     # events stay in @pending_sdam_events until start_sdam_monitoring.
     @defer_sdam_events = false
+
+    if ae = auto_encryption
+      begin
+        @auto_encryption = Mongo::AutoEncryption.open_engine(self, ae)
+      rescue ex
+        close
+        raise ex
+      end
+    end
   end
 
   # Frees all the resources associated with a client.
   def close
     @closing.set(true)
+    if auto = @auto_encryption
+      @auto_encryption = nil
+      auto.close
+    end
     @srv_poller.try(&.close)
 
     # End sessions while pools are still open. EndSessions needs a socket.
@@ -522,11 +546,18 @@ class Mongo::Client
                  Time.instant + @options.server_selection_timeout
                end
     last_network : Mongo::Error::Network? = nil
+    tried_idle = false
     loop do
       leftover = deadline - Time.instant
       if leftover <= Time::Span.zero
-        fail_checkout(server_description.address, "connectionError", started_at, last_network)
-        raise last_network || Mongo::Error::Connection.new("Timed out while checking out a connection from connection pool")
+        # Deadline at first byte: leftover 0 still takes one idle socket
+        # so the command can be sent. Do not wait on the pool.
+        unless tried_idle
+          tried_idle = true
+        else
+          fail_checkout(server_description.address, "connectionError", started_at, last_network)
+          raise last_network || Mongo::Error::Connection.new("Timed out while checking out a connection from connection pool")
+        end
       end
       begin
         conn = checkout_and_emit_discards(pool, server_description, wait)
@@ -547,6 +578,17 @@ class Mongo::Client
         if leftover_wait <= Time::Span.zero
           fail_checkout(server_description.address, "connectionError", started_at, error)
           raise error
+        end
+        # Load-balanced has no monitors. A paused pool would wait out
+        # serverSelectionTimeoutMS (30s) on every later command.
+        if @options.load_balanced
+          live = topology.servers.find { |s| s.address == server_description.address } || server_description
+          ready_pool(live)
+          if pool.paused?
+            fail_checkout(server_description.address, "connectionError", started_at, error)
+            raise error
+          end
+          next
         end
         # Single can select Unknown at once, so selection does not scan.
         # Wake the monitor or minPoolSize-error waits out heartbeatFrequencyMS.
@@ -845,11 +887,18 @@ class Mongo::Client
     provided : Mongo::Connection?,
     deadline : Mongo::Deadline?,
   ) : {Mongo::Connection, Bool}
-    deadline.try(&.check!)
+    # Deadline at first byte: leftover 0 still checkouts so the command
+    # can be sent. AwaitReadIO raises on read when leftover was already 0
+    # at wrap. Do not apply a 0 socket wait (Crystal 0 is now on Darwin).
     timeout = if d = deadline
-                d.infinite? ? @options.socket_timeout : d.remaining
+                if d.infinite?
+                  Mongo::Connection.uri_timeout(@options.socket_timeout)
+                else
+                  left = d.remaining
+                  left <= Time::Span.zero ? nil : left
+                end
               else
-                @options.socket_timeout
+                Mongo::Connection.uri_timeout(@options.socket_timeout)
               end
     if provided
       provided.apply_timeout(timeout)
@@ -999,6 +1048,12 @@ class Mongo::Client
     else
       # A notification is already waiting for server selection.
     end
+
+    # Load-balanced has no monitoring sockets. The constructor skips
+    # add_monitor. A later hello used to call this and start one anyway.
+    # That monitor's hello error paused the pool; checkout then waited
+    # 30s (GitHub LB 45 min cancel).
+    return if @options.load_balanced
 
     @topology_lock.synchronize do
       self.topology.servers.each do |server|

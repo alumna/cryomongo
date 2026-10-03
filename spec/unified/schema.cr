@@ -11,6 +11,8 @@ module Mongo::Unified
     property authMechanism : String?
     property serverless : String?
     property serverParameters : JSON::Any?
+    # Bool or `{ minLibmongocryptVersion: "..." }`. See unified-test-format `csfle`.
+    property csfle : JSON::Any?
   end
 
   struct CollectionData
@@ -39,6 +41,8 @@ module Mongo::Unified
     # CSOT: wait until minPoolSize sockets exist, up to this many milliseconds.
     property awaitMinPoolSizeMS : Int32?
     property observeLogMessages : Hash(String, String)?
+    # CSFLE: AutoEncryptionOpts on a client entity.
+    property autoEncryptOpts : JSON::Any?
 
     property client : String?
     property databaseName : String?
@@ -52,6 +56,8 @@ module Mongo::Unified
     property sessionOptions : JSON::Any?
 
     property thread : ThreadRequest?
+    # CSFLE: ClientEncryptionOpts on a clientEncryption entity.
+    property clientEncryptionOpts : JSON::Any?
   end
 
   struct Operation

@@ -2,26 +2,27 @@
 
 ## Unreleased
 
+Client-Side Field Level Encryption (CSFLE) on Linux, for MongoDB 8.0. Stays Unreleased on **0.17.5** until tagged.
+
 ### Added
-- Explicit client-side encryption (`Mongo::ClientEncryption`), local KMS only
-  - System `libmongocrypt` bindings (`pkg-config`; link `-lmongocrypt` only)
-  - `create_data_key`, `encrypt`, `decrypt`
-  - Encrypted values are BSON binary subtype `0x06`
-  - Compile `-Dwithout_libmongocrypt` skips the link; the type then raises
-  - Specs skip the live encrypt path when the library is missing
-  - GitHub CI installs `libmongocrypt-dev` so that spec runs
+- Explicit encryption (`Mongo::ClientEncryption`): vendored libmongocrypt **1.20.4**; `create_data_key`, `encrypt`, `decrypt`; key-vault helpers; `rewrap_many_data_key`; encrypted values are BSON binary `0x06`; `-Dwithout_libmongocrypt` skips the link
+- Auto-encryption (`Mongo::AutoEncryption`, FLE1 `schemaMap`): local KMS; crypt_shared for query analysis; key-vault commands bypass auto-encryption; `bypass_query_analysis`; mongocryptd is not spawned
+- Queryable Encryption (`encryptedFieldsMap`, MongoDB 8.0 equality and range): `create_encrypted_collection`; ESC / ECOC / `__safeContent__`; `compact_structured_encryption_data`; needs a replica set or sharded cluster. Prefix / suffix / substring and MongoDB 8.2+ stay out
+- Official CSFLE UTF for MongoDB 8.0 and local KMS (explicit, auto-encryption, named local KMS, key cache, equality, range). Cloud KMS (AWS, Azure, GCP, KMIP) stays out
 
 ### Fixed
-- Do not call `mongocrypt_destroy` from `ClientEncryption` GC finalize
-  - Finalize runs during `GC_malloc`; libmongocrypt uses libc free
-  - GitHub four-topology CI crashed (double free / SIGSEGV)
+- Do not call `mongocrypt_destroy` from GC finalize. Always `#close`
+- `Insert.with_ids` keeps BSON binary subtype `0x06`
+- UTF `createCollection` / `dropCollection` use `Database#create_collection` and `Collection#drop`, so QE creates ESC / ECOC. Those extra collections are dropped only when the collection has `encryptedFields`
+- Receive `Message` / `OpMsg` / `OpReply` are classes. Copy the frame, then return it to the pool, then view it. `OwnedReceive#fetch` is NoInline and holds `self` across `[]?`. The BSON document is a class (bson.cr **0.9.3**)
+- Load-balanced has no SDAM monitors after the first hello. A getMore network error does not killCursors. A CSOT timeout still does
+- CSOT `timeoutMS` covers the whole operation. AwaitData getMore refreshes it for each `next()`. `maxAwaitTimeMS` is getMore only. `close()` uses a fresh `timeoutMS`
+- An insert shutdown still marks the server Unknown when a streaming hello repeats the same topologyVersion
 
 ### Changed
-- **docs:** Phase 4 (CSFLE) is Waves 21–25.
-  Wave 21 is bindings plus explicit local KMS.
-  Auto-encryption is Wave 22.
-  Adapter CI four-topology matrix is Wave 20.
-  Phase 3.14 (performance) is later and is not in those waves.
+- Linux only. A Darwin compile raises. macOS and Windows are not targets
+- `hello` does not fall back to `isMaster` on code 59. Wire ceiling is **29** (MongoDB 9.0). The floor stays **6** until the legacy SDAM fixtures move off wire 21
+- Specs CI is 24 Ubuntu cells: 22.04, 24.04, and 26.04, x64 and arm64, four topologies. Ubuntu 26.04 installs Crystal 1.21.x from the official tarball. crypt_shared on 26.04 uses the ubuntu2404 package. The default CSFLE link is vendored libmongocrypt **1.20.4**
 
 ## 0.17.5 - 2026-09-02
 

@@ -120,6 +120,16 @@ module Mongo::Unified::Dispatcher
                when "close"                                    then execute_close(args, target)
                when "assertNumberConnectionsCheckedOut"        then execute_assert_number_connections_checked_out(args, registry)
                when "appendMetadata"                           then execute_append_metadata(args, target)
+               when "encrypt"                                  then execute_encrypt(args, target)
+               when "decrypt"                                  then execute_decrypt(args, target)
+               when "createDataKey"                            then execute_create_data_key(args, target)
+               when "rewrapManyDataKey"                        then execute_rewrap_many_data_key(args, target)
+               when "getKey"                                   then execute_get_key(args, target)
+               when "getKeys"                                  then execute_get_keys(target)
+               when "deleteKey"                                then execute_delete_key(args, target)
+               when "addKeyAltName"                            then execute_add_key_alt_name(args, target)
+               when "removeKeyAltName"                         then execute_remove_key_alt_name(args, target)
+               when "getKeyByAltName"                          then execute_get_key_by_alt_name(args, target)
                else
                  raise Exception.new("SKIP_TEST")
                end

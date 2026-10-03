@@ -1,3 +1,5 @@
+require "./topology_version"
+
 class Mongo::SDAM::TopologyDescription
   enum TopologyType
     Single
@@ -157,26 +159,14 @@ class Mongo::SDAM::TopologyDescription
 
   # :nodoc:
   def is_newer_or_equal_topology_version?(current_tv : BSON?, new_tv : BSON?) : Bool
-    return true if current_tv.nil? || new_tv.nil?
-    pid_current = current_tv["processId"]?
-    pid_new = new_tv["processId"]?
-    return true if pid_current != pid_new
-
-    counter_current = current_tv["counter"]?.try(&.as(Int64)) || 0_i64
-    counter_new = new_tv["counter"]?.try(&.as(Int64)) || 0_i64
-    counter_new >= counter_current
+    TopologyVersion.compare(current_tv, new_tv) >= 0
   end
 
+  # Legacy JSON runner: equal counter is stale (spec). Live concurrent
+  # shutdown uses TopologyVersion.application_error_stale? instead.
   # :nodoc:
   def is_stale_error_topology_version?(current_tv : BSON?, error_tv : BSON?) : Bool
-    return false if current_tv.nil? || error_tv.nil?
-    pid_current = current_tv["processId"]?
-    pid_err = error_tv["processId"]?
-    return false if pid_current != pid_err
-
-    counter_current = current_tv["counter"]?.try(&.as(Int64)) || 0_i64
-    counter_err = error_tv["counter"]?.try(&.as(Int64)) || 0_i64
-    counter_err <= counter_current
+    TopologyVersion.compare(current_tv, error_tv) <= 0
   end
 
   def update(old_description : ServerDescription, new_description : ServerDescription)
@@ -193,8 +183,11 @@ class Mongo::SDAM::TopologyDescription
   end
 
   # Application error: ignore a stale pool generation and a stale
-  # topologyVersion, then replace the description. Yields before unlock so the
-  # caller can clear the pool in the same critical section (SDAM spec).
+  # topologyVersion, then replace the description. Equal TV still marks
+  # Unknown while the type is Primary (failCommand shutdown vs streaming
+  # hello). Mongos / load-balanced stay spec-stale on equal TV. Yields
+  # before unlock so the caller can clear the pool in the same critical
+  # section (SDAM spec).
   def apply_application_error(
     old_description : ServerDescription,
     new_description : ServerDescription,
@@ -214,7 +207,7 @@ class Mongo::SDAM::TopologyDescription
         unless generation_stale
           current = @servers.find { |s| s.address == old_description.address }
           if current
-            unless is_stale_error_topology_version?(current.topology_version, new_description.topology_version)
+            unless TopologyVersion.application_error_stale?(current, new_description.topology_version)
               did_apply, ready_desc = apply_description(old_description, new_description)
               if did_apply
                 yield

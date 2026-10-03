@@ -243,6 +243,9 @@ module Mongo::Unified::Matcher
       JSON::Any.new(value)
     when Slice(UInt8)
       JSON::Any.new(value.hexstring)
+    when BSON::Binary
+      wrap = BSON.build { |bson| bson["v"] = value }
+      JSON.parse(wrap.to_canonical_extjson)["v"]
     when BSON
       JSON.parse(value.to_canonical_extjson)
     when BSON::Value
