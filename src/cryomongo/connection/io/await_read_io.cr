@@ -66,6 +66,11 @@
 # or still queued in the kernel (`FIONREAD`) when `read` returned
 # `EAGAIN`, are returned with no extra wait. A timeout records
 # `maxTimeMS`, bytes read, `FIONREAD`, buffered bytes, and wall time.
+# GitHub `d5a7977` / `37136012191`: a fixed 3-argument `ioctl` is wrong
+# on arm64 Darwin (the third argument is variadic, passed on the stack).
+# `fionread=0` was the pre-zeroed local, and the four replicaset and
+# sharded jobs then died with SIGTRAP. The call is variadic now. A
+# failed ioctl records `fionread_errno`. Do not sleep longer.
 #
 # leftover 0 at wrap (leftover 0 still send / Darwin non-CSOT / handshake):
 # raise at once. Do not last-read with wait 0. Crystal 0 is now on Darwin,
@@ -104,14 +109,17 @@ class Mongo::Connection::AwaitReadIO < IO
   # leftover_at_timeout is deadline minus now at the raise (negative if late).
   # wall_waited is Time.utc over that same span (server blockTimeMS is wall
   # time). max_time_ms is the value appended to the command, or nil when
-  # the spec says not to send it. csot_bytes / fionread / buffered / same_fd
-  # are set only by the Darwin CSOT poll.
+  # the spec says not to send it. csot_bytes / fionread / fionread_errno /
+  # buffered / same_fd are set only by the Darwin CSOT poll.
+  # fionread_errno is 0 when ioctl succeeded, the libc errno when it
+  # returned -1, and nil when this read never called ioctl.
   class_property recorded_waited : Time::Span? = nil
   class_property recorded_leftover_at_timeout : Time::Span? = nil
   class_property recorded_wall_waited : Time::Span? = nil
   class_property recorded_max_time_ms : Int64? = nil
   class_property recorded_csot_bytes : Int64? = nil
   class_property recorded_fionread : Int32? = nil
+  class_property recorded_fionread_errno : Int32? = nil
   class_property recorded_buffered : Int32? = nil
   class_property recorded_same_fd : Bool? = nil
 
@@ -122,6 +130,7 @@ class Mongo::Connection::AwaitReadIO < IO
     self.recorded_max_time_ms = nil
     self.recorded_csot_bytes = nil
     self.recorded_fionread = nil
+    self.recorded_fionread_errno = nil
     self.recorded_buffered = nil
     self.recorded_same_fd = nil
   end
@@ -152,6 +161,11 @@ class Mongo::Connection::AwaitReadIO < IO
       parts << "fionread=#{queued}"
     else
       parts << "fionread=none"
+    end
+    if errno = recorded_fionread_errno
+      parts << "fionread_errno=#{errno}"
+    else
+      parts << "fionread_errno=none"
     end
     if buffered = recorded_buffered
       parts << "buffered=#{buffered}"
@@ -405,15 +419,8 @@ class Mongo::Connection::AwaitReadIO < IO
   # FIONREAD > 0 means the kernel has bytes this poll's read missed.
   # One more read, then recv. No sleep.
   private def take_kernel_if_pending(slice : Bytes) : Int32?
-    pending = uninitialized LibC::Int
-    pending = 0
-    ret = MongoCsotProbe.ioctl(@raw.fd, 0x4004667f_u64, pointerof(pending))
-    if ret == -1
-      self.class.recorded_fionread = nil
-      return nil
-    end
-    self.class.recorded_fionread = pending.to_i32
-    return nil if pending <= 0
+    queued = kernel_queued
+    return nil if queued.nil? || queued <= 0
     n = read_raw(slice)
     return n if n > 0
     # MSG_DONTWAIT so this cannot block if the fd is not O_NONBLOCK.
@@ -423,10 +430,27 @@ class Mongo::Connection::AwaitReadIO < IO
   end
 
   private def probe_kernel_queued : Nil
+    kernel_queued
+  end
+
+  # Darwin arm64 passes a variadic ioctl's third argument on the stack.
+  # A fixed third argument stays in a register, libc writes the count
+  # through some other address, and this local (still 0) is what we log.
+  # GitHub d5a7977 / 37136012191: fionread=0 on the four cells that then
+  # died with SIGTRAP, fionread=none where ioctl returned -1.
+  private def kernel_queued : Int32?
     pending = uninitialized LibC::Int
     pending = 0
     ret = MongoCsotProbe.ioctl(@raw.fd, 0x4004667f_u64, pointerof(pending))
-    self.class.recorded_fionread = ret == -1 ? nil : pending.to_i32
+    if ret == -1
+      self.class.recorded_fionread = nil
+      self.class.recorded_fionread_errno = Errno.value.value.to_i32
+      return nil
+    end
+    queued = pending.to_i32
+    self.class.recorded_fionread = queued
+    self.class.recorded_fionread_errno = 0
+    queued
   end
 
   private def csot_slice_wait : Time::Span
@@ -556,7 +580,8 @@ end
   @[Link("c")]
   lib MongoCsotProbe
     # Darwin FIONREAD (_IOR('f', 127, int) == 0x4004667f). Bytes queued on the fd.
-    fun ioctl(fd : LibC::Int, request : LibC::ULong, arg : LibC::Int*) : LibC::Int
+    # ioctl is variadic. On arm64 Darwin the third argument is on the stack.
+    fun ioctl(fd : LibC::Int, request : LibC::ULong, ...) : LibC::Int
   end
 
   class ::Socket
