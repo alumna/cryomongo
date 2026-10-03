@@ -697,6 +697,7 @@ class Mongo::Client
       leftover_positive = left > Time::Span.zero
       leftover_at_wrap = leftover_positive ? left : Time::Span.zero
       Mongo::Connection::AwaitReadIO.recorded_leftover_at_wrap = leftover_at_wrap
+      Mongo::Connection::AwaitReadIO.clear_csot_read_timeout
       if ENV["CSOT_WRAP_TRACE"]? == "1"
         STDERR.puts "CSOT leftover Instant at wrap leftover_ms=#{leftover_at_wrap.total_milliseconds}"
       end

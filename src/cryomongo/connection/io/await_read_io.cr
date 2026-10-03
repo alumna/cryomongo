@@ -82,6 +82,16 @@ class Mongo::Connection::AwaitReadIO < IO
   # Last CSOT wrap leftover Instant (spec / UTF measurement).
   class_property recorded_leftover_at_wrap : Time::Span = Time::Span.zero
   class_property recorded_leftover_after_write : Time::Span = Time::Span.zero
+  # Set only when a CSOT read raises. Cleared on the next CSOT wrap.
+  # waited is from the first read of this wrap until the raise.
+  # leftover_at_timeout is deadline minus now at the raise (negative if late).
+  class_property recorded_waited : Time::Span? = nil
+  class_property recorded_leftover_at_timeout : Time::Span? = nil
+
+  def self.clear_csot_read_timeout : Nil
+    self.recorded_waited = nil
+    self.recorded_leftover_at_timeout = nil
+  end
 
   def initialize(
     @inner : IO,
@@ -98,13 +108,17 @@ class Mongo::Connection::AwaitReadIO < IO
     # Instant cap for last-read. Nil until leftover first hits 0 on a
     # leftover >0 CSOT wrap.
     @last_read_until = nil
+    # First read() of this wrap. The write happens before that.
+    @wait_started = nil
   end
 
   getter deadline : Time::Instant?
 
   @last_read_until : Time::Instant?
+  @wait_started : Time::Instant?
 
   def read(slice : Bytes) : Int32
+    @wait_started ||= Time.instant
     # Raw sockets and TLS both use sliced wait_readable. Bytes wake the
     # fiber. A slice timer wakes it when the server is still holding the
     # reply, so `interrupt` is visible within one slice. Do not LibC.read
@@ -234,6 +248,14 @@ class Mongo::Connection::AwaitReadIO < IO
   # Linux does not set the flag here (Ubuntu 24/24 already closes the socket
   # in the command rescue). Darwin only: GitHub `8cb330d`.
   private def raise_read_timeout : NoReturn
+    if @csot
+      if started = @wait_started
+        self.class.recorded_waited = Time.instant - started
+      end
+      if deadline = @deadline
+        self.class.recorded_leftover_at_timeout = deadline - Time.instant
+      end
+    end
     {% if flag?(:darwin) %}
       @connection.interrupt if @csot && !@connection.interrupted?
     {% end %}
