@@ -1,5 +1,5 @@
 name: cryomongo
-version: 1.0.0-beta
+version: 1.0.0
 
 authors:
   - elbywan <elbywan@hotmail.com>
@@ -19,7 +19,7 @@ dependencies:
   # still a struct). Local specs use shard.override.yml.
   bson:
     github: alumna/bson.cr
-    version: 0.9.3
+    version: ">=1.0.0"
   pipe:
     github: jgaskins/pipe
   dns:
@@ -27,10 +27,10 @@ dependencies:
     branch: main
   snappy:
     github: naqvis/snappy
-    version: "~> 0.2.0"
+    version: ">= 0.2.0"
   zstd:
     github: didactic-drunk/zstd.cr
-    version: "~> 1.2.0"
+    version: ">= 1.2.0"
 
 targets:
   cryomongo:

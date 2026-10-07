@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 - 2026-10-07
 
 ### Performance
 * **receive:** Pool and owned-frame buffers are pointer-free. They are not zeroed and the GC does not scan message bytes.

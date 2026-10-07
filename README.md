@@ -9,7 +9,7 @@
 
 <hr/>
 
-A MongoDB driver in Crystal. **1.0.0-beta.** No mongo-c-driver. **Linux only**, tested on **MongoDB 8.0** with Crystal 1.21. macOS and Windows are not supported.
+A MongoDB driver in Crystal. No mongo-c-driver. **Linux only**, tested on **MongoDB 8.0** with Crystal 1.21. macOS and Windows are not supported.
 
 zstd needs libzstd. Field encryption needs **libmongocrypt 1.20.4**. Auto-encryption also needs **crypt_shared** (`mongo_crypt_v1.so`). Setup is in [Encryption](#encryption).
 
