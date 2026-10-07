@@ -6,7 +6,7 @@ module Mongo::Messages
     size = header.body_size
     raise Mongo::Error.new("Invalid OP_COMPRESSED: truncated header") if size < 9
 
-    buf = Bytes.new(size)
+    buf = BufferPool.atomic_bytes(size)
     read_exact(io, buf)
 
     original = IO::ByteFormat::LittleEndian.decode(Int32, buf[0, 4])

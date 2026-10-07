@@ -21,11 +21,18 @@ module Mongo::Messages::BufferPool
       buf = received
     else
       cap = min_size > DEFAULT_SIZE ? min_size : DEFAULT_SIZE
-      buf = Bytes.new(cap)
+      buf = atomic_bytes(cap)
     end
     return buf if buf.size >= min_size
     checkin(buf)
-    Bytes.new(min_size)
+    atomic_bytes(min_size)
+  end
+
+  # BSON and OP_MSG bytes hold no Crystal pointers.
+  def atomic_bytes(size : Int) : Bytes
+    return Bytes.empty if size <= 0
+    ptr = GC.malloc_atomic(size).as(Pointer(UInt8))
+    Slice.new(ptr, size)
   end
 
   def checkin(buf : Bytes) : Nil
@@ -44,7 +51,9 @@ module Mongo::Messages::BufferPool
   # Wave 55: the walk must use pin.bytes, not only an ensure pin.
   def copy_and_checkin(pool_buf : Bytes, used : Int32) : Bytes
     begin
-      owned = Bytes.new(used)
+      # Pointer-free and not zeroed. The copy fills every used byte.
+      # A scanned buffer would treat message bytes as GC pointers.
+      owned = atomic_bytes(used)
       # copy_to(Slice) requires target.size >= source.size. The pool buffer
       # is often 16KiB; *used* is the frame. Copy only that prefix.
       owned.copy_from(pool_buf[0, used])

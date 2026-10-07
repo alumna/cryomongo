@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Performance
+* **receive:** Pool and owned-frame buffers are pointer-free. They are not zeroed and the GC does not scan message bytes.
+* **insert:** A missing `_id` is prepended as raw bytes. Binary subtype stays as it was. The document is not encoded a second time.
+
 ## 1.0.0-beta - 2026-10-03
 
 Client-Side Field Level Encryption (CSFLE) on Linux, for MongoDB 8.0. Unreleased as **1.0.0-beta** until tagged.
