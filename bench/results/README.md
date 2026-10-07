@@ -29,16 +29,18 @@ Example: `2026-08-23T203227Z-full-replica-set.json`
 
 From the project root:
 
+Live runs must set `w=1`. The runner does not add a write concern. Files through `2026-10-07` have no `w`; do not compare their write composites to a `w=1` run. See `BENCHMARK.md`.
+
 ```bash
 # Laptop / default Crystal build
-MONGODB_URI='mongodb://localhost:27017/?replicaSet=rs0' crystal run bench/driver_bench.cr
+MONGODB_URI='mongodb://localhost:27017/?replicaSet=rs0&w=1' crystal run bench/driver_bench.cr
 
-# Reference run (spec time bounds, --release)
+# Reference run (spec time bounds, --release, w:1)
 shards build --release driver_bench
-BENCH_FULL=1 MONGODB_URI='mongodb://localhost:27017/?replicaSet=rs0' bin/driver_bench
+BENCH_FULL=1 MONGODB_URI='mongodb://localhost:27017/?replicaSet=rs0&w=1' bin/driver_bench
 ```
 
-Then point `BENCHMARK.md` **Latest numbers** at the new `full` file if that run should be the public snapshot. Live DriverBench and BSON-only rematch are two snapshots; do not fold them into one table.
+Then point `BENCHMARK.md` **Latest numbers** at the new `full` file if that run should be the public snapshot. Say that the live tasks used `w=1`. Live DriverBench and BSON-only rematch stay separate; do not fold them into one table.
 
 Current files:
 
@@ -51,8 +53,10 @@ bench/results/
   2026-08-21T100223Z-full-replica-set.json       full --release, no client bulkWrite
   2026-08-23T200927Z-short-standalone.json       short --release with client bulkWrite
   2026-08-23T203227Z-full-replica-set.json       full --release with client bulkWrite (bson 0.8.1)
-  2026-09-01T223259Z-full-replica-set.json       full --release, bson 0.9.0 (current live snapshot)
+  2026-09-01T223259Z-full-replica-set.json       full --release, bson 0.9.0, 3-member rs0
   2026-09-02T112234Z-full-bson-only.json         full --release, bson 0.9.2, BSON only
+  2026-10-07T173751Z-full-replica-set.json       full --release, bson 0.9.3 workbench, 1-member rs0, no w
+  2026-10-07T183707Z-full-replica-set.json       full --release, bson 0.9.3 workbench, 1-member rs0, w:1 (current snapshot)
 ```
 
 Client `bulkWrite` tasks (`small client bulkWrite`, `large client bulkWrite`, `small client bulkWrite mixed`) run on MongoDB 8.0 and enter MultiBench, WriteBench, and DriverBench. Older JSON files in this folder do not have those rows; composites from those files omit the missing names.

@@ -18,23 +18,29 @@ module Mongo::Commands::Insert
       if src.has_key?("_id")
         src
       else
-        id = BSON::ObjectId.new
-        BSON.build do |builder|
-          builder["_id"] = id
-          # Keep binary subtype (encrypted 0x06, UUID 0x04). `[]=` of Bytes is generic 0x00.
-          src.each { |key, value, code, subtype|
-            if value.is_a?(BSON) && code.array?
-              builder.append_array(key, value)
-            elsif code.binary? && value.is_a?(Bytes)
-              st = subtype || BSON::Binary::SubType::Generic
-              builder[key] = BSON::Binary.new(st, value)
-            else
-              builder[key] = value
-            end
-          }
-        end
+        # Prepend `_id` as raw bytes. A second encode would allocate every
+        # key and would turn binary subtype 0x06 into generic 0x00.
+        prepend_id(src)
       end
     }
+  end
+
+  # Document size grows by the `_id` field: type + "_id" + NUL + 12 bytes.
+  private def prepend_id(src : BSON) : BSON
+    fields = src.size - 5
+    total = src.size + 17
+    bytes = Mongo::Messages::BufferPool.atomic_bytes(total)
+    ptr = bytes.to_unsafe
+    IO::ByteFormat::LittleEndian.encode(total.to_i32, bytes[0, 4])
+    ptr[4] = 0x07_u8
+    "_id".to_unsafe.copy_to(ptr + 5, 3)
+    ptr[8] = 0_u8
+    id = BSON::ObjectId.new
+    id.to_slice.copy_to(bytes[9, 12])
+    # Field bytes start after the 4-byte header. The old terminator is not copied.
+    src.data[4, fields].copy_to(bytes[21, fields]) if fields > 0
+    bytes[total - 1] = 0_u8
+    BSON.view(bytes)
   end
 
   # Returns a pair of OP_MSG body and sequences associated with the command and arguments.
