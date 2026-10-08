@@ -44,7 +44,7 @@ zstd needs libzstd. Field encryption needs **libmongocrypt 1.20.4**. Auto-encryp
 
 [`elbywan/cryomongo`](https://github.com/elbywan/cryomongo) is the original driver. Its author is no longer maintaining that shard. This repository, [`alumna/cryomongo`](https://github.com/alumna/cryomongo), began as a temporary fork and is now the shard to install.
 
-**1.0.0-beta** is Linux, Crystal 1.21, and MongoDB 8.0 (wire 25 through 29). It includes the core driver and local-KMS client-side encryption. The public API can still change before 1.0.0.
+Current version supports Linux, Crystal 1.21+, and MongoDB 8.0 (wire 25 through 29). It includes the core driver and local-KMS client-side encryption. The public API can still change before 1.0.0.
 
 Not in this version: macOS, Windows, Atlas Search, cloud KMS, `MONGODB-AWS`, `MONGODB-OIDC`, and Queryable Encryption prefix / suffix / substring (MongoDB 8.2+). Open work: [ROADMAP.md](ROADMAP.md).
 
@@ -79,7 +79,6 @@ Linux. CI tests Crystal 1.21. `shard.yml` allows >= 1.20.0.
 dependencies:
   cryomongo:
     github: alumna/cryomongo
-    version: 1.0.0-beta
 ```
 
 Then `shards install`.
