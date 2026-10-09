@@ -35,6 +35,9 @@ jobs:
     # 60 min with no utf-timing artifact. 45 min kills a hang.
     # Do not use 25 min. Linux only.
     timeout-minutes: 45
+    # 100% AWS - no Docker Hub
+    env:
+      MONGO_IMAGE: public.ecr.aws/docker/library/mongo:8.0
     strategy:
       fail-fast: false
       matrix:

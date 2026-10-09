@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+* TLS loads an encrypted client key through `openssl_ext` **>= 2.8.5**. That shard owns `PEM_read_bio_PrivateKey` and `EVP_PKEY_free`. A program that requires both compiles. PKCS#8 and traditional PEM behavior is unchanged.
+
 ## 1.0.0 - 2026-10-07
 
 ### Performance
