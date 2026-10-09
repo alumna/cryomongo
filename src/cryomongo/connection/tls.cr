@@ -1,9 +1,12 @@
 require "openssl"
+require "openssl_ext/lib_crypto"
 
 # TLS context for a MongoDB socket. Crystal's OpenSSL wrapper has no password
 # argument on private_key=. OpenSSL 3 PKCS#8 also ignores
 # SSL_CTX_set_default_passwd_cb on SSL_CTX_use_PrivateKey_file, so encrypted
-# keys are loaded with PEM_read_bio_PrivateKey. OCSP stapling follows URI flags.
+# keys are loaded with PEM_read_bio_PrivateKey. openssl_ext owns that symbol,
+# EVP_PKEY_free, and BIO_new_file. Crystal allows one signature per C symbol,
+# so this file calls those bindings. OCSP stapling follows URI flags.
 module Mongo::TLS
   extend self
 
@@ -67,26 +70,20 @@ module Mongo::TLS
     userdata = Box.box(password)
     bio = LibCrypto.bio_new_file(path, "r")
     raise OpenSSL::Error.new("BIO_new_file") if bio.null?
-    pkey = Pointer(Void).null
+    pkey = Pointer(LibCrypto::EvpPKey).null
     begin
-      pkey = LibCrypto.pem_read_bio_privatekey(bio, Pointer(Void*).null, PASSWD_CB, userdata)
+      pkey = LibCrypto.pem_read_bio_private_key(bio, Pointer(LibCrypto::EvpPKey*).null, PASSWD_CB, userdata)
     ensure
       LibCrypto.BIO_free(bio)
     end
     raise OpenSSL::Error.new("PEM_read_bio_PrivateKey") if pkey.null?
     begin
-      ret = LibSSL.ssl_ctx_use_privatekey(handle, pkey)
+      ret = LibSSL.ssl_ctx_use_privatekey(handle, pkey.as(Void*))
       raise OpenSSL::Error.new("SSL_CTX_use_PrivateKey") unless ret == 1
     ensure
       LibCrypto.evp_pkey_free(pkey)
     end
   end
-end
-
-lib LibCrypto
-  fun bio_new_file = BIO_new_file(filename : UInt8*, mode : UInt8*) : Bio*
-  fun pem_read_bio_privatekey = PEM_read_bio_PrivateKey(bp : Bio*, x : Void**, cb : (LibC::Char*, LibC::Int, LibC::Int, Void*) -> LibC::Int, u : Void*) : Void*
-  fun evp_pkey_free = EVP_PKEY_free(pkey : Void*)
 end
 
 lib LibSSL
